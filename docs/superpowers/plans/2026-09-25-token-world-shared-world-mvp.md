@@ -69,7 +69,7 @@ Recommended account flow is email magic-link sign-in across both platforms. Reco
 - [ ] Confirm invite expiry, one-use behavior, and whether an owner may transfer ownership or must dissolve the world on departure.
 - [ ] Confirm device-scoped dedupe for MVP or select account-scoped pseudonymous event hashes; device-scoped dedupe is recommended and does not catch a user manually copying the same source history onto another device.
 - [ ] Confirm one shared world per account or multiple shared worlds; one shared world per account is recommended for MVP, while solo progress remains local until sharing starts.
-- [ ] Confirm the reviewed `K`, day boundary, and milestone settings from the local desktop plan before defining the server growth aggregate.
+- [ ] Use the reviewed `K = 100,000` and confirm the day boundary and milestone settings from the local desktop plan before defining the server growth aggregate.
 - [ ] Inspect remote Git refs and branch protection before creating provider files; preserve any existing remote history.
 
 ### Task 1: Define the aggregate-only sync contract
