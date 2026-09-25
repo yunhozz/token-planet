@@ -44,7 +44,10 @@ function App() {
       if (active) { setSnapshot(event.payload); setError(false); }
     }).catch(() => () => {});
     const unlistenCompact = listen("show-compact", () => { if (active) setDetail(false); }).catch(() => () => {});
-    return () => { active = false; void unlisten.then((stop) => stop()); void unlistenCompact.then((stop) => stop()); };
+    const unlistenSync = listen("sync-status-updated", () => {
+      void sharing.state().then((value) => { if (active) setShared(value); }).catch(() => {});
+    }).catch(() => () => {});
+    return () => { active = false; void unlisten.then((stop) => stop()); void unlistenCompact.then((stop) => stop()); void unlistenSync.then((stop) => stop()); };
   }, []);
 
   useEffect(() => {

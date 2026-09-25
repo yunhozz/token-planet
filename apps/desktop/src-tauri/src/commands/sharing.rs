@@ -1,11 +1,11 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::sync::auth::{AuthConfig, SessionStore, StoredSession, SupabaseAuthClient};
-use crate::sync::client::{InviteInfo, InviteLink, SupabaseSyncClient, WorldMember};
+use crate::sync::auth::{AuthConfig, AuthError, SessionStore, StoredSession, SupabaseAuthClient};
+use crate::sync::client::{InviteInfo, InviteLink, SupabaseSyncClient, SyncError, WorldMember};
 use crate::AppState;
 
-#[derive(Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 pub struct SharedWorld {
     id: String,
     name: String,
@@ -38,6 +38,46 @@ fn local_state(phase: &'static str, email: Option<String>) -> SharingState {
         pending: 0,
         last_synced_at: None,
     }
+}
+
+fn offline_state(
+    state: &AppState,
+    user_id: &str,
+    email: Option<String>,
+) -> Result<SharingState, String> {
+    let mut ledger = state.ledger.lock().map_err(|_| "로컬 공동 세계 오류")?;
+    if let Some((world_id, cached_user_id, timezone)) = ledger
+        .cached_world_scope()
+        .map_err(|_| "로컬 공동 세계 오류")?
+    {
+        if cached_user_id != user_id {
+            return Err("다른 계정의 공동 세계 정보입니다".into());
+        }
+        ledger
+            .prepare_shared_snapshots(&world_id, user_id, timezone)
+            .map_err(|_| "공유 집계를 준비할 수 없습니다")?;
+    }
+    let world: SharedWorld = serde_json::from_str(
+        &ledger
+            .cached_world_view()
+            .map_err(|_| "로컬 공동 세계 오류")?
+            .ok_or("저장된 공동 세계가 없습니다")?,
+    )
+    .map_err(|_| "저장된 공동 세계 정보가 잘못되었습니다")?;
+    let paused = ledger
+        .sharing_paused()
+        .map_err(|_| "로컬 동기화 상태 오류")?;
+    let pending = ledger
+        .pending_snapshot_count()
+        .map_err(|_| "로컬 대기열 오류")?;
+    Ok(SharingState {
+        phase: "shared",
+        email,
+        world: Some(world),
+        sync_status: if paused { "paused" } else { "failed" },
+        pending,
+        last_synced_at: None,
+    })
 }
 
 fn configured() -> Result<AuthConfig, String> {
@@ -79,28 +119,55 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
         return Ok(local_state("signed_out", None));
     }
     let auth = SupabaseAuthClient::new(config.clone());
-    let session = auth
-        .session(&store)
-        .await
-        .map_err(|_| "로그인 세션을 확인할 수 없습니다")?;
+    let session = match auth.session(&store).await {
+        Ok(session) => session,
+        Err(AuthError::Transport) => {
+            let saved = store
+                .load()
+                .map_err(|_| "로그인 정보를 읽을 수 없습니다")?
+                .ok_or("로그인 정보가 없습니다")?;
+            return offline_state(&state, &saved.user.id, saved.user.email);
+        }
+        Err(_) => return Err("로그인 세션을 확인할 수 없습니다".into()),
+    };
     let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
     let email = session.user.email.clone();
-    let Some(shell) = client
-        .current_world(&session.access_token)
-        .await
-        .map_err(|_| "공동 세계를 불러올 수 없습니다")?
-    else {
+    let Some(shell) = (match client.current_world(&session.access_token).await {
+        Ok(shell) => shell,
+        Err(SyncError::Transport) => return offline_state(&state, &session.user.id, email),
+        Err(_) => return Err("공동 세계를 불러올 수 없습니다".into()),
+    }) else {
         return Ok(local_state("signed_in", email));
     };
-    let summary = client
-        .world_summary(&session.access_token, &shell.id)
-        .await
-        .map_err(|_| "세계 성장 상태를 불러올 수 없습니다")?;
+    let summary = match client.world_summary(&session.access_token, &shell.id).await {
+        Ok(summary) => summary,
+        Err(SyncError::Transport) => return offline_state(&state, &session.user.id, email),
+        Err(_) => return Err("세계 성장 상태를 불러올 수 없습니다".into()),
+    };
+    let timezone = shell.timezone.parse().map_err(|_| "세계 시간대 오류")?;
+    let world = SharedWorld {
+        id: shell.id,
+        name: shell.name,
+        timezone: shell.timezone,
+        is_owner: shell.owner_id == session.user.id,
+        member_count: summary.member_count,
+        known_tokens: summary.known_tokens,
+        growth_credit: summary.growth_credit,
+        stage: summary.stage,
+        progress_to_next: summary.progress_to_next,
+        incomplete: summary.incomplete,
+    };
     let (paused, pending) = {
-        let ledger = state
+        let mut ledger = state
             .ledger
             .lock()
             .map_err(|_| "로컬 동기화 상태를 읽을 수 없습니다")?;
+        ledger
+            .prepare_shared_snapshots(&world.id, &session.user.id, timezone)
+            .map_err(|_| "공유 집계를 준비할 수 없습니다")?;
+        ledger
+            .set_cached_world_view(&serde_json::to_string(&world).map_err(|_| "세계 정보 오류")?)
+            .map_err(|_| "세계 정보를 저장할 수 없습니다")?;
         (
             ledger
                 .sharing_paused()
@@ -113,20 +180,16 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
     Ok(SharingState {
         phase: "shared",
         email,
-        world: Some(SharedWorld {
-            id: shell.id,
-            name: shell.name,
-            timezone: shell.timezone,
-            is_owner: shell.owner_id == session.user.id,
-            member_count: summary.member_count,
-            known_tokens: summary.known_tokens,
-            growth_credit: summary.growth_credit,
-            stage: summary.stage,
-            progress_to_next: summary.progress_to_next,
-            incomplete: summary.incomplete,
-        }),
+        world: Some(world),
         sync_status: if paused {
             "paused"
+        } else if state
+            .sync_failed
+            .lock()
+            .map(|failed| *failed)
+            .unwrap_or(false)
+        {
+            "failed"
         } else if pending > 0 {
             "queued"
         } else {
@@ -243,12 +306,14 @@ pub async fn pause_sharing(
     paused: bool,
     state: State<'_, AppState>,
 ) -> Result<SharingState, String> {
+    let _gate = state.sync_gate.lock().await;
     state
         .ledger
         .lock()
         .map_err(|_| "로컬 동기화 상태를 변경할 수 없습니다")?
         .set_sharing_paused(paused)
         .map_err(|_| "로컬 동기화 상태를 변경할 수 없습니다")?;
+    drop(_gate);
     get_sharing_state(state).await
 }
 
@@ -268,6 +333,7 @@ pub async fn transfer_world_owner(
 
 #[tauri::command]
 pub async fn leave_world(state: State<'_, AppState>) -> Result<SharingState, String> {
+    let _gate = state.sync_gate.lock().await;
     let (client, session) = signed_in().await?;
     let world_id = world_id(&client, &session).await?;
     client
@@ -278,13 +344,15 @@ pub async fn leave_world(state: State<'_, AppState>) -> Result<SharingState, Str
         .ledger
         .lock()
         .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?
-        .clear_outbox()
+        .clear_sharing_scope()
         .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
+    drop(_gate);
     get_sharing_state(state).await
 }
 
 #[tauri::command]
 pub async fn delete_synced_usage(state: State<'_, AppState>) -> Result<SharingState, String> {
+    let _gate = state.sync_gate.lock().await;
     let (client, session) = signed_in().await?;
     let world_id = world_id(&client, &session).await?;
     client
@@ -296,18 +364,26 @@ pub async fn delete_synced_usage(state: State<'_, AppState>) -> Result<SharingSt
             .ledger
             .lock()
             .map_err(|_| "로컬 동기화 상태를 변경할 수 없습니다")?;
+        let timezone = ledger
+            .cached_world_scope()
+            .map_err(|_| "세계 시간대를 읽을 수 없습니다")?
+            .ok_or("세계 시간대를 읽을 수 없습니다")?
+            .2;
+        let today = chrono::Utc::now()
+            .with_timezone(&timezone)
+            .format("%Y-%m-%d")
+            .to_string();
         ledger
-            .set_sharing_paused(true)
+            .stop_sharing_through(&today)
             .map_err(|_| "로컬 동기화 상태를 변경할 수 없습니다")?;
-        ledger
-            .clear_outbox()
-            .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
     }
+    drop(_gate);
     get_sharing_state(state).await
 }
 
 #[tauri::command]
 pub async fn sign_out(state: State<'_, AppState>) -> Result<SharingState, String> {
+    let _gate = state.sync_gate.lock().await;
     let config = configured()?;
     let store = SessionStore::new(&config).map_err(|_| "보안 저장소를 열 수 없습니다")?;
     if let Some(session) = store.load().map_err(|_| "로그인 정보를 읽을 수 없습니다")?
@@ -323,7 +399,7 @@ pub async fn sign_out(state: State<'_, AppState>) -> Result<SharingState, String
         .ledger
         .lock()
         .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?
-        .clear_outbox()
+        .clear_cached_world_view()
         .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
     Ok(local_state("signed_out", None))
 }

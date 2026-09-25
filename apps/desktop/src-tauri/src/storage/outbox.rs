@@ -1,6 +1,9 @@
+use std::collections::BTreeMap;
+
+use chrono_tz::Tz;
 use rusqlite::{params, OptionalExtension};
 
-use crate::domain::usage::Agent;
+use crate::domain::usage::{Agent, UsageCoverage};
 use crate::storage::ledger::{agent_name, Ledger};
 use crate::sync::aggregate::DailyUsageSnapshot;
 
@@ -20,6 +23,217 @@ impl From<rusqlite::Error> for OutboxError {
 }
 
 impl Ledger {
+    fn setting(&self, key: &str) -> Result<Option<String>, OutboxError> {
+        self.connection
+            .query_row("SELECT value FROM setting WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()
+            .map_err(Into::into)
+    }
+
+    fn set_setting(&self, key: &str, value: &str) -> Result<(), OutboxError> {
+        self.connection.execute(
+            "INSERT INTO setting(key,value) VALUES (?1,?2)
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, value],
+        )?;
+        Ok(())
+    }
+
+    pub fn cached_world_scope(&self) -> Result<Option<(String, String, Tz)>, OutboxError> {
+        let Some(world_id) = self.setting("sharing_world_id")? else {
+            return Ok(None);
+        };
+        let user_id = self
+            .setting("sharing_user_id")?
+            .ok_or(OutboxError::InvalidPayload)?;
+        let timezone = self
+            .setting("sharing_world_timezone")?
+            .ok_or(OutboxError::InvalidPayload)?
+            .parse()
+            .map_err(|_| OutboxError::InvalidPayload)?;
+        Ok(Some((world_id, user_id, timezone)))
+    }
+
+    pub fn cached_world_view(&self) -> Result<Option<String>, OutboxError> {
+        self.setting("sharing_cached_world")
+    }
+
+    pub fn set_cached_world_view(&self, value: &str) -> Result<(), OutboxError> {
+        self.set_setting("sharing_cached_world", value)
+    }
+
+    pub fn clear_cached_world_view(&self) -> Result<(), OutboxError> {
+        self.connection
+            .execute("DELETE FROM setting WHERE key='sharing_cached_world'", [])?;
+        Ok(())
+    }
+
+    pub fn ensure_world_scope(
+        &mut self,
+        world_id: &str,
+        user_id: &str,
+        timezone: Tz,
+    ) -> Result<(), OutboxError> {
+        if self.setting("sharing_world_id")?.as_deref() != Some(world_id)
+            || self.setting("sharing_user_id")?.as_deref() != Some(user_id)
+        {
+            self.clear_outbox()?;
+            self.connection.execute(
+                "DELETE FROM setting WHERE key IN ('sharing_skip_through','sharing_cached_world')",
+                [],
+            )?;
+            self.set_sharing_paused(false)?;
+        }
+        self.set_setting("sharing_world_id", world_id)?;
+        self.set_setting("sharing_user_id", user_id)?;
+        self.set_setting("sharing_world_timezone", &timezone.to_string())?;
+        Ok(())
+    }
+
+    pub fn clear_sharing_scope(&mut self) -> Result<(), OutboxError> {
+        self.clear_outbox()?;
+        self.connection.execute("DELETE FROM setting WHERE key IN ('sharing_world_id','sharing_user_id','sharing_world_timezone','sharing_skip_through','sharing_cached_world')", [])?;
+        self.set_sharing_paused(false)
+    }
+
+    pub fn stop_sharing_through(&mut self, date: &str) -> Result<(), OutboxError> {
+        if chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").is_err() {
+            return Err(OutboxError::InvalidPayload);
+        }
+        self.set_sharing_paused(true)?;
+        self.set_setting("sharing_skip_through", date)?;
+        self.clear_outbox()
+    }
+
+    pub fn prepare_shared_snapshots(
+        &mut self,
+        world_id: &str,
+        user_id: &str,
+        timezone: Tz,
+    ) -> Result<(), OutboxError> {
+        self.ensure_world_scope(world_id, user_id, timezone)?;
+        let device_id = match self.setting("sharing_device_id")? {
+            Some(id) => id,
+            None => {
+                let id = uuid::Uuid::new_v4().to_string();
+                self.set_setting("sharing_device_id", &id)?;
+                id
+            }
+        };
+        let mut dates: BTreeMap<
+            (String, String),
+            Option<crate::storage::ledger::SharedDailyTotal>,
+        > = BTreeMap::new();
+        for total in self
+            .shared_daily_totals(timezone)
+            .map_err(|_| OutboxError::Database)?
+        {
+            dates.insert(
+                (total.bucket_date.clone(), agent_name(total.agent).into()),
+                Some(total),
+            );
+        }
+        let existing: Vec<DailyUsageSnapshot> = {
+            let mut statement = self
+                .connection
+                .prepare("SELECT payload_json FROM outbox_snapshot WHERE device_id=?1")?;
+            let snapshots = statement
+                .query_map([&device_id], |row| row.get::<_, String>(0))?
+                .map(|row| serde_json::from_str(&row?).map_err(|_| OutboxError::InvalidPayload))
+                .collect::<Result<_, _>>()?;
+            snapshots
+        };
+        let mut old_by_key = BTreeMap::new();
+        for snapshot in existing {
+            dates
+                .entry((
+                    snapshot.bucket_date.clone(),
+                    agent_name(snapshot.agent).into(),
+                ))
+                .or_insert(None);
+            old_by_key.insert(
+                (
+                    snapshot.bucket_date.clone(),
+                    agent_name(snapshot.agent).to_owned(),
+                ),
+                snapshot,
+            );
+        }
+        let today = chrono::Utc::now()
+            .with_timezone(&timezone)
+            .format("%Y-%m-%d")
+            .to_string();
+        for agent in [Agent::Codex, Agent::ClaudeCode] {
+            dates
+                .entry((today.clone(), agent_name(agent).into()))
+                .or_insert(None);
+        }
+        let cutoff = self.setting("sharing_skip_through")?;
+        for ((date, agent_name), total) in dates {
+            if cutoff.as_ref().is_some_and(|cutoff| date <= *cutoff) {
+                continue;
+            }
+            let agent = if agent_name == "codex" {
+                Agent::Codex
+            } else {
+                Agent::ClaudeCode
+            };
+            let enabled = self
+                .agent_enabled(agent)
+                .map_err(|_| OutboxError::Database)?;
+            let (
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                total_tokens,
+                coverage,
+            ) = if !enabled {
+                (None, None, None, None, None, UsageCoverage::UserDisabled)
+            } else if let Some(total) = total {
+                (
+                    total.input_tokens,
+                    total.output_tokens,
+                    total.cache_read_tokens,
+                    total.cache_write_tokens,
+                    total.total_tokens,
+                    total.coverage,
+                )
+            } else {
+                (None, None, None, None, None, UsageCoverage::Unavailable)
+            };
+            let key = (date.clone(), agent_name);
+            let old = old_by_key.get(&key);
+            let revision = old.map_or(1, |old| old.revision);
+            let mut candidate = DailyUsageSnapshot {
+                device_id: device_id.clone(),
+                bucket_date: date,
+                bucket_policy_version: 1,
+                agent,
+                schema_version: 1,
+                revision,
+                input_tokens,
+                output_tokens,
+                cache_read_tokens,
+                cache_write_tokens,
+                total_tokens,
+                coverage,
+                payload_hash: String::new(),
+            }
+            .seal();
+            if old.is_some_and(|old| old == &candidate) {
+                continue;
+            }
+            if old.is_some() {
+                candidate.revision = revision.checked_add(1).ok_or(OutboxError::InvalidPayload)?;
+                candidate = candidate.seal();
+            }
+            self.queue_snapshot(&candidate)?;
+        }
+        Ok(())
+    }
     pub fn sharing_paused(&self) -> Result<bool, OutboxError> {
         let value: Option<String> = self
             .connection
@@ -239,5 +453,140 @@ mod tests {
         ledger.set_sharing_paused(false).unwrap();
         assert!(!ledger.sharing_paused().unwrap());
         assert_eq!(ledger.pending_snapshots().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn preparing_changed_history_increments_revision_without_duplicate_queue_rows() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let first = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
+        ledger.insert(&first).unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        let first_snapshot = ledger
+            .pending_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.agent == Agent::Codex && snapshot.bucket_date == "2026-09-24")
+            .unwrap();
+        assert_eq!(first_snapshot.revision, 1);
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        let unchanged = ledger
+            .pending_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.agent == Agent::Codex && snapshot.bucket_date == "2026-09-24")
+            .unwrap();
+        assert_eq!(unchanged.revision, 1);
+        let second = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T16:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r2","usage":{"total_tokens":8}}}"#).unwrap().unwrap();
+        ledger.insert(&second).unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        let changed = ledger
+            .pending_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.agent == Agent::Codex && snapshot.bucket_date == "2026-09-24")
+            .unwrap();
+        assert_eq!(changed.revision, 2);
+        assert_eq!(changed.total_tokens, Some(50));
+        assert_eq!(changed.device_id, first_snapshot.device_id);
+    }
+
+    #[test]
+    fn deletion_cutoff_prevents_old_history_from_reappearing_after_resume() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let old = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
+        ledger.insert(&old).unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        assert!(ledger
+            .pending_snapshots()
+            .unwrap()
+            .iter()
+            .any(|snapshot| snapshot.bucket_date == "2026-09-24"
+                && snapshot.total_tokens == Some(42)));
+        ledger.stop_sharing_through("2026-09-25").unwrap();
+        ledger.set_sharing_paused(false).unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        assert!(ledger
+            .pending_snapshots()
+            .unwrap()
+            .iter()
+            .all(|snapshot| snapshot.bucket_date.as_str() > "2026-09-25"));
+    }
+
+    #[test]
+    fn same_account_reuses_revision_but_another_account_starts_fresh() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        let original = ledger.pending_snapshots().unwrap();
+        ledger
+            .acknowledge_snapshot(
+                &original[0].device_id,
+                &original[0].bucket_date,
+                original[0].agent,
+                1,
+            )
+            .unwrap();
+        ledger.clear_cached_world_view().unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .next_snapshot_revision(
+                    &original[0].device_id,
+                    &original[0].bucket_date,
+                    original[0].agent
+                )
+                .unwrap(),
+            2
+        );
+        ledger
+            .prepare_shared_snapshots("world-1", "member-2", UTC)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .next_snapshot_revision(
+                    &original[0].device_id,
+                    &original[0].bucket_date,
+                    original[0].agent
+                )
+                .unwrap(),
+            2
+        );
+        assert_eq!(ledger.pending_snapshot_count().unwrap(), 2);
+    }
+
+    #[test]
+    fn disabled_agent_replaces_its_prior_total_with_unknown_status() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let record = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
+        ledger.insert(&record).unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        ledger.set_agent_enabled(Agent::Codex, false).unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        let changed = ledger
+            .pending_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|snapshot| snapshot.agent == Agent::Codex && snapshot.bucket_date == "2026-09-24")
+            .unwrap();
+        assert_eq!(changed.revision, 2);
+        assert_eq!(changed.total_tokens, None);
+        assert_eq!(changed.coverage, UsageCoverage::UserDisabled);
     }
 }

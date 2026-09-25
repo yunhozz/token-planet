@@ -6,7 +6,7 @@ pub mod platform;
 pub mod storage;
 pub mod sync;
 
-use std::{fs, io, sync::Mutex, time::Duration};
+use std::{fs, io, sync::Mutex};
 
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, WindowEvent};
 
@@ -18,8 +18,10 @@ use tauri_plugin_dialog::DialogExt;
 
 pub struct AppState {
     config: Mutex<SourceConfig>,
-    ledger: Mutex<Ledger>,
+    pub(crate) ledger: Mutex<Ledger>,
     latest: Mutex<Option<WorldSnapshot>>,
+    pub(crate) sync_failed: Mutex<bool>,
+    pub(crate) sync_gate: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
@@ -186,6 +188,8 @@ pub fn run() {
                 config: Mutex::new(config),
                 ledger: Mutex::new(ledger),
                 latest: Mutex::new(None),
+                sync_failed: Mutex::new(false),
+                sync_gate: tokio::sync::Mutex::new(()),
             };
             let _ = state.scan();
             app.manage(state);
@@ -199,12 +203,20 @@ pub fn run() {
                 let _ = platform::tray::refresh_status(app.handle(), &snapshot);
             }
             let handle = app.handle().clone();
-            std::thread::spawn(move || loop {
-                std::thread::sleep(Duration::from_secs(60));
-                let state = handle.state::<AppState>();
-                if let Ok(summary) = state.scan() {
-                    let _ = platform::tray::refresh_status(&handle, &summary);
-                    let _ = handle.emit("usage-updated", summary);
+            std::thread::spawn(move || {
+                let mut retry = sync::worker::RetryDelay::default();
+                loop {
+                    let state = handle.state::<AppState>();
+                    if let Ok(summary) = state.scan() {
+                        let _ = platform::tray::refresh_status(&handle, &summary);
+                        let _ = handle.emit("usage-updated", summary);
+                    }
+                    let result = tauri::async_runtime::block_on(sync::worker::sync_once(&state));
+                    if let Ok(mut failed) = state.sync_failed.lock() {
+                        *failed = result.is_err();
+                    }
+                    let _ = handle.emit("sync-status-updated", ());
+                    std::thread::sleep(retry.next_after(result.is_ok()));
                 }
             });
             Ok(())

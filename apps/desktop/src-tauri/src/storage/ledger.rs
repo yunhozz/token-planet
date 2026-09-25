@@ -44,7 +44,103 @@ pub struct Ledger {
     pub timezone: Tz,
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SharedDailyTotal {
+    pub agent: Agent,
+    pub bucket_date: String,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub cache_read_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub coverage: UsageCoverage,
+}
+
+fn add_optional(total: &mut Option<u64>, value: Option<i64>) -> Result<(), ScanError> {
+    if let Some(value) = value {
+        *total = Some(
+            total
+                .unwrap_or(0)
+                .checked_add(as_u64(value)?)
+                .ok_or(ScanError::InvalidCount)?,
+        );
+    }
+    Ok(())
+}
+
 impl Ledger {
+    pub fn shared_daily_totals(&self, timezone: Tz) -> Result<Vec<SharedDailyTotal>, ScanError> {
+        let mut statement = self.connection.prepare("SELECT agent,occurred_at_utc,input_tokens,output_tokens,
+            cache_read_tokens,cache_write_tokens,total_tokens,coverage FROM usage_record r
+            WHERE r.kind='response' OR NOT EXISTS (
+                SELECT 1 FROM usage_record other WHERE other.source_id=r.source_id AND other.kind='response' AND other.agent=r.agent
+            )")?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<i64>>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+                row.get::<_, Option<i64>>(4)?,
+                row.get::<_, Option<i64>>(5)?,
+                row.get::<_, Option<i64>>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+        let mut groups: BTreeMap<(String, String), (SharedDailyTotal, bool, bool)> =
+            BTreeMap::new();
+        for row in rows {
+            let (agent, occurred_at, input, output, cache_read, cache_write, total, coverage) =
+                row?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(&occurred_at)
+                .map_err(|_| ScanError::Database)?;
+            let date = timestamp
+                .with_timezone(&timezone)
+                .format("%Y-%m-%d")
+                .to_string();
+            let entry = groups
+                .entry((agent.clone(), date.clone()))
+                .or_insert_with(|| {
+                    (
+                        SharedDailyTotal {
+                            agent: if agent == "codex" {
+                                Agent::Codex
+                            } else {
+                                Agent::ClaudeCode
+                            },
+                            bucket_date: date,
+                            input_tokens: None,
+                            output_tokens: None,
+                            cache_read_tokens: None,
+                            cache_write_tokens: None,
+                            total_tokens: None,
+                            coverage: UsageCoverage::Unavailable,
+                        },
+                        false,
+                        false,
+                    )
+                });
+            add_optional(&mut entry.0.input_tokens, input)?;
+            add_optional(&mut entry.0.output_tokens, output)?;
+            add_optional(&mut entry.0.cache_read_tokens, cache_read)?;
+            add_optional(&mut entry.0.cache_write_tokens, cache_write)?;
+            add_optional(&mut entry.0.total_tokens, total)?;
+            entry.1 |= coverage != "complete";
+            entry.2 |= coverage == "unsupported";
+        }
+        Ok(groups
+            .into_values()
+            .map(|(mut total, incomplete, unsupported)| {
+                total.coverage = match (total.total_tokens, incomplete, unsupported) {
+                    (Some(_), true, _) => UsageCoverage::Partial,
+                    (Some(_), false, _) => UsageCoverage::Complete,
+                    (None, _, true) => UsageCoverage::Unsupported,
+                    (None, _, _) => UsageCoverage::Unavailable,
+                };
+                total
+            })
+            .collect())
+    }
     pub fn saved_timezone(path: &Path) -> Result<Option<Tz>, ScanError> {
         if !path.exists() {
             return Ok(None);
@@ -453,6 +549,23 @@ mod tests {
         assert_eq!(
             ledger.daily_total(Agent::Codex, "2026-09-25").unwrap(),
             Some(42)
+        );
+    }
+
+    #[test]
+    fn shared_daily_totals_use_creator_timezone_and_keep_unknown() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), Seoul).unwrap();
+        let known = codex::parse_line(RESPONSE).unwrap().unwrap();
+        let unknown = codex::parse_line(r#"{"timestamp":"2026-09-24T15:40:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r2"}}"#).unwrap().unwrap();
+        ledger.insert(&known).unwrap();
+        ledger.insert(&unknown).unwrap();
+        let shared = ledger.shared_daily_totals(chrono_tz::UTC).unwrap();
+        assert_eq!(shared.len(), 1);
+        assert_eq!(shared[0].bucket_date, "2026-09-24");
+        assert_eq!(shared[0].total_tokens, Some(42));
+        assert_eq!(
+            shared[0].coverage,
+            crate::domain::usage::UsageCoverage::Partial
         );
     }
 }
