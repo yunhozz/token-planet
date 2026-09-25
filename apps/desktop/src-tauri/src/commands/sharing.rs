@@ -1,7 +1,9 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::sync::auth::{AuthConfig, AuthError, SessionStore, StoredSession, SupabaseAuthClient};
+use crate::sync::auth::{
+    AuthConfig, AuthError, SessionStore, StoredSession, SupabaseAuthClient, SESSION_GATE,
+};
 use crate::sync::client::{InviteInfo, InviteLink, SupabaseSyncClient, SyncError, WorldMember};
 use crate::AppState;
 
@@ -107,6 +109,7 @@ async fn world_id(client: &SupabaseSyncClient, session: &StoredSession) -> Resul
 
 #[tauri::command]
 pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingState, String> {
+    let _gate = state.sync_gate.lock().await;
     let Some(config) = AuthConfig::from_env() else {
         return Ok(local_state("unavailable", None));
     };
@@ -217,6 +220,8 @@ pub async fn verify_email_code(
     code: String,
     state: State<'_, AppState>,
 ) -> Result<SharingState, String> {
+    let _sync_gate = state.sync_gate.lock().await;
+    let _session_gate = SESSION_GATE.lock().await;
     let config = configured()?;
     let session = SupabaseAuthClient::new(config.clone())
         .verify_email_code(&email, &code)
@@ -226,6 +231,8 @@ pub async fn verify_email_code(
         .map_err(|_| "보안 저장소를 열 수 없습니다")?
         .save(&session)
         .map_err(|_| "로그인 정보를 저장할 수 없습니다")?;
+    drop(_session_gate);
+    drop(_sync_gate);
     get_sharing_state(state).await
 }
 
@@ -307,6 +314,14 @@ pub async fn pause_sharing(
     state: State<'_, AppState>,
 ) -> Result<SharingState, String> {
     let _gate = state.sync_gate.lock().await;
+    if !paused {
+        let (client, session) = signed_in().await?;
+        let world_id = world_id(&client, &session).await?;
+        client
+            .resume_my_sync(&session.access_token, &world_id)
+            .await
+            .map_err(|_| "공동 세계 동기화를 재개할 수 없습니다")?;
+    }
     state
         .ledger
         .lock()
@@ -335,17 +350,32 @@ pub async fn transfer_world_owner(
 pub async fn leave_world(state: State<'_, AppState>) -> Result<SharingState, String> {
     let _gate = state.sync_gate.lock().await;
     let (client, session) = signed_in().await?;
-    let world_id = world_id(&client, &session).await?;
+    let shell = client
+        .current_world(&session.access_token)
+        .await
+        .map_err(|_| "공동 세계를 불러올 수 없습니다")?
+        .ok_or("참여 중인 공동 세계가 없습니다")?;
+    let timezone: chrono_tz::Tz = shell.timezone.parse().map_err(|_| "세계 시간대 오류")?;
+    let today = chrono::Utc::now()
+        .with_timezone(&timezone)
+        .format("%Y-%m-%d")
+        .to_string();
     client
-        .leave_world(&session.access_token, &world_id)
+        .leave_world(&session.access_token, &shell.id)
         .await
         .map_err(|_| "세계에서 나갈 수 없습니다. 소유자는 먼저 소유권을 이전하세요")?;
-    state
-        .ledger
-        .lock()
-        .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?
-        .clear_sharing_scope()
-        .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
+    {
+        let mut ledger = state
+            .ledger
+            .lock()
+            .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
+        ledger
+            .stop_sharing_through(&today)
+            .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
+        ledger
+            .clear_sharing_scope()
+            .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
+    }
     drop(_gate);
     get_sharing_state(state).await
 }
@@ -384,6 +414,7 @@ pub async fn delete_synced_usage(state: State<'_, AppState>) -> Result<SharingSt
 #[tauri::command]
 pub async fn sign_out(state: State<'_, AppState>) -> Result<SharingState, String> {
     let _gate = state.sync_gate.lock().await;
+    let _session_gate = SESSION_GATE.lock().await;
     let config = configured()?;
     let store = SessionStore::new(&config).map_err(|_| "보안 저장소를 열 수 없습니다")?;
     if let Some(session) = store.load().map_err(|_| "로그인 정보를 읽을 수 없습니다")?

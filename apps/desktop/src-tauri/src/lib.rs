@@ -33,6 +33,12 @@ impl AppState {
             .clone();
         let mut ledger = self.ledger.lock().map_err(|_| "local ledger unavailable")?;
         let summary = scan_sources(&config, &mut ledger).map_err(|_| "usage scan unavailable")?;
+        ledger
+            .set_source_health(Agent::Codex, summary.codex_source)
+            .map_err(|_| "source health unavailable")?;
+        ledger
+            .set_source_health(Agent::ClaudeCode, summary.claude_code_source)
+            .map_err(|_| "source health unavailable")?;
         let snapshot = world_snapshot(&ledger, summary).map_err(|_| "world growth unavailable")?;
         *self.latest.lock().map_err(|_| "usage status unavailable")? = Some(snapshot.clone());
         Ok(snapshot)

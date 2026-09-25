@@ -59,8 +59,20 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
     };
     let Some(shell) = shell else { return Ok(()) };
     let timezone = shell.timezone.parse().map_err(|_| "세계 시간대 오류")?;
+    let policy = client
+        .my_sync_policy(&session.access_token, &shell.id)
+        .await
+        .map_err(|_| "동기화 정책 확인 실패")?;
     let pending = {
         let mut ledger = state.ledger.lock().map_err(|_| "로컬 대기열 오류")?;
+        ledger
+            .ensure_world_scope(&shell.id, &session.user.id, timezone)
+            .map_err(|_| "세계 동기화 범위 오류")?;
+        if let Some(cutoff) = policy.deleted_through.as_deref() {
+            ledger
+                .adopt_remote_deletion(cutoff, policy.paused)
+                .map_err(|_| "삭제 상태 반영 오류")?;
+        }
         ledger
             .prepare_shared_snapshots(&shell.id, &session.user.id, timezone)
             .map_err(|_| "집계 준비 오류")?;

@@ -8,7 +8,7 @@ use std::{
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
 use rusqlite::{params, OptionalExtension};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
 
@@ -81,7 +81,7 @@ pub struct ScanSummary {
     pub scanned_at_utc: DateTime<Utc>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SourceHealth {
     Ready,

@@ -27,13 +27,13 @@ impl AuthConfig {
     }
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub struct AuthUser {
     pub id: String,
     pub email: Option<String>,
 }
 
-#[derive(Clone, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, PartialEq, Serialize)]
 pub struct StoredSession {
     pub access_token: String,
     pub refresh_token: String,
@@ -48,6 +48,12 @@ pub enum AuthError {
     Rejected(u16),
     InvalidResponse,
     SignedOut,
+}
+
+pub static SESSION_GATE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn can_save_refresh(current: &StoredSession, latest: Option<&StoredSession>) -> bool {
+    latest == Some(current)
 }
 
 pub struct SessionStore {
@@ -163,11 +169,15 @@ impl SupabaseAuthClient {
     }
 
     pub async fn session(&self, store: &SessionStore) -> Result<StoredSession, AuthError> {
+        let _gate = SESSION_GATE.lock().await;
         let current = store.load()?.ok_or(AuthError::SignedOut)?;
         if current.expires_at > chrono::Utc::now().timestamp() + 60 {
             return Ok(current);
         }
         let refreshed = self.refresh(&current.refresh_token).await?;
+        if !can_save_refresh(&current, store.load()?.as_ref()) {
+            return Err(AuthError::SignedOut);
+        }
         store.save(&refreshed)?;
         Ok(refreshed)
     }
@@ -193,7 +203,7 @@ impl SupabaseAuthClient {
 
 #[cfg(test)]
 mod tests {
-    use super::{AuthUser, StoredSession};
+    use super::{can_save_refresh, AuthUser, StoredSession};
 
     #[test]
     fn session_tokens_are_rust_owned_and_not_a_frontend_state() {
@@ -209,5 +219,23 @@ mod tests {
         let stored = serde_json::to_string(&session).unwrap();
         let restored: StoredSession = serde_json::from_str(&stored).unwrap();
         assert_eq!(restored.refresh_token, "refresh");
+    }
+
+    #[test]
+    fn refresh_cannot_restore_a_removed_or_replaced_session() {
+        let original = StoredSession {
+            access_token: "old".into(),
+            refresh_token: "old-refresh".into(),
+            expires_at: 1,
+            user: AuthUser {
+                id: "account-a".into(),
+                email: None,
+            },
+        };
+        let mut replacement = original.clone();
+        replacement.user.id = "account-b".into();
+        assert!(can_save_refresh(&original, Some(&original)));
+        assert!(!can_save_refresh(&original, None));
+        assert!(!can_save_refresh(&original, Some(&replacement)));
     }
 }

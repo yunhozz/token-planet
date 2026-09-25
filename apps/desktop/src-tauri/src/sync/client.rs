@@ -64,6 +64,13 @@ pub struct WorldSummary {
     pub last_update: Option<String>,
 }
 
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct MySyncPolicy {
+    pub deleted_through: Option<String>,
+    pub paused: bool,
+}
+
 pub struct SupabaseSyncClient {
     http: Client,
     base_url: String,
@@ -273,6 +280,34 @@ impl SupabaseSyncClient {
         .await
     }
 
+    pub async fn my_sync_policy(
+        &self,
+        access_token: &str,
+        world_id: &str,
+    ) -> Result<MySyncPolicy, SyncError> {
+        let rows: Vec<MySyncPolicy> = self
+            .post_rpc(
+                access_token,
+                "get_my_sync_policy",
+                &serde_json::json!({ "p_world_id": world_id }),
+            )
+            .await?;
+        one_row(rows)
+    }
+
+    pub async fn resume_my_sync(
+        &self,
+        access_token: &str,
+        world_id: &str,
+    ) -> Result<bool, SyncError> {
+        self.post_rpc(
+            access_token,
+            "resume_my_sync",
+            &serde_json::json!({ "p_world_id": world_id }),
+        )
+        .await
+    }
+
     async fn post_rpc<P: Serialize + ?Sized, R: DeserializeOwned>(
         &self,
         access_token: &str,
@@ -307,7 +342,7 @@ fn one_row<T>(mut rows: Vec<T>) -> Result<T, SyncError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{one_row, SyncError, UploadBody, WorldSummary};
+    use super::{one_row, MySyncPolicy, SyncError, UploadBody, WorldSummary};
     use crate::domain::usage::{Agent, UsageCoverage};
     use crate::sync::aggregate::DailyUsageSnapshot;
 
@@ -373,5 +408,17 @@ mod tests {
             Err(SyncError::InvalidResponse)
         ));
         assert!(one_row(vec![summary]).is_ok());
+    }
+
+    #[test]
+    fn deletion_policy_response_contains_only_own_cutoff_and_pause() {
+        let value = serde_json::json!({"deleted_through":"2026-09-25","paused":true});
+        let policy: MySyncPolicy = serde_json::from_value(value).unwrap();
+        assert_eq!(policy.deleted_through.as_deref(), Some("2026-09-25"));
+        assert!(policy.paused);
+        assert!(serde_json::from_value::<MySyncPolicy>(serde_json::json!({
+            "deleted_through": null, "paused": false, "member_totals": [42]
+        }))
+        .is_err());
     }
 }

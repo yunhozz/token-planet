@@ -56,7 +56,7 @@ function App() {
     sharing.listInvites().then((value) => { if (active) setInvites(value); }).catch(() => {});
     sharing.listMembers().then((value) => { if (active) setMembers(value); }).catch(() => {});
     return () => { active = false; };
-  }, [shared?.phase, shared?.world?.id, shared?.world?.is_owner]);
+  }, [shared?.phase, shared?.world?.id, shared?.world?.is_owner, shared?.world?.member_count]);
 
   async function changeSharing(action: () => Promise<SharingState>) {
     setSharingBusy(true);
