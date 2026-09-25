@@ -20,6 +20,41 @@ impl From<rusqlite::Error> for OutboxError {
 }
 
 impl Ledger {
+    pub fn sharing_paused(&self) -> Result<bool, OutboxError> {
+        let value: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT value FROM setting WHERE key='sharing_paused'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        Ok(value.as_deref() == Some("true"))
+    }
+
+    pub fn set_sharing_paused(&mut self, paused: bool) -> Result<(), OutboxError> {
+        self.connection.execute(
+            "INSERT INTO setting(key,value) VALUES ('sharing_paused',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [if paused { "true" } else { "false" }],
+        )?;
+        Ok(())
+    }
+
+    pub fn pending_snapshot_count(&self) -> Result<u64, OutboxError> {
+        let count: i64 = self.connection.query_row(
+            "SELECT count(*) FROM outbox_snapshot WHERE revision>acknowledged_revision",
+            [],
+            |row| row.get(0),
+        )?;
+        u64::try_from(count).map_err(|_| OutboxError::Database)
+    }
+
+    pub fn clear_outbox(&mut self) -> Result<(), OutboxError> {
+        self.connection.execute("DELETE FROM outbox_snapshot", [])?;
+        Ok(())
+    }
+
     pub fn queue_snapshot(&mut self, snapshot: &DailyUsageSnapshot) -> Result<(), OutboxError> {
         let revision = i64::try_from(snapshot.revision).map_err(|_| OutboxError::InvalidPayload)?;
         if revision < 1
@@ -192,5 +227,17 @@ mod tests {
         let pending = ledger.pending_snapshots().unwrap();
         assert_eq!(pending[0].total_tokens, None);
         assert_eq!(pending[0].coverage, UsageCoverage::Unavailable);
+    }
+
+    #[test]
+    fn pausing_sync_keeps_pending_local_aggregates() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        ledger.queue_snapshot(&snapshot(1, Some(42))).unwrap();
+        ledger.set_sharing_paused(true).unwrap();
+        assert!(ledger.sharing_paused().unwrap());
+        assert_eq!(ledger.pending_snapshot_count().unwrap(), 1);
+        ledger.set_sharing_paused(false).unwrap();
+        assert!(!ledger.sharing_paused().unwrap());
+        assert_eq!(ledger.pending_snapshots().unwrap().len(), 1);
     }
 }

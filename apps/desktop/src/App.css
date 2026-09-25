@@ -59,10 +59,51 @@ button:focus-visible { outline: 2px solid #dfb68d; outline-offset: 3px; }
 .text-button { padding: 7px 0 7px 10px; border: 0; border-bottom: 1px solid #d9a17e; color: #f1d1b0; background: transparent; font-size: 12px; cursor: pointer; }
 .text-button:hover { color: #fff0db; }
 
+.group-total { display: grid; gap: 3px; margin-top: 15px; padding: 12px 14px; border-left: 2px solid #78b8bb; background: rgba(120, 184, 187, .08); }
+.group-total span { color: #bcd5d8; font-size: 11px; }
+.group-total strong { color: #f0eee1; font: 600 22px/1.2 "Trebuchet MS", "Avenir Next", sans-serif; }
+.group-total small { color: #efc199; font-size: 10px; }
+.sharing-stack { margin-top: 19px; }
+.sharing-panel { padding: 17px 0; border-top: 1px solid rgba(220,233,235,.18); }
+.sharing-panel h2 { margin: 0 0 8px; color: #e7ece8; font-size: 13px; }
+.sharing-panel p, .privacy-note { margin: 0 0 13px; color: #b8c8d6; font-size: 11px; line-height: 1.55; }
+.sharing-panel form + form { margin-top: 15px; }
+.sharing-panel label { display: block; margin: 0 0 6px; color: #d4e0df; font-size: 11px; }
+.sharing-inline { display: flex; gap: 7px; }
+.sharing-inline input, .owner-transfer select { min-width: 0; flex: 1; height: 34px; padding: 7px 9px; border: 1px solid #58708c; border-radius: 4px; outline: none; color: #f1f5f1; background: #182640; font: inherit; font-size: 11px; }
+.sharing-inline input:focus, .owner-transfer select:focus { border-color: #dfb68d; }
+.sharing-inline button, .sharing-action, .owner-transfer button { flex: none; min-height: 34px; padding: 6px 10px; border: 1px solid #bd9b7d; border-radius: 4px; color: #2b3046; background: #dfb68d; font-size: 11px; font-weight: 700; cursor: pointer; }
+.sharing-panel button:disabled { opacity: .55; cursor: not-allowed; }
+.sharing-heading { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
+.sharing-heading span { color: #8fc9c8; font-size: 11px; }
+.invite-current { display: grid; gap: 7px; margin-top: 13px; padding: 10px; border: 1px solid #58708c; border-radius: 5px; }
+.invite-current span, .invite-row { color: #bed0d5; font-size: 10px; }
+.invite-current code { overflow-wrap: anywhere; color: #e6d8ba; font-size: 11px; }
+.invite-current button, .invite-row button, .sharing-manage > button, .signout-button, .sync-status button { padding: 5px 0; border: 0; color: #f1c9a4; background: transparent; font-size: 11px; text-align: left; cursor: pointer; }
+.invite-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid rgba(220,233,235,.12); }
+.sharing-manage { display: grid; gap: 9px; }
+.sharing-manage h2 { margin-bottom: 2px; }
+.sharing-manage > button:last-child { color: #f5c2b1; }
+.owner-transfer { display: grid; gap: 7px; padding-bottom: 8px; }
+.owner-transfer label { margin: 0; }
+.owner-transfer select { width: 100%; }
+.owner-transfer button { justify-self: start; }
+.signout-button { margin: 0 0 12px; }
+.privacy-note { margin: 0; }
+.sync-status { display: flex; align-items: center; gap: 6px; min-width: 0; color: #9cb5ba; font-size: 10px; line-height: 1.4; }
+.sync-status span:nth-child(2) { min-width: 0; }
+.sync-status button { white-space: nowrap; }
+.sync-dot { width: 6px; height: 6px; flex: none; border-radius: 50%; background: #7e9ca4; }
+.sync-dot--synced { background: #78b8bb; }
+.sync-dot--queued, .sync-dot--syncing { background: #dfb68d; }
+.sync-dot--failed { background: #f0a58e; }
+.bottom-actions { align-items: flex-end; }
+
 @media (min-width: 690px) {
   .app-shell--detail { padding: 28px 36px; }
   .app-shell--detail .world-layout { display: grid; grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); gap: 30px; align-items: center; min-height: calc(100vh - 100px); }
   .app-shell--detail .world-info { width: 100%; }
+  .app-shell--detail .world-info { max-height: calc(100vh - 95px); overflow-y: auto; padding-right: 8px; }
   .app-shell--detail .planet-svg { width: 100%; max-width: 410px; }
 }
 

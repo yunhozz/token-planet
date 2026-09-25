@@ -17,7 +17,7 @@ struct UploadBody<'a> {
     p_snapshot: &'a DailyUsageSnapshot,
 }
 
-#[derive(Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct InviteLink {
     pub invite_id: String,
@@ -25,7 +25,33 @@ pub struct InviteLink {
     pub expires_at: String,
 }
 
-#[derive(Clone, Deserialize, PartialEq)]
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct InviteInfo {
+    pub invite_id: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
+    pub used_at: Option<String>,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorldShell {
+    pub id: String,
+    pub name: String,
+    pub timezone: String,
+    pub owner_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct WorldMember {
+    pub user_id: String,
+    pub role: String,
+}
+
+#[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct WorldSummary {
     pub world_id: String,
@@ -129,6 +155,122 @@ impl SupabaseSyncClient {
             )
             .await?;
         one_row(rows)
+    }
+
+    pub async fn current_world(&self, access_token: &str) -> Result<Option<WorldShell>, SyncError> {
+        let response = self
+            .http
+            .get(format!(
+                "{}/rest/v1/worlds?select=id,name,timezone,owner_id",
+                self.base_url
+            ))
+            .header("apikey", &self.publishable_key)
+            .bearer_auth(access_token)
+            .send()
+            .await
+            .map_err(|_| SyncError::Transport)?;
+        if !response.status().is_success() {
+            return Err(SyncError::Rejected(response.status().as_u16()));
+        }
+        let mut rows: Vec<WorldShell> = response
+            .json()
+            .await
+            .map_err(|_| SyncError::InvalidResponse)?;
+        if rows.len() > 1 {
+            return Err(SyncError::InvalidResponse);
+        }
+        Ok(rows.pop())
+    }
+
+    pub async fn create_world(
+        &self,
+        access_token: &str,
+        owner_id: &str,
+        name: &str,
+        timezone: &str,
+    ) -> Result<WorldShell, SyncError> {
+        let response = self
+            .http
+            .post(format!("{}/rest/v1/worlds", self.base_url))
+            .header("apikey", &self.publishable_key)
+            .header("Prefer", "return=minimal")
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({
+                "owner_id": owner_id, "name": name, "timezone": timezone
+            }))
+            .send()
+            .await
+            .map_err(|_| SyncError::Transport)?;
+        if !response.status().is_success() {
+            return Err(SyncError::Rejected(response.status().as_u16()));
+        }
+        self.current_world(access_token)
+            .await?
+            .ok_or(SyncError::InvalidResponse)
+    }
+
+    pub async fn list_invites(
+        &self,
+        access_token: &str,
+        world_id: &str,
+    ) -> Result<Vec<InviteInfo>, SyncError> {
+        self.post_rpc(
+            access_token,
+            "list_world_invites",
+            &serde_json::json!({ "p_world_id": world_id }),
+        )
+        .await
+    }
+
+    pub async fn list_members(
+        &self,
+        access_token: &str,
+        world_id: &str,
+    ) -> Result<Vec<WorldMember>, SyncError> {
+        self.post_rpc(
+            access_token,
+            "list_world_members",
+            &serde_json::json!({ "p_world_id": world_id }),
+        )
+        .await
+    }
+
+    pub async fn transfer_owner(
+        &self,
+        access_token: &str,
+        world_id: &str,
+        new_owner_id: &str,
+    ) -> Result<bool, SyncError> {
+        self.post_rpc(
+            access_token,
+            "transfer_world_owner",
+            &serde_json::json!({
+                "p_world_id": world_id, "p_new_owner_id": new_owner_id
+            }),
+        )
+        .await
+    }
+
+    pub async fn leave_world(&self, access_token: &str, world_id: &str) -> Result<bool, SyncError> {
+        self.post_rpc(
+            access_token,
+            "leave_world",
+            &serde_json::json!({ "p_world_id": world_id }),
+        )
+        .await
+    }
+
+    pub async fn delete_synced_usage(
+        &self,
+        access_token: &str,
+        world_id: &str,
+    ) -> Result<u64, SyncError> {
+        self.post_rpc(
+            access_token,
+            "delete_synced_usage",
+            &serde_json::json!({ "p_world_id": world_id }),
+        )
+        .await
     }
 
     async fn post_rpc<P: Serialize + ?Sized, R: DeserializeOwned>(

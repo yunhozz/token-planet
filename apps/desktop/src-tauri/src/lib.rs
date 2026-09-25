@@ -1,4 +1,5 @@
 pub mod collectors;
+pub mod commands;
 pub mod domain;
 pub mod growth;
 pub mod platform;
@@ -15,7 +16,7 @@ use growth::{world_snapshot, WorldSnapshot};
 use storage::ledger::Ledger;
 use tauri_plugin_dialog::DialogExt;
 
-struct AppState {
+pub struct AppState {
     config: Mutex<SourceConfig>,
     ledger: Mutex<Ledger>,
     latest: Mutex<Option<WorldSnapshot>>,
@@ -141,7 +142,21 @@ pub fn run() {
             current_usage,
             set_source_enabled,
             set_detail_view,
-            choose_source_folder
+            choose_source_folder,
+            commands::sharing::get_sharing_state,
+            commands::sharing::request_email_code,
+            commands::sharing::verify_email_code,
+            commands::sharing::create_shared_world,
+            commands::sharing::join_world,
+            commands::sharing::create_invite,
+            commands::sharing::list_invites,
+            commands::sharing::list_world_members,
+            commands::sharing::revoke_invite,
+            commands::sharing::pause_sharing,
+            commands::sharing::transfer_world_owner,
+            commands::sharing::leave_world,
+            commands::sharing::delete_synced_usage,
+            commands::sharing::sign_out
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
