@@ -3,6 +3,7 @@ pub mod domain;
 pub mod growth;
 pub mod platform;
 pub mod storage;
+pub mod sync;
 
 use std::{fs, io, sync::Mutex, time::Duration};
 

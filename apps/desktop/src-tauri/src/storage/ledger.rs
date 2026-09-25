@@ -85,6 +85,12 @@ impl Ledger {
                 agent TEXT NOT NULL, bucket_date TEXT NOT NULL,
                 total_tokens INTEGER, coverage TEXT NOT NULL,
                 PRIMARY KEY (agent, bucket_date)
+            );
+            CREATE TABLE IF NOT EXISTS outbox_snapshot (
+                device_id TEXT NOT NULL, bucket_date TEXT NOT NULL, agent TEXT NOT NULL,
+                revision INTEGER NOT NULL, acknowledged_revision INTEGER NOT NULL DEFAULT 0,
+                payload_hash TEXT NOT NULL, payload_json TEXT NOT NULL,
+                PRIMARY KEY (device_id, bucket_date, agent)
             );",
         )?;
         let saved: Option<String> = connection
