@@ -1,14 +1,14 @@
-# Token World Shared World MVP Implementation Plan
+# Token Planet Shared World MVP Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Let a solo Token World owner create or join a private group of up to 10 people and grow one planet from aggregate-only usage snapshots.
+**Goal:** Let a solo Token Planet owner create or join a private group of up to 10 people and grow one planet from aggregate-only usage snapshots.
 
 **Architecture:** The desktop Rust process sends idempotent daily snapshots for each linked device and agent. A managed relational service owns authentication, membership, invitations, and aggregate storage; row-level access rules protect every world. Other group members receive only the planet's combined totals and progress.
 
 **Tech Stack:** Tauri 2 + React + Rust client; Supabase PostgreSQL, Auth, and row-level access policies for the shared service (user-selected).
 
-**Spec:** `docs/specs/token-world-mvp.md`
+**Spec:** `docs/specs/token-planet-mvp.md`
 
 ## Global Constraints
 
@@ -63,7 +63,7 @@ Supabase's [email OTP flow](https://supabase.com/docs/guides/auth/auth-email-pas
 
 ### Task 0: Approve provider and privacy contract
 
-**Files:** update this plan and `docs/specs/token-world-mvp.md` only after review; no implementation files yet.
+**Files:** update this plan and `docs/specs/token-planet-mvp.md` only after review; no implementation files yet.
 
 - [x] Select Supabase, Firebase, or custom Rust API using the comparison above. The user selected Supabase.
 - [x] Confirm email magic-link sign-in or select a different cross-platform sign-in method. The user selected an email verification code entered in the app.

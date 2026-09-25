@@ -1,11 +1,11 @@
-# Token World MVP acceptance
+# Token Planet MVP acceptance
 
 This checklist separates verified local behavior from work that needs a hosted Supabase project and a native Windows machine. Do not publish a cross-platform MVP until the pending checks pass.
 
 ## Verified in the macOS development environment
 
 - [x] Solo mode launches without an account. Compact and detailed windows render a planet, confirmed token subtotal, and separate unknown-source state.
-- [x] The updated macOS `.app` bundle builds. A Token World app window opens; compact and detailed layouts render and switch in the macOS UI.
+- [x] The updated macOS `.app` bundle builds. A Token Planet app window opens; compact and detailed layouts render and switch in the macOS UI.
 - [x] Rust tests cover creator-timezone day buckets, changed historical revisions, SQLite restart persistence, account-scoped queues, historical scan-health coverage, deletion cutoff, and capped retry timing.
 - [x] React tests cover an owner roster refresh when a member is replaced without changing the member count.
 - [x] Local Supabase pgTAP tests cover world membership/RLS, invite validity, same-device retries, two-device addition, aggregate summaries, owner transfer, leave/rejoin cutoff, and account-wide usage deletion.

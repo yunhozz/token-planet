@@ -1,14 +1,14 @@
-# Token World MVP Product and Technical Specification
+# Token Planet MVP Product and Technical Specification
 
 **Status:** Product and shared-world design choices approved; implementation and platform release checks are in progress.
 
 ## Product goal
 
-Token World is a private, cooperative desktop app where Codex and Claude Code usage helps a shared planet develop. The first world can belong to one person; its owner can invite a private group of up to 10 people.
+Token Planet is a private, cooperative desktop app where Codex and Claude Code usage helps a shared planet develop. The first world can belong to one person; its owner can invite a private group of up to 10 people.
 
 ## Confirmed scope and constraints
 
-- Product name: Token World.
+- Product name: Token Planet.
 - Stack: Tauri 2, React, and Rust.
 - Platforms: macOS menu bar app and native Windows system tray app. WSL collection is out of MVP.
 - Sources: Codex and Claude Code only.

@@ -1,14 +1,14 @@
-# Token World Local Desktop MVP Implementation Plan
+# Token Planet Local Desktop MVP Implementation Plan
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Build the local-first Token World desktop client that reads Codex and Claude Code usage metadata, shows honest totals and source status, and grows a distinctive planet on macOS and native Windows.
+**Goal:** Build the local-first Token Planet desktop client that reads Codex and Claude Code usage metadata, shows honest totals and source status, and grows a distinctive planet on macOS and native Windows.
 
 **Architecture:** The React client renders a compact world window and detailed planet view. Rust owns source discovery, parsing, the SQLite ledger, token accounting, and the platform tray; only typed, content-free summaries cross the Tauri boundary. The local growth engine consumes confirmed counts and records incomplete source coverage separately.
 
 **Tech Stack:** Tauri 2, React with TypeScript, Rust, rusqlite, serde/serde_json, chrono, Vitest, and npm.
 
-**Spec:** `docs/specs/token-world-mvp.md`
+**Spec:** `docs/specs/token-planet-mvp.md`
 
 ## Global Constraints
 
@@ -286,10 +286,10 @@ fn high_daily_usage_has_diminishing_marginal_credit() {
 
 **Files:** create `apps/desktop/src-tauri/src/platform/tray.rs`, `macos.rs`, and `windows.rs`; update `apps/desktop/src-tauri/src/lib.rs`, `tauri.conf.json`, and `capabilities/default.json`.
 
-**Interfaces:** the tray menu has `Open Token World`, source status, sync status (local-only in this plan), and `Quit`; a tray click toggles the compact window.
+**Interfaces:** the tray menu has `Open Token Planet`, source status, sync status (local-only in this plan), and `Quit`; a tray click toggles the compact window.
 
 ```rust
-let tray = tauri::tray::TrayIconBuilder::with_id("token-world")
+let tray = tauri::tray::TrayIconBuilder::with_id("token-planet")
     .menu(&menu)
     .on_menu_event(handle_menu_event)
     .build(app)?;
