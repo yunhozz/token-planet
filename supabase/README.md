@@ -8,7 +8,13 @@ npx --yes supabase@2.118.0 db reset
 npx --yes supabase@2.118.0 test db
 ```
 
-For local Auth and REST verification, start Supabase with `gotrue`, `kong`, `mailpit`, and `postgrest` enabled. The local `confirmation` and `magic_link` templates use `{{ .Token }}` so the six-digit code can be entered inside the desktop window. Test mail is visible in the local Mailpit service.
+For local Auth and REST verification, start Supabase with Auth, Kong, Mailpit, and PostgREST enabled:
+
+```sh
+npx --yes supabase@2.118.0 start --exclude realtime,storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
+```
+
+The local `confirmation` and `magic_link` templates use `{{ .Token }}` so the six-digit code can be entered inside the desktop window. Test mail is visible in the local Mailpit service. OTP expiry is configured at one hour; hosted SMTP must be verified for delivery and resend limits before release.
 
 The world and membership tables enforce one shared world per account and at most 10 members. Authenticated members can read their world shell and their own usage snapshot rows. The `get_world_summary(uuid)` API checks membership, then returns only combined tokens, growth, stage, progress, member count, and group coverage. Raw logs, paths, prompts, session IDs, and member-level totals are absent from the database contract.
 

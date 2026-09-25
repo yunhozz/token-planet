@@ -1,6 +1,6 @@
 # Token World desktop
 
-Token World turns confirmed Codex and Claude Code token usage into a growing solo planet. This directory contains the Tauri 2, React, and Rust desktop client. Shared-world sign-in, invites, and aggregate RPCs are being integrated; solo use needs no account.
+Token World turns confirmed Codex and Claude Code token usage into a growing solo or shared planet. This directory contains the Tauri 2, React, and Rust desktop client. Solo use needs no account.
 
 ## Run locally
 
@@ -13,7 +13,7 @@ npm run tauri -- dev
 
 From the repository root, prefix npm commands with `npm --prefix apps/desktop`. Build a macOS application bundle on a Mac with `npm run tauri -- build --bundles app`. A native Windows machine with the Tauri prerequisites is required to build and check the Windows tray app.
 
-To enable the shared-world controls in a development build, set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` before starting Tauri. The publishable key is a public client key; never embed a Supabase secret or service-role key. Without these values, solo use remains available. The hosted project and custom SMTP are not configured yet. The current shared-world client can create or join a world and call the aggregate RPC, but automatic daily upload and offline retry are still in progress.
+To enable the shared-world controls in a development build, set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` before starting Tauri. The publishable key is a public client key; never embed a Supabase secret or service-role key. Without these values, solo use remains available. The hosted project and custom SMTP are not configured yet.
 
 ## Local sources and storage
 
@@ -26,7 +26,7 @@ In the detailed view, **폴더 선택** lets you choose the `sessions` or `proje
 
 Choosing a different folder replaces that agent's prior local aggregate and checkpoints, then scans the new folder. Original agent files are never changed. A changed file is rescanned when its previously processed bytes differ; this protects against in-place rewrites at the cost of reading the processed prefix during each scan.
 
-The local SQLite ledger lives in Tauri's OS-managed application-local-data directory as `usage-ledger.sqlite3`. It stores deduplication keys, file checkpoints, day totals, source preferences, and the world creator's fixed IANA timezone. It does not store transcript text, prompts, tool output, or complete source filenames. Codex and Claude Code JSONL files are read only. A launch scan is followed by a scan every 60 seconds; the circular arrow triggers a manual scan.
+The local SQLite ledger lives in Tauri's OS-managed application-local-data directory as `usage-ledger.sqlite3`. It stores deduplication keys, file checkpoints, day totals, source preferences, an installation ID, pending daily aggregates, and a cached world summary. It does not store transcript text, prompts, tool output, or complete source filenames. Codex and Claude Code JSONL files are read only. A launch scan is followed by periodic scans; the circular arrow triggers a manual scan.
 
 ## Counting and coverage
 
@@ -36,8 +36,10 @@ The local SQLite ledger lives in Tauri's OS-managed application-local-data direc
 - In the detailed view, **사용 안 함** excludes a source and its prior records from the selected-source total and planet growth without deleting the local ledger. **다시 포함** restores it.
 - A member-day's confirmed enabled-source totals are combined before applying `log2(1 + tokens / 100,000)`. The solo planet changes at cumulative credits 5, 20, 50, and 100, with visual progress between milestones. The day boundary uses the world creator's IANA timezone fixed when the world is created.
 
+When sharing is enabled, Rust rebuilds daily aggregates in the creator's timezone and queues changed snapshots with increasing revisions. The first upload and subsequent successful scans run about every 60 seconds. Connection failures retain the local queue and retry after 5, 10, 20, 40, then 60 seconds. The app also retains the queue across restarts. Pausing stops uploads while preserving local collection and pending aggregates. Deleting synced usage pauses sharing and excludes all records through the current creator-timezone day from future uploads, so old history is not restored on resume. Later days can be shared after resuming. Leaving clears the local shared-world queue. Signing out removes the session and cached world view but retains local revision metadata, so the same account can safely resume without duplicating already shared rows; another account starts with a separate queue. Signing out does not delete already shared server aggregates.
+
 ## Privacy and current release status
 
-Only the Rust process scans local JSONL and opens the native folder picker. The React window invokes narrow commands for usage, source settings, world membership, invitations, and sync controls. No arbitrary file read command or filesystem plugin permission is exposed to React. When configured, Supabase Auth access and refresh tokens are stored through the operating system's credential store in Rust, not in React storage. Raw logs, prompts, local paths, and session IDs are not part of the aggregate RPC body.
+Only the Rust process scans local JSONL and opens the native folder picker. The React window invokes narrow commands for usage, source settings, world membership, invitations, and sync controls. No arbitrary file read command or filesystem plugin permission is exposed to React. When configured, Supabase Auth access and refresh tokens are stored through the operating system's credential store in Rust, not in React storage. Raw logs, prompts, local paths, and session IDs are not part of the aggregate RPC body. The server accepts self-reported aggregates from an authenticated client; a modified client can fabricate usage, so the MVP does not promise fraud-resistant totals. Copying the same agent logs to another installation can count them twice under the selected device-scoped rule.
 
 A macOS release `.app` bundle has been built and launched through Launch Services. Its compact window showed the planet and distinct source status. Launch after copying the bundle to Applications remains unchecked. Native Windows build, tray click and keyboard behavior, and a real native Windows Claude Code transcript with usage fields remain to be checked before claiming a cross-platform release. macOS status-bar icon click and keyboard behavior also need a direct manual check; the automated UI surface could inspect the app window but not the status-bar icon.
