@@ -54,9 +54,14 @@ function App() {
     if (shared?.phase !== "shared" || !shared.world?.is_owner) return;
     let active = true;
     sharing.listInvites().then((value) => { if (active) setInvites(value); }).catch(() => {});
-    sharing.listMembers().then((value) => { if (active) setMembers(value); }).catch(() => {});
+    sharing.listMembers().then((value) => {
+      if (active) {
+        setMembers(value);
+        setNewOwnerId((current) => value.some((member) => member.user_id === current && member.role === "member") ? current : "");
+      }
+    }).catch(() => {});
     return () => { active = false; };
-  }, [shared?.phase, shared?.world?.id, shared?.world?.is_owner, shared?.world?.member_count]);
+  }, [shared]);
 
   async function changeSharing(action: () => Promise<SharingState>) {
     setSharingBusy(true);

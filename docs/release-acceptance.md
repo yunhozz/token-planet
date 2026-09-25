@@ -6,7 +6,8 @@ This checklist separates verified local behavior from work that needs a hosted S
 
 - [x] Solo mode launches without an account. Compact and detailed windows render a planet, confirmed token subtotal, and separate unknown-source state.
 - [x] The updated macOS `.app` bundle builds. A Token World app window opens; compact and detailed layouts render and switch in the macOS UI.
-- [x] Rust tests cover creator-timezone day buckets, changed historical revisions, SQLite restart persistence, account-scoped queues, scan-health coverage, deletion cutoff, and capped retry timing.
+- [x] Rust tests cover creator-timezone day buckets, changed historical revisions, SQLite restart persistence, account-scoped queues, historical scan-health coverage, deletion cutoff, and capped retry timing.
+- [x] React tests cover an owner roster refresh when a member is replaced without changing the member count.
 - [x] Local Supabase pgTAP tests cover world membership/RLS, invite validity, same-device retries, two-device addition, aggregate summaries, owner transfer, leave/rejoin cutoff, and account-wide usage deletion.
 - [x] Local Supabase Auth + Mailpit delivered a six-digit `{{ .Token }}` message; request, verification, and session refresh succeeded.
 - [x] The aggregate RPC contract contains only world ID, installation ID, day, agent, nullable token categories, coverage, revision, and payload hash. Group summary responses contain no member-level totals.
