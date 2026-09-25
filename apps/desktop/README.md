@@ -1,6 +1,6 @@
 # Token World desktop
 
-Token World turns confirmed Codex and Claude Code token usage into a growing solo planet. This directory contains the local desktop client built with Tauri 2, React, and Rust. Shared worlds and account sync are a separate implementation phase; this build stores data on the device only.
+Token World turns confirmed Codex and Claude Code token usage into a growing solo planet. This directory contains the Tauri 2, React, and Rust desktop client. Shared-world sign-in, invites, and aggregate RPCs are being integrated; solo use needs no account.
 
 ## Run locally
 
@@ -12,6 +12,8 @@ npm run tauri -- dev
 ```
 
 From the repository root, prefix npm commands with `npm --prefix apps/desktop`. Build a macOS application bundle on a Mac with `npm run tauri -- build --bundles app`. A native Windows machine with the Tauri prerequisites is required to build and check the Windows tray app.
+
+To enable the shared-world controls in a development build, set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` before starting Tauri. The publishable key is a public client key; never embed a Supabase secret or service-role key. Without these values, solo use remains available. The hosted project and custom SMTP are not configured yet. The current shared-world client can create or join a world and call the aggregate RPC, but automatic daily upload and offline retry are still in progress.
 
 ## Local sources and storage
 
@@ -36,6 +38,6 @@ The local SQLite ledger lives in Tauri's OS-managed application-local-data direc
 
 ## Privacy and current release status
 
-Only the Rust process scans local JSONL and opens the native folder picker. The React window can invoke the narrow commands for current usage, refresh, source enablement, folder selection, and compact/detail sizing. No arbitrary file read command or filesystem plugin permission is exposed to React. This build makes no aggregate upload and has no account connection yet.
+Only the Rust process scans local JSONL and opens the native folder picker. The React window invokes narrow commands for usage, source settings, world membership, invitations, and sync controls. No arbitrary file read command or filesystem plugin permission is exposed to React. When configured, Supabase Auth access and refresh tokens are stored through the operating system's credential store in Rust, not in React storage. Raw logs, prompts, local paths, and session IDs are not part of the aggregate RPC body.
 
 A macOS release `.app` bundle has been built and launched through Launch Services. Its compact window showed the planet and distinct source status. Launch after copying the bundle to Applications remains unchecked. Native Windows build, tray click and keyboard behavior, and a real native Windows Claude Code transcript with usage fields remain to be checked before claiming a cross-platform release. macOS status-bar icon click and keyboard behavior also need a direct manual check; the automated UI surface could inspect the app window but not the status-bar icon.

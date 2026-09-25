@@ -101,7 +101,7 @@ For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. W
 ## Recorded design decisions and release gates
 
 1. Use TypeScript for the React frontend and npm as the user-selected package manager; commit `package-lock.json` for reproducible installs.
-2. Backend provider selected: Supabase PostgreSQL, Auth, and row-level access policies. Email verification code is the selected sign-in method.
+2. Backend provider selected: Supabase PostgreSQL, Auth, and row-level access policies. Email verification code is the selected sign-in method. For a new free hosted project, the user selected a separately configured SMTP provider so OTP email templates can be customized; provider selection and credentials remain a deployment task.
 3. Use `K = 100,000`, a world-creator IANA timezone fixed at world creation, and cumulative stage thresholds of 5, 20, 50, and 100 credits, as selected by the user. Use the per-member, per-day logarithmic curve above, with no hard contribution cap.
 4. Invitation policy selected: 7-day expiry, one use, revocable. Owner departure policy selected: transfer ownership to another member, or dissolve a solo world.
 5. Device-scoped dedupe selected for MVP, with the copied-history limitation disclosed.
