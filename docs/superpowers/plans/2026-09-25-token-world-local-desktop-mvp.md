@@ -6,7 +6,7 @@
 
 **Architecture:** The React client renders a compact world window and detailed planet view. Rust owns source discovery, parsing, the SQLite ledger, token accounting, and the platform tray; only typed, content-free summaries cross the Tauri boundary. The local growth engine consumes confirmed counts and records incomplete source coverage separately.
 
-**Tech Stack:** Tauri 2, React with recommended TypeScript, Rust, rusqlite, serde/serde_json, chrono, Vitest, and pnpm (frontend language and package manager are review choices).
+**Tech Stack:** Tauri 2, React with TypeScript, Rust, rusqlite, serde/serde_json, chrono, Vitest, and npm.
 
 **Spec:** `docs/specs/token-world-mvp.md`
 
@@ -57,10 +57,10 @@
 **Interfaces:** produces a runnable Tauri 2 + React client for later tasks.
 
 - [ ] Check remote refs and the default branch before creating the first commit; base work on the remote default branch if one exists and preserve all remote commits.
-- [ ] Create the empty `apps/desktop/` directory, run `pnpm create tauri-app@latest` from it, and select React, TypeScript, and pnpm if those recommendations are approved.
-- [ ] Run the generated client with `pnpm --dir apps/desktop tauri dev`; confirm the starter window opens on macOS.
+- [ ] Create the empty `apps/desktop/` directory, run `npm create tauri-app@latest` from it, and select React, TypeScript, and npm.
+- [ ] Run the generated client with `npm --prefix apps/desktop run tauri -- dev`; confirm the starter window opens on macOS.
 - [ ] Add Vitest, React Testing Library, `user-event`, and `jsdom` to the desktop package; configure the `test` script and `vitest.config.ts`.
-- [ ] Record the exact Rust, Node, pnpm, and Tauri CLI versions in the project toolchain files so both platforms build from the same versions.
+- [ ] Record the exact Rust, Node, npm, and Tauri CLI versions in the project toolchain files so both platforms build from the same versions.
 
 ### Task 1: Define the canonical local usage contract
 
@@ -116,7 +116,7 @@ fn missing_usage_is_not_zero() {
 - [ ] Write Rust tests for complete, partial, unknown, and disabled source states, including a case where a missing field is not equal to `Some(0)`.
 - [ ] Run `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml domain::usage` and confirm the new tests fail before implementation.
 - [ ] Implement the canonical types and `known_subtotal()` so it returns `None` when no source total is known and `Some(0)` for a measured zero; never fill missing values with zero.
-- [ ] Add matching TypeScript discriminated unions and type-check with `pnpm --dir apps/desktop build`.
+- [ ] Add matching TypeScript discriminated unions and type-check with `npm --prefix apps/desktop run build`.
 
 ### Task 2: Implement versioned Codex and Claude Code adapters
 
@@ -274,13 +274,13 @@ fn high_daily_usage_has_diminishing_marginal_credit() {
 }
 ```
 
-- [ ] Agree `K`, day boundary, milestone pace, and stage thresholds from example curves before coding this task; use the reviewed settings as named configuration values.
+- [ ] Use the approved `K = 100,000`, the world creator's fixed IANA timezone, and cumulative thresholds 5, 20, 50, and 100 credits as named configuration values.
 - [ ] Write growth tests for zero known tokens, a positive known subtotal, missing-source coverage, and a high-contributor diminishing-return comparison.
 - [ ] Run the focused growth tests and confirm the curve tests fail before implementation.
 - [ ] Implement `credit = log2(1 + known_enabled_tokens / K)` per member-day, sum the known credits, and preserve incomplete coverage as a separate field.
 - [ ] Implement deterministic SVG layers for proto-planet, crust/land plates, oceans/clouds, and moon/orbit; stage and progress are driven only by `WorldSnapshot`.
 - [ ] Add React tests that verify missing Codex or Claude data displays an incomplete status instead of `0` and that world totals contain no member breakdown.
-- [ ] Run `pnpm --dir apps/desktop exec vitest run` and `pnpm --dir apps/desktop build`.
+- [ ] Run `npm --prefix apps/desktop exec -- vitest run` and `npm --prefix apps/desktop run build`.
 
 ### Task 5: Add macOS menu-bar and Windows tray behavior
 
@@ -306,7 +306,7 @@ let tray = tauri::tray::TrayIconBuilder::with_id("token-world")
 **Files:** update `apps/desktop/README.md` and platform packaging configuration; add no additional collection sources.
 
 - [ ] Document local data roots, custom folder selection, supported parser versions, and unknown/incomplete statuses.
-- [ ] Build the macOS bundle with `pnpm --dir apps/desktop tauri build` and verify it launches from Applications without a shell-provided environment.
+- [ ] Build the macOS bundle with `npm --prefix apps/desktop run tauri -- build` and verify it launches from Applications without a shell-provided environment.
 - [ ] Build the Windows bundle on native Windows with the same command and verify the app starts without WSL.
 - [ ] Inspect the Tauri command surface and capabilities; confirm React cannot read arbitrary files and that no log text, source path, or session identifier appears in app logs.
 - [ ] Review all acceptance checks against the spec and stop with a release note if Claude Code usage is still unverified on native Windows.

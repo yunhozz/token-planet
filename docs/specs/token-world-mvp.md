@@ -1,6 +1,6 @@
 # Token World MVP Product and Technical Specification
 
-**Status:** Approved product direction; the decision gates below remain for plan review before implementation.
+**Status:** Product and shared-world design choices approved; implementation and platform release checks are in progress.
 
 ## Product goal
 
@@ -15,6 +15,8 @@ Token World is a private, cooperative desktop app where Codex and Claude Code us
 - Core metric: the combined number of eligible tokens known from the enabled sources.
 - Raw logs, message text, prompts, tool output, and source file paths stay on each device.
 - The shared service receives only per-member, per-device, per-day, per-agent aggregate counts and sync metadata. The service can read those aggregates; other members see the world total, not member-level totals or a leaderboard.
+- Shared-world service: Supabase PostgreSQL, Auth, and row-level access policies, as selected by the user.
+- Shared-world sign-in: a one-time email verification code entered inside the desktop app, as selected by the user.
 - A missing, unreadable, or unrecognized source is shown as unknown or incomplete. It is never silently converted to zero.
 - The desktop app parses records locally and stores its deduplication ledger locally.
 - Store the local ledger and pending sync outbox under Tauri's OS-managed application-local-data directory; keep it separate from the original agent logs.
@@ -54,23 +56,25 @@ member_day_credit = log2(1 + known_enabled_tokens / K)
 world_credit = sum(member_day_credit across members and day buckets)
 ```
 
-Combine a member's enabled-source and device totals for that day bucket before applying the curve, so using multiple devices does not grant multiple diminishing-return allowances. The known portion contributes while missing sources remain explicitly marked incomplete. `K`, the day boundary, milestone thresholds, and target pace are not fixed in this spec; review the example curves and approve values before implementation. No individual ranking or exact member totals are shown to the group.
+Combine a member's enabled-source and device totals for that day bucket before applying the curve, so using multiple devices does not grant multiple diminishing-return allowances. The known portion contributes while missing sources remain explicitly marked incomplete. `K` is fixed at 100,000 confirmed tokens per member-day by user choice. The day bucket uses the world creator's IANA timezone fixed when the world is created; later device or member timezone changes do not rebucket history. The approved cumulative stage thresholds are 5, 20, 50, and 100 credits. At 100,000 confirmed tokens per member-day, one member earns 1 credit daily; a 10-member group at that rate earns 10 credits daily. Visual progress changes continuously between stage thresholds. No individual ranking or exact member totals are shown to the group.
 
-For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. These normalized examples show diminishing returns without choosing a token threshold for `K`.
+For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. With `K = 100,000`, those points represent 0, 100,000, 300,000, 700,000, and 1,500,000 confirmed tokens in one member-day.
 
 | Choice | Benefits | Costs | Recommendation |
 |---|---|---|---|
 | Linear token growth | Easy to explain and verify | High-volume users dominate the shared planet | Do not use for MVP |
-| Per-member, per-day diminishing returns | Each person can contribute; marginal influence falls as one person's daily usage grows | Requires choosing `K` and a day boundary | Use the logarithmic curve above |
+| Per-member, per-day diminishing returns | Each person can contribute; marginal influence falls as one person's daily usage grows | Requires a fixed day boundary and milestone pace | Use the logarithmic curve above |
 | Equal credit for any active member-day | Strongest participation parity | Planet growth no longer reflects token volume well | Consider only if testing shows the logarithmic model still feels unfair |
 
 ## Collaboration and synchronization proposal
 
 - A person starts with a solo world. Sharing requires signing in and creating or joining a private world.
+- Each account may participate in one shared world at a time in MVP; solo progress remains local until sharing is enabled.
 - A shared world has 1–10 members. There is no public directory or friend discovery in MVP.
-- Recommended invitation: a hard-to-guess, revocable, single-use link/code with a defined expiry. The expiry period remains a review choice.
+- Invitation: a hard-to-guess private link/code that expires after 7 days, can be used once, and can be revoked by its creator, as selected by the user.
+- A world owner transfers ownership to another member before leaving or deleting the account. If no other member remains, leaving dissolves that world.
 - Each installation has a stable device ID. The client sends absolute daily snapshots keyed by member, device, the approved day bucket, and agent, with a monotonic revision and idempotency hash. The server replaces the same snapshot on retry rather than adding it twice.
-- Recommended MVP dedupe is device-scoped: it handles scanner replays, app restarts, and network retries without sending event identifiers. If a user manually copies the same historical source logs to another device, those device snapshots can count the same usage twice. Account-scoped pseudonymous event hashes could prevent that but would add persistent per-event identifiers to server data; that choice remains for review.
+- MVP dedupe is device-scoped by user choice: it handles scanner replays, app restarts, and network retries without sending event identifiers. If a user manually copies the same historical source logs to another device, those device snapshots can count the same usage twice. Account-scoped pseudonymous event hashes are deferred because they would add persistent per-event identifiers to server data.
 - The server stores world membership and aggregates, but no session IDs, prompts, conversation text, filesystem paths, or raw logs.
 - Disabling sharing stops future uploads. MVP should include a way to delete the user's synced aggregate records and leave or dissolve a world.
 
@@ -94,20 +98,21 @@ For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. T
 
 **Later:** public worlds, global leaderboards, achievements, chat, generated planet artwork, mobile clients, WSL collection, additional agents, social discovery, and automated telemetry configuration.
 
-## Decision gates before implementation
+## Recorded design decisions and release gates
 
-1. Confirm TypeScript and the package manager for the React frontend. Recommendation: TypeScript with pnpm, for typed Rust/React contracts and a single lockfile.
-2. Select the authentication/backend provider. Options and tradeoffs are recorded in the shared-world plan; recommendation: managed PostgreSQL with row-level access policies.
-3. Select the growth curve's `K`, day boundary, milestone pacing, and stage thresholds after reviewing a small example table. The recommendation is the per-member, per-day logarithmic curve above, with no hard contribution cap.
-4. Confirm invitation expiry and whether the owner may transfer ownership or must dissolve the world when leaving.
-5. Confirm device-scoped dedupe for MVP or choose account-scoped pseudonymous event hashes to deduplicate copied history across devices. Recommendation: device-scoped dedupe, with the copied-history limitation disclosed.
-6. Confirm whether each account may have one shared world or multiple shared worlds. Recommendation: one shared world per account in MVP, while keeping a solo world local until the user creates or joins a shared world.
+1. Use TypeScript for the React frontend and npm as the user-selected package manager; commit `package-lock.json` for reproducible installs.
+2. Backend provider selected: Supabase PostgreSQL, Auth, and row-level access policies. Email verification code is the selected sign-in method. For a new free hosted project, the user selected a separately configured SMTP provider so OTP email templates can be customized; provider selection and credentials remain a deployment task.
+3. Use `K = 100,000`, a world-creator IANA timezone fixed at world creation, and cumulative stage thresholds of 5, 20, 50, and 100 credits, as selected by the user. Use the per-member, per-day logarithmic curve above, with no hard contribution cap.
+4. Invitation policy selected: 7-day expiry, one use, revocable. Owner departure policy selected: transfer ownership to another member, or dissolve a solo world.
+5. Device-scoped dedupe selected for MVP, with the copied-history limitation disclosed.
+6. One shared world per account selected for MVP; the local solo world remains available until sharing starts.
 7. Before claiming Claude Code collection works for a given release, validate the adapter against a real native Windows Claude Code transcript that contains usage fields. Until then, missing or ambiguous usage remains explicitly unavailable.
 
 ## Primary references
 
 - [Tauri create a project](https://v2.tauri.app/start/create-project/)
 - [Tauri tray API](https://v2.tauri.app/reference/javascript/api/namespacetray/)
+- [Supabase email passwordless sign-in](https://supabase.com/docs/guides/auth/auth-email-passwordless)
 - [Claude Code session files](https://code.claude.com/docs/en/sessions)
 - [Claude Code directory and configuration](https://code.claude.com/docs/en/claude-directory)
 - [Claude Code usage monitoring fields](https://code.claude.com/docs/en/monitoring-usage)
