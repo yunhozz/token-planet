@@ -274,7 +274,7 @@ impl Ledger {
             } else {
                 (None, None, None, None, None, UsageCoverage::Unavailable)
             };
-            let coverage = if date == today && enabled {
+            let coverage = if enabled {
                 match self.source_health(agent)? {
                     Some(SourceHealth::Ready) | None => coverage,
                     Some(_) if total_tokens.is_some() => UsageCoverage::Partial,
@@ -822,6 +822,30 @@ mod tests {
             .find(|item| {
                 item.agent == Agent::Codex && item.bucket_date == now.format("%Y-%m-%d").to_string()
             })
+            .unwrap();
+        assert_eq!(snapshot.total_tokens, Some(42));
+        assert_eq!(snapshot.coverage, UsageCoverage::Partial);
+    }
+
+    #[test]
+    fn unresolved_scan_failure_keeps_historical_shared_total_incomplete() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let record = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
+        ledger.insert(&record).unwrap();
+        ledger
+            .set_source_health(
+                Agent::Codex,
+                crate::collectors::discovery::SourceHealth::UnsupportedFormat,
+            )
+            .unwrap();
+        ledger
+            .prepare_shared_snapshots("world-1", "member-1", UTC)
+            .unwrap();
+        let snapshot = ledger
+            .pending_snapshots()
+            .unwrap()
+            .into_iter()
+            .find(|item| item.agent == Agent::Codex && item.bucket_date == "2026-09-24")
             .unwrap();
         assert_eq!(snapshot.total_tokens, Some(42));
         assert_eq!(snapshot.coverage, UsageCoverage::Partial);
