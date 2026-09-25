@@ -151,6 +151,37 @@ impl Ledger {
         Ok(())
     }
 
+    pub fn ensure_source_root(&mut self, agent: Agent, root_key: &str) -> Result<(), ScanError> {
+        let key = format!("{}_active_root", agent_name(agent));
+        let saved: Option<String> = self
+            .connection
+            .query_row("SELECT value FROM setting WHERE key=?1", [&key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        if saved.as_deref() == Some(root_key) {
+            return Ok(());
+        }
+        let tx = self.connection.transaction()?;
+        if saved.is_some() {
+            tx.execute(
+                "DELETE FROM usage_record WHERE agent=?1",
+                [agent_name(agent)],
+            )?;
+            tx.execute(
+                "DELETE FROM source_checkpoint WHERE source_id LIKE ?1",
+                [format!("{}:%", agent_name(agent))],
+            )?;
+            rebuild_daily(&tx)?;
+        }
+        tx.execute(
+            "INSERT INTO setting(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, root_key],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn agent_enabled(&self, agent: Agent) -> Result<bool, ScanError> {
         let key = format!("{}_enabled", agent_name(agent));
         let saved: Option<String> = self

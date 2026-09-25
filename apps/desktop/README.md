@@ -22,6 +22,8 @@ From the repository root, prefix npm commands with `npm --prefix apps/desktop`. 
 
 In the detailed view, **폴더 선택** lets you choose the `sessions` or `projects` folder directly if your installation uses another location. The native picker and selected path stay in Rust; the path is saved only in the local SQLite settings. The UI receives a usage summary, never the path. WSL collection is outside this version.
 
+Choosing a different folder replaces that agent's prior local aggregate and checkpoints, then scans the new folder. Original agent files are never changed. A changed file is rescanned when its previously processed bytes differ; this protects against in-place rewrites at the cost of reading the processed prefix during each scan.
+
 The local SQLite ledger lives in Tauri's OS-managed application-local-data directory as `usage-ledger.sqlite3`. It stores deduplication keys, file checkpoints, day totals, source preferences, and the world creator's fixed IANA timezone. It does not store transcript text, prompts, tool output, or complete source filenames. Codex and Claude Code JSONL files are read only. A launch scan is followed by a scan every 60 seconds; the circular arrow triggers a manual scan.
 
 ## Counting and coverage
