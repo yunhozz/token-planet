@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Token World",
+  "productName": "Token Planet",
   "version": "0.1.0",
   "identifier": "io.github.yunhozz.tokenworld",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Token World",
+        "title": "Token Planet",
         "width": 390,
         "height": 700,
         "resizable": false

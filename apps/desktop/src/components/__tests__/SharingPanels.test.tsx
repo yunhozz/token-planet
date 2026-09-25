@@ -25,10 +25,10 @@ describe("shared world controls", () => {
     const state: SharingState = {
       phase: "shared", email: "member@example.test", sync_status: "synced", pending: 0, last_synced_at: null,
       world: { id: "world", name: "Together", timezone: "Asia/Seoul", is_owner: false,
-        member_count: 2, known_tokens: 200000, growth_credit: 2, stage: 1,
-        progress_to_next: 0.4, incomplete: false },
+        member_count: 2 },
+      planet_members: [],
     };
-    expect(planetGrowth({ stage: 0, progress_to_next: 0.1 }, state)).toEqual({ stage: 1, progress: 0.4 });
+    expect(planetGrowth({ stage: 0, progress_to_next: 0.1 }, state)).toEqual({ stage: 0, progress: 0.1 });
     expect(Object.keys(planetGrowth(null, state))).toEqual(["stage", "progress"]);
   });
 
@@ -40,10 +40,10 @@ describe("shared world controls", () => {
     expect(onCreate).toHaveBeenCalledOnce();
   });
 
-  it("shows the current code but no member usage breakdown", () => {
+  it("shows the current code and the member ranking disclosure", () => {
     render(<InvitePanel memberCount={2} isOwner invite={{ invite_id: "i", code: "private-code", expires_at: "2026-10-02T00:00:00Z" }} invites={[]} onCreate={vi.fn()} onRevoke={vi.fn()} />);
     expect(screen.getByText("private-code")).toBeInTheDocument();
-    expect(screen.queryByText(/멤버별|순위/)).not.toBeInTheDocument();
+    expect(screen.getByText(/정확한 값과 순위/)).toBeInTheDocument();
   });
 
   it("distinguishes queued, paused, and failed sync", () => {

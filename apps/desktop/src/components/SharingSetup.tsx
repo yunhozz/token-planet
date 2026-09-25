@@ -24,7 +24,7 @@ export function SharingSetup({ phase, busy, onRequestCode, onVerifyCode, onCreat
   if (phase === "signed_out") {
     return <section className="sharing-panel" aria-label="공동 세계 시작">
       <h2>나만의 세계에서 함께 만드는 세계로</h2>
-      <p>로그인 전에도 사용량과 행성은 이 기기에서 계속 자랍니다. 공유를 시작하면 일별 집계만 전송합니다.</p>
+      <p>로그인 전에도 사용량과 행성은 이 기기에서 계속 자랍니다. 공유를 시작하면 일별 합계와 닉네임, 아바타, 행성의 파생 상태만 전송합니다.</p>
       <form onSubmit={request}>
         <label htmlFor="sharing-email">이메일</label>
         <div className="sharing-inline"><input id="sharing-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} required autoComplete="email" /><button type="submit" disabled={busy}>인증코드 받기</button></div>

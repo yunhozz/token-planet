@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import type { WorldPlanet } from "../types/usage";
 
 export type SharedWorld = {
   id: string;
@@ -6,11 +7,6 @@ export type SharedWorld = {
   timezone: string;
   is_owner: boolean;
   member_count: number;
-  known_tokens: number | null;
-  growth_credit: number;
-  stage: number;
-  progress_to_next: number;
-  incomplete: boolean;
 };
 
 export type SharingState = {
@@ -20,15 +16,15 @@ export type SharingState = {
   sync_status: "local" | "queued" | "syncing" | "synced" | "paused" | "failed";
   pending: number;
   last_synced_at: string | null;
+  planet_members?: WorldPlanet[];
 };
 
 export type InviteLink = { invite_id: string; code: string; expires_at: string };
 export type InviteInfo = { invite_id: string; created_at: string; expires_at: string; revoked_at: string | null; used_at: string | null };
 export type WorldMember = { user_id: string; role: "owner" | "member" };
 
-export function planetGrowth(local: { stage: number; progress_to_next: number } | null, state: SharingState | null) {
-  const world = state?.phase === "shared" ? state.world : null;
-  return { stage: world?.stage ?? local?.stage ?? 0, progress: world?.progress_to_next ?? local?.progress_to_next ?? 0 };
+export function planetGrowth(local: { stage: number; progress_to_next: number } | null, _state: SharingState | null) {
+  return { stage: local?.stage ?? 0, progress: local?.progress_to_next ?? 0 };
 }
 
 export const sharing = {

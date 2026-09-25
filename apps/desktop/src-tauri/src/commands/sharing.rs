@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
+use crate::domain::planet::WorldPlanet;
 use crate::sync::auth::{
     AuthConfig, AuthError, SessionStore, StoredSession, SupabaseAuthClient, SESSION_GATE,
 };
@@ -14,11 +15,12 @@ pub struct SharedWorld {
     timezone: String,
     is_owner: bool,
     member_count: u8,
-    known_tokens: Option<u64>,
-    growth_credit: f64,
-    stage: u8,
-    progress_to_next: f64,
-    incomplete: bool,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+struct CachedWorldView {
+    world: SharedWorld,
+    planet_members: Vec<WorldPlanet>,
 }
 
 #[derive(Serialize)]
@@ -29,6 +31,7 @@ pub struct SharingState {
     sync_status: &'static str,
     pending: u64,
     last_synced_at: Option<String>,
+    planet_members: Vec<WorldPlanet>,
 }
 
 fn local_state(phase: &'static str, email: Option<String>) -> SharingState {
@@ -39,6 +42,7 @@ fn local_state(phase: &'static str, email: Option<String>) -> SharingState {
         sync_status: "local",
         pending: 0,
         last_synced_at: None,
+        planet_members: Vec::new(),
     }
 }
 
@@ -59,13 +63,18 @@ fn offline_state(
             .prepare_shared_snapshots(&world_id, user_id, timezone)
             .map_err(|_| "공유 집계를 준비할 수 없습니다")?;
     }
-    let world: SharedWorld = serde_json::from_str(
-        &ledger
-            .cached_world_view()
-            .map_err(|_| "로컬 공동 세계 오류")?
-            .ok_or("저장된 공동 세계가 없습니다")?,
-    )
-    .map_err(|_| "저장된 공동 세계 정보가 잘못되었습니다")?;
+    let cached = ledger
+        .cached_world_view()
+        .map_err(|_| "로컬 공동 세계 오류")?
+        .ok_or("저장된 공동 세계가 없습니다")?;
+    let (world, planet_members) = match serde_json::from_str::<CachedWorldView>(&cached) {
+        Ok(view) => (view.world, view.planet_members),
+        Err(_) => (
+            serde_json::from_str::<SharedWorld>(&cached)
+                .map_err(|_| "저장된 공동 세계 정보가 잘못되었습니다")?,
+            Vec::new(),
+        ),
+    };
     let paused = ledger
         .sharing_paused()
         .map_err(|_| "로컬 동기화 상태 오류")?;
@@ -79,6 +88,7 @@ fn offline_state(
         sync_status: if paused { "paused" } else { "failed" },
         pending,
         last_synced_at: None,
+        planet_members,
     })
 }
 
@@ -142,10 +152,10 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
     }) else {
         return Ok(local_state("signed_in", email));
     };
-    let summary = match client.world_summary(&session.access_token, &shell.id).await {
-        Ok(summary) => summary,
+    let planet_members = match client.world_planets(&session.access_token, &shell.id).await {
+        Ok(members) => members,
         Err(SyncError::Transport) => return offline_state(&state, &session.user.id, email),
-        Err(_) => return Err("세계 성장 상태를 불러올 수 없습니다".into()),
+        Err(_) => return Err("그룹 행성 상태를 불러올 수 없습니다".into()),
     };
     let timezone = shell.timezone.parse().map_err(|_| "세계 시간대 오류")?;
     let world = SharedWorld {
@@ -153,12 +163,7 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
         name: shell.name,
         timezone: shell.timezone,
         is_owner: shell.owner_id == session.user.id,
-        member_count: summary.member_count,
-        known_tokens: summary.known_tokens,
-        growth_credit: summary.growth_credit,
-        stage: summary.stage,
-        progress_to_next: summary.progress_to_next,
-        incomplete: summary.incomplete,
+        member_count: planet_members.len() as u8,
     };
     let (paused, pending) = {
         let mut ledger = state
@@ -169,7 +174,13 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
             .prepare_shared_snapshots(&world.id, &session.user.id, timezone)
             .map_err(|_| "공유 집계를 준비할 수 없습니다")?;
         ledger
-            .set_cached_world_view(&serde_json::to_string(&world).map_err(|_| "세계 정보 오류")?)
+            .set_cached_world_view(
+                &serde_json::to_string(&CachedWorldView {
+                    world: world.clone(),
+                    planet_members: planet_members.clone(),
+                })
+                .map_err(|_| "세계 정보 오류")?,
+            )
             .map_err(|_| "세계 정보를 저장할 수 없습니다")?;
         (
             ledger
@@ -199,7 +210,8 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
             "synced"
         },
         pending,
-        last_synced_at: summary.last_update,
+        last_synced_at: None,
+        planet_members,
     })
 }
 

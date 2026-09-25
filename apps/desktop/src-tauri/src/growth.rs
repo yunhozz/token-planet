@@ -1,6 +1,8 @@
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 
 use crate::collectors::discovery::ScanSummary;
+use crate::domain::planet::PlanetState;
 use crate::domain::usage::UsageCoverage;
 use crate::storage::ledger::{Ledger, ScanError};
 
@@ -14,6 +16,7 @@ pub struct WorldSnapshot {
     pub stage: u8,
     pub progress_to_next: f64,
     pub incomplete: bool,
+    pub planet: PlanetState,
 }
 
 pub fn contribution_credit(known_tokens: u64, k: f64) -> f64 {
@@ -21,11 +24,26 @@ pub fn contribution_credit(known_tokens: u64, k: f64) -> f64 {
 }
 
 pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapshot, ScanError> {
-    let growth_credit = ledger
-        .daily_known_totals()?
-        .into_iter()
+    let (daily, local_current_tokens, local_lifetime_tokens) = ledger.planet_usage_totals()?;
+    let mut growth_credit: f64 = daily
+        .values()
+        .copied()
         .map(|tokens| contribution_credit(tokens, K_TOKENS as f64))
         .sum();
+    let cycle_id = ledger.planet_cycle_id()?;
+    let mut current_planet_tokens = local_current_tokens;
+    let mut remote_incomplete = false;
+    if let Some((remote_cycle, remote_tokens, remote_growth, incomplete)) =
+        ledger.synced_planet_metrics()?
+    {
+        if remote_cycle == cycle_id {
+            current_planet_tokens = current_planet_tokens.max(remote_tokens);
+            growth_credit = growth_credit.max(remote_growth);
+            remote_incomplete = incomplete;
+        }
+    }
+    let lifetime_tokens =
+        local_lifetime_tokens.max(ledger.synced_planet_lifetime_tokens()?.unwrap_or_default());
     let stage = STAGE_THRESHOLDS
         .iter()
         .take_while(|&&threshold| growth_credit >= threshold)
@@ -47,14 +65,92 @@ pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapsh
                 coverage,
                 UsageCoverage::Complete | UsageCoverage::UserDisabled
             )
-        });
+        })
+        || remote_incomplete;
+    ensure_objects(ledger, growth_credit)?;
+    let wallet_credits = ledger.planet_wallet_credits()?;
+    let wallet_balance = wallet_credits.iter().try_fold(0_u64, |balance, credit| {
+        balance
+            .checked_add(credit.amount)
+            .ok_or(ScanError::InvalidCount)
+    })?;
+    let now = chrono::Utc::now();
+    let last_reset = ledger.last_reset_at()?;
+    let reset_available = last_reset.map(|last| last + chrono::Duration::hours(24));
+    let can_reset = reset_available.is_none_or(|available| now >= available);
+    let planet = PlanetState {
+        version: 1,
+        profile: ledger.planet_profile()?,
+        timezone: ledger.planet_timezone()?.to_string(),
+        current_cycle_id: cycle_id,
+        cycle_started_at_utc: ledger.planet_cycle_started_at()?,
+        last_reset_at_utc: last_reset.map(|value| value.to_rfc3339()),
+        wallet_balance,
+        wallet_credits,
+        current_planet_tokens,
+        lifetime_tokens,
+        growth_credit,
+        stage,
+        progress_to_next,
+        incomplete,
+        can_reset,
+        reset_available_at_utc: reset_available.map(|value| value.to_rfc3339()),
+        objects: ledger.planet_objects()?,
+    };
     Ok(WorldSnapshot {
         usage,
         growth_credit,
         stage,
         progress_to_next,
         incomplete,
+        planet,
     })
+}
+
+fn target_object_counts(credits: f64) -> [u32; 5] {
+    let thresholds = [5.0, 20.0, 50.0, 100.0];
+    let intervals = [1.0, 2.0, 4.0, 8.0, 16.0];
+    let mut start = 0.0;
+    let mut remainder = 0.0;
+    let mut counts = [0; 5];
+    for stage in 0..5 {
+        let end = thresholds.get(stage).copied().unwrap_or(f64::INFINITY);
+        let segment = (credits.min(end) - start).max(0.0);
+        let available = segment + remainder;
+        counts[stage] = ((available / intervals[stage]) + 1e-9).floor() as u32;
+        remainder = (available - f64::from(counts[stage]) * intervals[stage]).max(0.0);
+        start = end;
+    }
+    counts
+}
+
+fn ensure_objects(ledger: &Ledger, credits: f64) -> Result<(), ScanError> {
+    let targets = target_object_counts(credits);
+    let mut counts = [0_u32; 5];
+    for object in ledger.planet_objects()? {
+        if let Some(count) = counts.get_mut(object.stage as usize) {
+            *count += 1;
+        }
+    }
+    let cycle_id = ledger.planet_cycle_id()?;
+    let kinds: [&[&str]; 5] = [
+        &["rock", "water", "tree", "fern", "creature"],
+        &["camp", "crops", "cottage", "path", "well"],
+        &["house", "workshop", "plaza", "road", "market"],
+        &["factory", "power", "rail", "tower", "district"],
+        &["laboratory", "satellite", "rocket", "solar", "habitat"],
+    ];
+    for stage in 0..5_u8 {
+        for ordinal in counts[stage as usize]..targets[stage as usize] {
+            let digest = Sha256::digest(format!("{cycle_id}:{stage}:{ordinal}").as_bytes());
+            let seed = u64::from_be_bytes(digest[..8].try_into().expect("sha256 prefix"));
+            let kind = kinds[stage as usize][(seed as usize) % kinds[stage as usize].len()];
+            let x = ((seed % 88) + 6) as u8;
+            let y = (((seed >> 8) % 52) + 28) as u8;
+            ledger.ensure_planet_object(stage, ordinal, kind, x, y, seed)?;
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+use crate::domain::planet::{PlanetDeviceContribution, PlanetState, WorldPlanet};
 use crate::sync::aggregate::DailyUsageSnapshot;
 
 #[derive(Debug, Eq, PartialEq)]
@@ -106,6 +107,41 @@ impl SupabaseSyncClient {
         .await
     }
 
+    pub async fn my_planet_state(
+        &self,
+        access_token: &str,
+    ) -> Result<Option<PlanetState>, SyncError> {
+        self.post_rpc(access_token, "get_my_planet_state", &serde_json::json!({}))
+            .await
+    }
+
+    pub async fn upload_planet_state(
+        &self,
+        access_token: &str,
+        state: &PlanetState,
+        contribution: &PlanetDeviceContribution,
+    ) -> Result<PlanetState, SyncError> {
+        self.post_rpc(
+            access_token,
+            "upsert_my_planet_state",
+            &serde_json::json!({ "p_state": state, "p_device_contribution": contribution }),
+        )
+        .await
+    }
+
+    pub async fn world_planets(
+        &self,
+        access_token: &str,
+        world_id: &str,
+    ) -> Result<Vec<WorldPlanet>, SyncError> {
+        self.post_rpc(
+            access_token,
+            "get_world_planets",
+            &serde_json::json!({ "p_world_id": world_id }),
+        )
+        .await
+    }
+
     pub async fn create_invite(
         &self,
         access_token: &str,
@@ -147,21 +183,6 @@ impl SupabaseSyncClient {
             &serde_json::json!({ "p_invite_id": invite_id }),
         )
         .await
-    }
-
-    pub async fn world_summary(
-        &self,
-        access_token: &str,
-        world_id: &str,
-    ) -> Result<WorldSummary, SyncError> {
-        let rows: Vec<WorldSummary> = self
-            .post_rpc(
-                access_token,
-                "get_world_summary",
-                &serde_json::json!({ "p_world_id": world_id }),
-            )
-            .await?;
-        one_row(rows)
     }
 
     pub async fn current_world(&self, access_token: &str) -> Result<Option<WorldShell>, SyncError> {

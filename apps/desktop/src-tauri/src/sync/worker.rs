@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use crate::domain::usage::UsageCoverage;
 use crate::sync::auth::{AuthConfig, SessionStore, SupabaseAuthClient};
 use crate::sync::client::SupabaseSyncClient;
 use crate::AppState;
@@ -57,12 +58,84 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
             return Err("공동 세계 연결 실패".into());
         }
     };
+    let policy = if let Some(shell) = &shell {
+        Some(
+            client
+                .my_sync_policy(&session.access_token, &shell.id)
+                .await
+                .map_err(|_| "동기화 정책 확인 실패")?,
+        )
+    } else {
+        None
+    };
+    if let Some(remote) = client
+        .my_planet_state(&session.access_token)
+        .await
+        .map_err(|_| "행성 동기화 상태를 불러올 수 없습니다")?
+    {
+        state
+            .ledger
+            .lock()
+            .map_err(|_| "로컬 행성 상태 오류")?
+            .merge_remote_planet_state(&remote)
+            .map_err(|_| "행성 동기화 상태를 반영할 수 없습니다")?;
+        state
+            .scan()
+            .map_err(|_| "행성 상태를 새로 계산할 수 없습니다")?;
+    }
+    let local_snapshot = state
+        .latest
+        .lock()
+        .map_err(|_| "행성 상태를 읽을 수 없습니다")?
+        .as_ref()
+        .map(|snapshot| {
+            let incomplete = [
+                snapshot.usage.codex.coverage,
+                snapshot.usage.claude_code.coverage,
+            ]
+            .iter()
+            .any(|coverage| {
+                !matches!(
+                    coverage,
+                    UsageCoverage::Complete | UsageCoverage::UserDisabled
+                )
+            });
+            (snapshot.planet.clone(), incomplete)
+        });
+    let sharing_paused = state
+        .ledger
+        .lock()
+        .map_err(|_| "로컬 동기화 설정 오류")?
+        .sharing_paused()
+        .map_err(|_| "로컬 동기화 설정 오류")?;
+    let publish_planet = !sharing_paused && policy.as_ref().is_none_or(|policy| !policy.paused);
+    if let Some((local_planet, incomplete)) = local_snapshot
+        .filter(|(planet, _)| planet.profile.is_some())
+        .filter(|_| publish_planet)
+    {
+        let contribution = state
+            .ledger
+            .lock()
+            .map_err(|_| "로컬 행성 상태 오류")?
+            .planet_device_contribution(incomplete)
+            .map_err(|_| "행성별 일일 집계를 준비할 수 없습니다")?;
+        let canonical = client
+            .upload_planet_state(&session.access_token, &local_planet, &contribution)
+            .await
+            .map_err(|_| "행성 상태 전송 실패")?;
+        state
+            .ledger
+            .lock()
+            .map_err(|_| "로컬 행성 상태 오류")?
+            .merge_remote_planet_state(&canonical)
+            .map_err(|_| "행성 동기화 상태를 반영할 수 없습니다")?;
+        state
+            .scan()
+            .map_err(|_| "행성 상태를 새로 계산할 수 없습니다")?;
+    }
     let Some(shell) = shell else { return Ok(()) };
     let timezone = shell.timezone.parse().map_err(|_| "세계 시간대 오류")?;
-    let policy = client
-        .my_sync_policy(&session.access_token, &shell.id)
-        .await
-        .map_err(|_| "동기화 정책 확인 실패")?;
+    let policy = policy.ok_or("동기화 정책을 확인할 수 없습니다")?;
     let pending = {
         let mut ledger = state.ledger.lock().map_err(|_| "로컬 대기열 오류")?;
         ledger

@@ -19,6 +19,11 @@ const snapshot: WorldSnapshot = {
   stage: 0,
   progress_to_next: 0.234,
   incomplete: true,
+  planet: {
+    version: 1, profile: { nickname: "Orbit", avatar: "masculine" }, timezone: "Asia/Seoul", current_cycle_id: "cycle-1", cycle_started_at_utc: "2026-09-26T00:00:00Z", last_reset_at_utc: null,
+    wallet_balance: 0, wallet_credits: [], current_planet_tokens: 125000, lifetime_tokens: 125000, growth_credit: 1.17, stage: 0, progress_to_next: 0.234, incomplete: true,
+    can_reset: true, reset_available_at_utc: null, objects: [],
+  },
 };
 
 describe("local world summary", () => {

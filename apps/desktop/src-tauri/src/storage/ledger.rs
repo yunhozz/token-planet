@@ -1,9 +1,14 @@
 use std::{collections::BTreeMap, fmt, path::Path};
 
+use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::collectors::{ParsedRecord, RecordKind};
+use crate::domain::planet::{
+    PlanetAvatar, PlanetDeviceContribution, PlanetObject, PlanetProfile, PlanetState,
+    PlanetWalletCredit,
+};
 use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -13,6 +18,8 @@ pub enum ScanError {
     SourcePermission,
     InvalidCount,
     TimezoneMismatch,
+    ResetCooldown,
+    InvalidProfile,
 }
 
 impl fmt::Display for ScanError {
@@ -26,6 +33,8 @@ impl fmt::Display for ScanError {
                 Self::SourcePermission => "source file permission denied",
                 Self::InvalidCount => "token count exceeds local storage range",
                 Self::TimezoneMismatch => "world timezone differs from saved ledger",
+                Self::ResetCooldown => "planet reset is available 24 hours after the last reset",
+                Self::InvalidProfile => "planet profile is invalid",
             }
         )
     }
@@ -70,12 +79,24 @@ fn add_optional(total: &mut Option<u64>, value: Option<i64>) -> Result<(), ScanE
 
 impl Ledger {
     pub fn shared_daily_totals(&self, timezone: Tz) -> Result<Vec<SharedDailyTotal>, ScanError> {
+        self.shared_daily_totals_after(timezone, None)
+    }
+
+    pub fn reform_daily_totals(&self, timezone: Tz) -> Result<Vec<SharedDailyTotal>, ScanError> {
+        self.shared_daily_totals_after(timezone, Some(self.planet_activation_at()?))
+    }
+
+    fn shared_daily_totals_after(
+        &self,
+        timezone: Tz,
+        since: Option<DateTime<Utc>>,
+    ) -> Result<Vec<SharedDailyTotal>, ScanError> {
         let mut statement = self.connection.prepare("SELECT agent,occurred_at_utc,input_tokens,output_tokens,
             cache_read_tokens,cache_write_tokens,total_tokens,coverage FROM usage_record r
-            WHERE r.kind='response' OR NOT EXISTS (
+            WHERE (?1 IS NULL OR r.occurred_at_utc > ?1) AND (r.kind='response' OR NOT EXISTS (
                 SELECT 1 FROM usage_record other WHERE other.source_id=r.source_id AND other.kind='response' AND other.agent=r.agent
-            )")?;
-        let rows = statement.query_map([], |row| {
+            ))")?;
+        let rows = statement.query_map(params![since.map(|value| value.to_rfc3339())], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -187,6 +208,15 @@ impl Ledger {
                 revision INTEGER NOT NULL, acknowledged_revision INTEGER NOT NULL DEFAULT 0,
                 payload_hash TEXT NOT NULL, payload_json TEXT NOT NULL,
                 PRIMARY KEY (device_id, bucket_date, agent)
+            );
+            CREATE TABLE IF NOT EXISTS planet_object (
+                cycle_id TEXT NOT NULL, stage INTEGER NOT NULL, ordinal INTEGER NOT NULL,
+                kind TEXT NOT NULL, x INTEGER NOT NULL, y INTEGER NOT NULL, seed TEXT NOT NULL,
+                PRIMARY KEY (cycle_id, stage, ordinal)
+            );
+            CREATE TABLE IF NOT EXISTS planet_wallet_credit (
+                previous_cycle_id TEXT PRIMARY KEY, amount INTEGER NOT NULL,
+                created_at_utc TEXT NOT NULL
             );",
         )?;
         let saved: Option<String> = connection
@@ -204,6 +234,35 @@ impl Ledger {
             connection.execute(
                 "INSERT INTO setting(key,value) VALUES ('world_timezone',?1)",
                 [timezone.to_string()],
+            )?;
+        }
+        if setting_value(&connection, "planet_activation_at_utc")?.is_none() {
+            set_setting_value(
+                &connection,
+                "planet_activation_at_utc",
+                &Utc::now().to_rfc3339(),
+            )?;
+        }
+        if setting_value(&connection, "planet_current_cycle_id")?.is_none() {
+            set_setting_value(
+                &connection,
+                "planet_current_cycle_id",
+                &uuid::Uuid::new_v4().to_string(),
+            )?;
+        }
+        if setting_value(&connection, "planet_cycle_started_at_utc")?.is_none() {
+            let activation = setting_value(&connection, "planet_activation_at_utc")?
+                .ok_or(ScanError::Database)?;
+            set_setting_value(&connection, "planet_cycle_started_at_utc", &activation)?;
+        }
+        if setting_value(&connection, "planet_timezone")?.is_none() {
+            set_setting_value(&connection, "planet_timezone", &timezone.to_string())?;
+        }
+        if setting_value(&connection, "planet_device_id")?.is_none() {
+            set_setting_value(
+                &connection,
+                "planet_device_id",
+                &uuid::Uuid::new_v4().to_string(),
             )?;
         }
         Ok(Self {
@@ -320,6 +379,386 @@ impl Ledger {
         rows.map(|row| as_u64(row?)).collect()
     }
 
+    pub fn planet_usage_totals(&self) -> Result<(BTreeMap<String, u64>, u64, u64), ScanError> {
+        let activation = self.planet_activation_at()?;
+        let planet_timezone = self.planet_timezone()?;
+        let cycle_start = self.last_reset_at()?.unwrap_or(activation).max(activation);
+        let mut statement = self.connection.prepare(
+            "SELECT r.occurred_at_utc,r.total_tokens FROM usage_record r
+             WHERE r.total_tokens IS NOT NULL AND r.occurred_at_utc > ?1
+               AND (r.kind='response' OR NOT EXISTS (
+                 SELECT 1 FROM usage_record other
+                 WHERE other.source_id=r.source_id AND other.kind='response' AND other.agent=r.agent
+               ))
+             ORDER BY r.occurred_at_utc",
+        )?;
+        let rows = statement.query_map(params![activation.to_rfc3339()], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+        })?;
+        let mut daily = BTreeMap::new();
+        let mut lifetime = 0_u64;
+        let mut current = 0_u64;
+        for row in rows {
+            let (occurred_at, tokens) = row?;
+            let tokens = as_u64(tokens)?;
+            lifetime = lifetime
+                .checked_add(tokens)
+                .ok_or(ScanError::InvalidCount)?;
+            let timestamp = DateTime::parse_from_rfc3339(&occurred_at)
+                .map_err(|_| ScanError::Database)?
+                .with_timezone(&Utc);
+            if timestamp > cycle_start {
+                current = current.checked_add(tokens).ok_or(ScanError::InvalidCount)?;
+                let date = timestamp
+                    .with_timezone(&planet_timezone)
+                    .format("%Y-%m-%d")
+                    .to_string();
+                let total = daily.entry(date).or_insert(0_u64);
+                *total = total.checked_add(tokens).ok_or(ScanError::InvalidCount)?;
+            }
+        }
+        Ok((daily, current, lifetime))
+    }
+
+    pub fn planet_timezone(&self) -> Result<Tz, ScanError> {
+        setting_value(&self.connection, "planet_timezone")?
+            .ok_or(ScanError::Database)?
+            .parse()
+            .map_err(|_| ScanError::TimezoneMismatch)
+    }
+
+    pub fn set_planet_timezone(&self, timezone: &str) -> Result<(), ScanError> {
+        let _: Tz = timezone.parse().map_err(|_| ScanError::TimezoneMismatch)?;
+        set_setting_value(&self.connection, "planet_timezone", timezone)
+    }
+
+    pub fn planet_device_contribution(
+        &self,
+        incomplete: bool,
+    ) -> Result<PlanetDeviceContribution, ScanError> {
+        let (daily_tokens, current_planet_tokens, lifetime_tokens) = self.planet_usage_totals()?;
+        Ok(PlanetDeviceContribution {
+            device_id: setting_value(&self.connection, "planet_device_id")?
+                .ok_or(ScanError::Database)?,
+            current_cycle_id: self.planet_cycle_id()?,
+            lifetime_tokens,
+            current_planet_tokens,
+            daily_tokens,
+            incomplete,
+        })
+    }
+
+    pub fn planet_profile(&self) -> Result<Option<PlanetProfile>, ScanError> {
+        let nickname = setting_value(&self.connection, "planet_nickname")?;
+        let avatar = setting_value(&self.connection, "planet_avatar")?;
+        match (nickname, avatar) {
+            (Some(nickname), Some(avatar)) => {
+                let avatar = match avatar.as_str() {
+                    "masculine" => PlanetAvatar::Masculine,
+                    "feminine" => PlanetAvatar::Feminine,
+                    _ => return Err(ScanError::InvalidProfile),
+                };
+                Ok(Some(PlanetProfile { nickname, avatar }))
+            }
+            (None, None) => Ok(None),
+            _ => Err(ScanError::InvalidProfile),
+        }
+    }
+
+    pub fn set_planet_profile(
+        &mut self,
+        nickname: &str,
+        avatar: PlanetAvatar,
+    ) -> Result<(), ScanError> {
+        let nickname = nickname.trim();
+        if nickname.is_empty() || nickname.chars().count() > 24 {
+            return Err(ScanError::InvalidProfile);
+        }
+        let avatar = match avatar {
+            PlanetAvatar::Masculine => "masculine",
+            PlanetAvatar::Feminine => "feminine",
+        };
+        let tx = self.connection.transaction()?;
+        tx.execute(
+            "INSERT INTO setting(key,value) VALUES ('planet_nickname',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [nickname],
+        )?;
+        tx.execute(
+            "INSERT INTO setting(key,value) VALUES ('planet_avatar',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [avatar],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn planet_activation_at(&self) -> Result<DateTime<Utc>, ScanError> {
+        parse_utc_setting(&self.connection, "planet_activation_at_utc")
+    }
+
+    pub fn planet_cycle_id(&self) -> Result<String, ScanError> {
+        setting_value(&self.connection, "planet_current_cycle_id")?.ok_or(ScanError::Database)
+    }
+
+    pub fn planet_cycle_started_at(&self) -> Result<String, ScanError> {
+        setting_value(&self.connection, "planet_cycle_started_at_utc")?.ok_or(ScanError::Database)
+    }
+
+    pub fn last_reset_at(&self) -> Result<Option<DateTime<Utc>>, ScanError> {
+        match setting_value(&self.connection, "planet_last_reset_at_utc")? {
+            Some(value) => DateTime::parse_from_rfc3339(&value)
+                .map(|date| Some(date.with_timezone(&Utc)))
+                .map_err(|_| ScanError::Database),
+            None => Ok(None),
+        }
+    }
+
+    pub fn planet_wallet_credits(&self) -> Result<Vec<PlanetWalletCredit>, ScanError> {
+        let mut statement = self.connection.prepare(
+            "SELECT previous_cycle_id,amount,created_at_utc FROM planet_wallet_credit
+             ORDER BY created_at_utc",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (previous_cycle_id, amount, created_at_utc) = row?;
+            Ok(PlanetWalletCredit {
+                previous_cycle_id,
+                amount: as_u64(amount)?,
+                created_at_utc,
+            })
+        })
+        .collect()
+    }
+
+    pub fn reset_planet(&mut self, now: DateTime<Utc>) -> Result<u64, ScanError> {
+        if self
+            .last_reset_at()?
+            .is_some_and(|last| now < last + Duration::hours(24))
+        {
+            return Err(ScanError::ResetCooldown);
+        }
+        let previous_cycle_id = self.planet_cycle_id()?;
+        let (_, local_current_tokens, _) = self.planet_usage_totals()?;
+        let current_tokens = self
+            .synced_planet_metrics()?
+            .filter(|(cycle_id, _, _, _)| cycle_id == &previous_cycle_id)
+            .map(|(_, remote_tokens, _, _)| local_current_tokens.max(remote_tokens))
+            .unwrap_or(local_current_tokens);
+        let new_cycle_id = uuid::Uuid::new_v4().to_string();
+        let tx = self.connection.transaction()?;
+        tx.execute(
+            "INSERT OR IGNORE INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES (?1,?2,?3)",
+            params![previous_cycle_id, as_i64(current_tokens)?, now.to_rfc3339()],
+        )?;
+        for (key, value) in [
+            ("planet_last_reset_at_utc", now.to_rfc3339()),
+            ("planet_cycle_started_at_utc", now.to_rfc3339()),
+            ("planet_current_cycle_id", new_cycle_id),
+        ] {
+            tx.execute(
+                "INSERT INTO setting(key,value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key, value],
+            )?;
+        }
+        tx.execute("DELETE FROM setting WHERE key IN ('planet_remote_cycle_id','planet_remote_current_tokens','planet_remote_growth_credit','planet_remote_incomplete')", [])?;
+        tx.execute("DELETE FROM planet_object", [])?;
+        tx.commit()?;
+        Ok(current_tokens)
+    }
+
+    pub fn synced_planet_metrics(&self) -> Result<Option<(String, u64, f64, bool)>, ScanError> {
+        let Some(cycle_id) = setting_value(&self.connection, "planet_remote_cycle_id")? else {
+            return Ok(None);
+        };
+        let current_tokens = setting_value(&self.connection, "planet_remote_current_tokens")?
+            .ok_or(ScanError::Database)?
+            .parse()
+            .map_err(|_| ScanError::Database)?;
+        let growth_credit = setting_value(&self.connection, "planet_remote_growth_credit")?
+            .ok_or(ScanError::Database)?
+            .parse()
+            .map_err(|_| ScanError::Database)?;
+        let incomplete = setting_value(&self.connection, "planet_remote_incomplete")?
+            .is_some_and(|value| value == "true");
+        Ok(Some((cycle_id, current_tokens, growth_credit, incomplete)))
+    }
+
+    pub fn synced_planet_lifetime_tokens(&self) -> Result<Option<u64>, ScanError> {
+        setting_value(&self.connection, "planet_remote_lifetime_tokens")?
+            .map(|value| value.parse().map_err(|_| ScanError::Database))
+            .transpose()
+    }
+
+    pub fn planet_objects(&self) -> Result<Vec<PlanetObject>, ScanError> {
+        let cycle_id = self.planet_cycle_id()?;
+        let mut statement = self.connection.prepare(
+            "SELECT stage,ordinal,kind,x,y,seed FROM planet_object
+             WHERE cycle_id=?1 ORDER BY stage,ordinal",
+        )?;
+        let rows = statement.query_map([cycle_id], |row| {
+            Ok((
+                row.get::<_, u8>(0)?,
+                row.get::<_, u32>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, u8>(3)?,
+                row.get::<_, u8>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (stage, ordinal, kind, x, y, seed) = row?;
+            Ok(PlanetObject {
+                stage,
+                ordinal,
+                kind,
+                x,
+                y,
+                seed: seed.parse().map_err(|_| ScanError::Database)?,
+            })
+        })
+        .collect()
+    }
+
+    pub fn ensure_planet_object(
+        &self,
+        stage: u8,
+        ordinal: u32,
+        kind: &str,
+        x: u8,
+        y: u8,
+        seed: u64,
+    ) -> Result<(), ScanError> {
+        self.connection.execute(
+            "INSERT OR IGNORE INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                self.planet_cycle_id()?,
+                stage,
+                ordinal,
+                kind,
+                x,
+                y,
+                seed.to_string()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn merge_remote_planet_state(&mut self, remote: &PlanetState) -> Result<(), ScanError> {
+        let first_remote_sync =
+            setting_value(&self.connection, "planet_remote_cycle_id")?.is_none();
+        let had_local_reset = self.last_reset_at()?.is_some();
+        let local_cycle = self.planet_cycle_id()?;
+        let remote_reset = remote
+            .last_reset_at_utc
+            .as_deref()
+            .unwrap_or(&remote.cycle_started_at_utc);
+        let remote_reset = DateTime::parse_from_rfc3339(remote_reset)
+            .map_err(|_| ScanError::Database)?
+            .with_timezone(&Utc);
+        let local_reset = self.last_reset_at()?.unwrap_or(
+            DateTime::parse_from_rfc3339(&self.planet_cycle_started_at()?)
+                .map_err(|_| ScanError::Database)?
+                .with_timezone(&Utc),
+        );
+        let remote_blocks_recent_reset = remote.last_reset_at_utc.is_some()
+            && local_cycle != remote.current_cycle_id
+            && local_reset < remote_reset + Duration::hours(24);
+        if (first_remote_sync && !had_local_reset)
+            || remote_reset > local_reset
+            || remote_blocks_recent_reset
+        {
+            let tx = self.connection.transaction()?;
+            if let Some(last_reset) = &remote.last_reset_at_utc {
+                tx.execute(
+                    "INSERT INTO setting(key,value) VALUES ('planet_last_reset_at_utc',?1)
+                     ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                    [last_reset],
+                )?;
+            } else {
+                tx.execute(
+                    "DELETE FROM setting WHERE key='planet_last_reset_at_utc'",
+                    [],
+                )?;
+            }
+            tx.execute(
+                "INSERT INTO setting(key,value) VALUES ('planet_cycle_started_at_utc',?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [&remote.cycle_started_at_utc],
+            )?;
+            tx.execute(
+                "INSERT INTO setting(key,value) VALUES ('planet_current_cycle_id',?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [&remote.current_cycle_id],
+            )?;
+            tx.execute("DELETE FROM planet_object", [])?;
+            if remote_blocks_recent_reset {
+                tx.execute(
+                    "DELETE FROM planet_wallet_credit WHERE previous_cycle_id=?1",
+                    [&remote.current_cycle_id],
+                )?;
+            }
+            tx.commit()?;
+        }
+        for credit in &remote.wallet_credits {
+            self.connection.execute(
+                "INSERT OR IGNORE INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+                 VALUES (?1,?2,?3)",
+                params![credit.previous_cycle_id, as_i64(credit.amount)?, credit.created_at_utc],
+            )?;
+            self.connection.execute(
+                "UPDATE planet_wallet_credit SET amount=?2,created_at_utc=?3 WHERE previous_cycle_id=?1",
+                params![credit.previous_cycle_id, as_i64(credit.amount)?, credit.created_at_utc],
+            )?;
+        }
+        if self.planet_cycle_id()? == remote.current_cycle_id {
+            for (key, value) in [
+                ("planet_remote_cycle_id", remote.current_cycle_id.clone()),
+                (
+                    "planet_remote_current_tokens",
+                    remote.current_planet_tokens.to_string(),
+                ),
+                (
+                    "planet_remote_lifetime_tokens",
+                    remote.lifetime_tokens.to_string(),
+                ),
+                (
+                    "planet_remote_growth_credit",
+                    remote.growth_credit.to_string(),
+                ),
+                ("planet_remote_incomplete", remote.incomplete.to_string()),
+            ] {
+                set_setting_value(&self.connection, key, &value)?;
+            }
+            for object in &remote.objects {
+                self.ensure_planet_object(
+                    object.stage,
+                    object.ordinal,
+                    &object.kind,
+                    object.x,
+                    object.y,
+                    object.seed,
+                )?;
+            }
+        }
+        if first_remote_sync || self.planet_profile()?.is_none() {
+            if let Some(profile) = &remote.profile {
+                self.set_planet_profile(&profile.nickname, profile.avatar)?;
+            }
+        }
+        self.set_planet_timezone(&remote.timezone)?;
+        Ok(())
+    }
+
     pub fn all_time_usage(&self, agent: Agent) -> Result<TokenUsage, ScanError> {
         let mut statement = self
             .connection
@@ -363,6 +802,31 @@ impl Ledger {
             coverage,
         })
     }
+}
+
+fn setting_value(connection: &Connection, key: &str) -> Result<Option<String>, ScanError> {
+    connection
+        .query_row("SELECT value FROM setting WHERE key=?1", [key], |row| {
+            row.get(0)
+        })
+        .optional()
+        .map_err(Into::into)
+}
+
+fn set_setting_value(connection: &Connection, key: &str, value: &str) -> Result<(), ScanError> {
+    connection.execute(
+        "INSERT INTO setting(key,value) VALUES (?1,?2)
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![key, value],
+    )?;
+    Ok(())
+}
+
+fn parse_utc_setting(connection: &Connection, key: &str) -> Result<DateTime<Utc>, ScanError> {
+    let value = setting_value(connection, key)?.ok_or(ScanError::Database)?;
+    DateTime::parse_from_rfc3339(&value)
+        .map(|date| date.with_timezone(&Utc))
+        .map_err(|_| ScanError::Database)
 }
 
 pub(crate) fn agent_name(agent: Agent) -> &'static str {

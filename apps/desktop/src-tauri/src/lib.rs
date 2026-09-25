@@ -11,6 +11,7 @@ use std::{fs, io, sync::Mutex};
 use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, WindowEvent};
 
 use collectors::discovery::{resolve_roots, scan_sources, RootOptions, SourceConfig};
+use domain::planet::PlanetAvatar;
 use domain::usage::Agent;
 use growth::{world_snapshot, WorldSnapshot};
 use storage::ledger::Ledger;
@@ -19,13 +20,13 @@ use tauri_plugin_dialog::DialogExt;
 pub struct AppState {
     config: Mutex<SourceConfig>,
     pub(crate) ledger: Mutex<Ledger>,
-    latest: Mutex<Option<WorldSnapshot>>,
+    pub(crate) latest: Mutex<Option<WorldSnapshot>>,
     pub(crate) sync_failed: Mutex<bool>,
     pub(crate) sync_gate: tokio::sync::Mutex<()>,
 }
 
 impl AppState {
-    fn scan(&self) -> Result<WorldSnapshot, String> {
+    pub(crate) fn scan(&self) -> Result<WorldSnapshot, String> {
         let config = self
             .config
             .lock()
@@ -59,6 +60,43 @@ fn current_usage(state: State<'_, AppState>) -> Result<Option<WorldSnapshot>, St
         .lock()
         .map_err(|_| "usage status unavailable")?
         .clone())
+}
+
+#[tauri::command]
+fn set_planet_profile(
+    nickname: String,
+    avatar: PlanetAvatar,
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorldSnapshot, String> {
+    state
+        .ledger
+        .lock()
+        .map_err(|_| "local ledger unavailable")?
+        .set_planet_profile(&nickname, avatar)
+        .map_err(|_| "행성 프로필을 저장할 수 없습니다")?;
+    let snapshot = state.scan()?;
+    let _ = platform::tray::refresh_status(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn reset_planet(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnapshot, String> {
+    let _ = state.scan()?;
+    state
+        .ledger
+        .lock()
+        .map_err(|_| "local ledger unavailable")?
+        .reset_planet(chrono::Utc::now())
+        .map_err(|error| match error {
+            storage::ledger::ScanError::ResetCooldown => {
+                String::from("초기화는 마지막 초기화 24시간 뒤에 가능합니다")
+            }
+            _ => String::from("행성을 초기화할 수 없습니다"),
+        })?;
+    let snapshot = state.scan()?;
+    let _ = platform::tray::refresh_status(&app, &snapshot);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -148,6 +186,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             refresh_usage,
             current_usage,
+            set_planet_profile,
+            reset_planet,
             set_source_enabled,
             set_detail_view,
             choose_source_folder,

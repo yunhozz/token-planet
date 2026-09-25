@@ -197,7 +197,7 @@ impl Ledger {
             Option<crate::storage::ledger::SharedDailyTotal>,
         > = BTreeMap::new();
         for total in self
-            .shared_daily_totals(timezone)
+            .reform_daily_totals(timezone)
             .map_err(|_| OutboxError::Database)?
         {
             dates.insert(
@@ -235,6 +235,16 @@ impl Ledger {
             .with_timezone(&timezone)
             .format("%Y-%m-%d")
             .to_string();
+        let activation_date = self
+            .planet_activation_at()
+            .map_err(|_| OutboxError::Database)?
+            .with_timezone(&timezone)
+            .format("%Y-%m-%d")
+            .to_string();
+        self.connection.execute(
+            "DELETE FROM outbox_snapshot WHERE device_id=?1 AND bucket_date < ?2",
+            params![device_id, activation_date],
+        )?;
         for agent in [Agent::Codex, Agent::ClaudeCode] {
             dates
                 .entry((today.clone(), agent_name(agent).into()))
@@ -242,7 +252,7 @@ impl Ledger {
         }
         let cutoff = self.setting(&self.scope_setting_key("sharing_skip_through")?)?;
         for ((date, agent_name), total) in dates {
-            if cutoff.as_ref().is_some_and(|cutoff| date <= *cutoff) {
+            if date < activation_date || cutoff.as_ref().is_some_and(|cutoff| date <= *cutoff) {
                 continue;
             }
             let agent = if agent_name == "codex" {
