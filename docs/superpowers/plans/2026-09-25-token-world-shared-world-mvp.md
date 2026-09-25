@@ -13,6 +13,7 @@
 ## Global Constraints
 
 - Shared worlds have 1–10 members, begin as a solo world, and are private by default.
+- One shared-world membership per account is allowed in MVP.
 - No public directory, member leaderboard, or exact member token totals.
 - Server data is limited to account/world membership, device identifiers, aggregate daily per-agent counts, coverage, and sync metadata.
 - Never upload raw JSONL, prompts, conversation bodies, tool output, local file paths, or session IDs.
@@ -56,6 +57,8 @@ The selected Supabase implementation uses:
 
 The user selected email verification-code sign-in inside the desktop app across both platforms. The selected invitation is a private, single-use, revocable random code/link with a 7-day expiry and a 10-member cap. An owner must transfer ownership to another member before leaving; leaving a solo shared world dissolves it.
 
+Supabase's [email OTP flow](https://supabase.com/docs/guides/auth/auth-email-passwordless) requires the hosted email template to include the verification token. The client requests a code, accepts it inside the desktop window, and verifies it with Supabase Auth. Keep [access and rotating refresh tokens](https://supabase.com/docs/guides/auth/sessions) in the operating system's secure credential store through Rust; the React view receives sign-in state only. Document the hosted email template and redirect-free OTP setup before release.
+
 ## Tasks
 
 ### Task 0: Approve provider and privacy contract
@@ -65,10 +68,10 @@ The user selected email verification-code sign-in inside the desktop app across 
 - [x] Select Supabase, Firebase, or custom Rust API using the comparison above. The user selected Supabase.
 - [x] Confirm email magic-link sign-in or select a different cross-platform sign-in method. The user selected an email verification code entered in the app.
 - [x] Confirm invite expiry, one-use behavior, and whether an owner may transfer ownership or must dissolve the world on departure. The user selected the 7-day, single-use, revocable invite and owner transfer; a solo owner dissolves the world on departure.
-- [ ] Confirm device-scoped dedupe for MVP or select account-scoped pseudonymous event hashes; device-scoped dedupe is recommended and does not catch a user manually copying the same source history onto another device.
-- [ ] Confirm one shared world per account or multiple shared worlds; one shared world per account is recommended for MVP, while solo progress remains local until sharing starts.
-- [ ] Use the reviewed `K = 100,000`, the world creator's fixed IANA timezone, and cumulative thresholds 5, 20, 50, and 100 credits before defining the server growth aggregate.
-- [ ] Inspect remote Git refs and branch protection before creating provider files; preserve any existing remote history.
+- [x] Confirm device-scoped dedupe for MVP or select account-scoped pseudonymous event hashes. The user selected device-scoped dedupe; copied source history across devices can count twice.
+- [x] Confirm one shared world per account or multiple shared worlds. The user selected one shared world per account; solo progress remains local until sharing starts.
+- [x] Use the reviewed `K = 100,000`, the world creator's fixed IANA timezone, and cumulative thresholds 5, 20, 50, and 100 credits before defining the server growth aggregate.
+- [x] Inspect remote Git refs and branch protection before creating provider files. `origin` has no refs or branches as of 2026-09-25; GitHub reports `master` as its configured default branch and no existing protected branch to integrate. Preserve any remote history that appears before pushing.
 
 ### Task 1: Define the aggregate-only sync contract
 
@@ -212,7 +215,7 @@ upload_snapshot(snapshot):
 - [ ] Test invite acceptance for valid, expired, revoked, already-used, and full-world cases.
 - [ ] Store only a cryptographic hash of each invite code; enforce expiry, one use, revocation, and the 10-member cap in the database transaction.
 - [ ] Test identical snapshot retry, older revision retry, newer replacement, and simultaneous devices with different device IDs.
-- [ ] Under the recommended device-scoped policy, test that two distinct device IDs are additive and same-device retries remain idempotent; if account-scoped hashes are selected, replace this expected behavior with a copied-history dedupe test.
+- [ ] Under the selected device-scoped policy, test that two distinct device IDs are additive and same-device retries remain idempotent.
 - [ ] Implement an upsert key of `member_id + device_id + bucket_date + agent`; reject stale revisions and treat same-revision identical payloads as acknowledged.
 - [ ] Aggregate a member's enabled-agent totals across all their devices for each approved day bucket, apply the reviewed diminishing-return curve once per member-day, then sum those credits for the world.
 - [ ] Return only world totals, progress, last-update time, and group-level coverage; keep per-member rows unavailable to other members.
@@ -238,6 +241,7 @@ upload_snapshot(snapshot):
 - [ ] Test offline queue retention, retry with exponential backoff, acknowledgement cleanup, and app restart during a pending upload.
 - [ ] Test that a changed local historical scan sends a higher revision and replaces the previous daily snapshot without double-counting.
 - [ ] Verify account tokens are stored using the selected platform's secure storage, not plain frontend local storage.
+- [ ] Configure and verify the Supabase email template to send the OTP token; check code request, verification, expiry, resend throttling, and session refresh on both platforms.
 - [ ] Inspect network payloads from both macOS and native Windows; confirm only approved aggregates and IDs are sent.
 - [ ] Verify invite acceptance, pause, resume, leave, and delete on macOS and native Windows.
 - [ ] Document that self-reported client aggregates can be altered by a modified client; MVP does not promise fraud-proof usage accounting.
