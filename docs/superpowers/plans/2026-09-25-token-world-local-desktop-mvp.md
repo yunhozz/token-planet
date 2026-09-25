@@ -274,7 +274,7 @@ fn high_daily_usage_has_diminishing_marginal_credit() {
 }
 ```
 
-- [ ] Use the approved `K = 100,000` and agree the day boundary, milestone pace, and stage thresholds before coding this task; use the reviewed settings as named configuration values.
+- [ ] Use the approved `K = 100,000`, the world creator's fixed IANA timezone, and cumulative thresholds 5, 20, 50, and 100 credits as named configuration values.
 - [ ] Write growth tests for zero known tokens, a positive known subtotal, missing-source coverage, and a high-contributor diminishing-return comparison.
 - [ ] Run the focused growth tests and confirm the curve tests fail before implementation.
 - [ ] Implement `credit = log2(1 + known_enabled_tokens / K)` per member-day, sum the known credits, and preserve incomplete coverage as a separate field.

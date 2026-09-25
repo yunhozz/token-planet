@@ -54,7 +54,7 @@ member_day_credit = log2(1 + known_enabled_tokens / K)
 world_credit = sum(member_day_credit across members and day buckets)
 ```
 
-Combine a member's enabled-source and device totals for that day bucket before applying the curve, so using multiple devices does not grant multiple diminishing-return allowances. The known portion contributes while missing sources remain explicitly marked incomplete. `K` is fixed at 100,000 confirmed tokens per member-day by user choice. The day boundary, milestone thresholds, and target pace still require approval before growth implementation. No individual ranking or exact member totals are shown to the group.
+Combine a member's enabled-source and device totals for that day bucket before applying the curve, so using multiple devices does not grant multiple diminishing-return allowances. The known portion contributes while missing sources remain explicitly marked incomplete. `K` is fixed at 100,000 confirmed tokens per member-day by user choice. The day bucket uses the world creator's IANA timezone fixed when the world is created; later device or member timezone changes do not rebucket history. The approved cumulative stage thresholds are 5, 20, 50, and 100 credits. At 100,000 confirmed tokens per member-day, one member earns 1 credit daily; a 10-member group at that rate earns 10 credits daily. Visual progress changes continuously between stage thresholds. No individual ranking or exact member totals are shown to the group.
 
 For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. With `K = 100,000`, those points represent 0, 100,000, 300,000, 700,000, and 1,500,000 confirmed tokens in one member-day.
 
@@ -98,7 +98,7 @@ For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. W
 
 1. Use TypeScript for the React frontend and npm as the user-selected package manager; commit `package-lock.json` for reproducible installs.
 2. Select the authentication/backend provider. Options and tradeoffs are recorded in the shared-world plan; recommendation: managed PostgreSQL with row-level access policies.
-3. Use `K = 100,000`; select the day boundary, milestone pacing, and stage thresholds after reviewing a small example table. The recommendation is the per-member, per-day logarithmic curve above, with no hard contribution cap.
+3. Use `K = 100,000`, a world-creator IANA timezone fixed at world creation, and cumulative stage thresholds of 5, 20, 50, and 100 credits, as selected by the user. Use the per-member, per-day logarithmic curve above, with no hard contribution cap.
 4. Confirm invitation expiry and whether the owner may transfer ownership or must dissolve the world when leaving.
 5. Confirm device-scoped dedupe for MVP or choose account-scoped pseudonymous event hashes to deduplicate copied history across devices. Recommendation: device-scoped dedupe, with the copied-history limitation disclosed.
 6. Confirm whether each account may have one shared world or multiple shared worlds. Recommendation: one shared world per account in MVP, while keeping a solo world local until the user creates or joins a shared world.
