@@ -22,6 +22,7 @@ chrono = { version = "0.4", features = ["serde"] }
 chrono-tz = "0.10"
 iana-time-zone = "0.1"
 rusqlite = { version = "0.37", features = ["bundled"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 sha2 = "0.10"
 walkdir = "2"
 tauri = { version = "2", features = ["tray-icon"] }
