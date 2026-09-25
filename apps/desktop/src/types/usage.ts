@@ -21,3 +21,19 @@ export type TokenUsage = TokenBreakdown &
     | { coverage: "unavailable" | "unsupported"; total_tokens: null }
     | { coverage: "user_disabled"; total_tokens: number | null }
   );
+
+export type ScanSummary = {
+  codex: TokenUsage;
+  claude_code: TokenUsage;
+  confirmed_subtotal: number | null;
+  complete_total: number | null;
+  scanned_at_utc: string;
+};
+
+export type WorldSnapshot = {
+  usage: ScanSummary;
+  growth_credit: number;
+  stage: number;
+  progress_to_next: number;
+  incomplete: boolean;
+};

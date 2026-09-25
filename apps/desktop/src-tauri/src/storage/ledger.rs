@@ -129,6 +129,42 @@ impl Ledger {
         value.flatten().map(as_u64).transpose()
     }
 
+    pub fn agent_enabled(&self, agent: Agent) -> Result<bool, ScanError> {
+        let key = format!("{}_enabled", agent_name(agent));
+        let saved: Option<String> = self
+            .connection
+            .query_row("SELECT value FROM setting WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(saved.as_deref() != Some("false"))
+    }
+
+    pub fn set_agent_enabled(&mut self, agent: Agent, enabled: bool) -> Result<(), ScanError> {
+        let key = format!("{}_enabled", agent_name(agent));
+        self.connection.execute(
+            "INSERT INTO setting(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, if enabled { "true" } else { "false" }],
+        )?;
+        Ok(())
+    }
+
+    pub fn daily_known_totals(&self) -> Result<Vec<u64>, ScanError> {
+        let mut statement = self.connection.prepare(
+            "SELECT SUM(total_tokens) FROM daily_agent_total WHERE total_tokens IS NOT NULL
+             AND ((agent='codex' AND ?1) OR (agent='claude_code' AND ?2))
+             GROUP BY bucket_date ORDER BY bucket_date",
+        )?;
+        let rows = statement.query_map(
+            params![
+                self.agent_enabled(Agent::Codex)?,
+                self.agent_enabled(Agent::ClaudeCode)?
+            ],
+            |row| row.get::<_, i64>(0),
+        )?;
+        rows.map(|row| as_u64(row?)).collect()
+    }
+
     pub fn all_time_usage(&self, agent: Agent) -> Result<TokenUsage, ScanError> {
         let mut statement = self
             .connection

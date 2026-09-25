@@ -82,14 +82,29 @@ pub fn scan_sources(config: &SourceConfig, ledger: &mut Ledger) -> Result<ScanSu
     if ledger.timezone != config.timezone {
         return Err(ScanError::TimezoneMismatch);
     }
-    let codex_ok = scan_root(&config.codex_root, Agent::Codex, ledger)?;
-    let claude_ok = scan_root(&config.claude_root, Agent::ClaudeCode, ledger)?;
-    let codex = summarized_usage(ledger, Agent::Codex, codex_ok)?;
-    let claude_code = summarized_usage(ledger, Agent::ClaudeCode, claude_ok)?;
+    let codex_enabled = ledger.agent_enabled(Agent::Codex)?;
+    let claude_enabled = ledger.agent_enabled(Agent::ClaudeCode)?;
+    let codex_ok = if codex_enabled {
+        scan_root(&config.codex_root, Agent::Codex, ledger)?
+    } else {
+        false
+    };
+    let claude_ok = if claude_enabled {
+        scan_root(&config.claude_root, Agent::ClaudeCode, ledger)?
+    } else {
+        false
+    };
+    let codex = summarized_usage(ledger, Agent::Codex, codex_ok, codex_enabled)?;
+    let claude_code = summarized_usage(ledger, Agent::ClaudeCode, claude_ok, claude_enabled)?;
     let confirmed_subtotal = known_subtotal(&[codex.clone(), claude_code.clone()]);
-    let complete_total = if codex.coverage == UsageCoverage::Complete
-        && claude_code.coverage == UsageCoverage::Complete
-    {
+    let complete_total = if [codex.coverage, claude_code.coverage]
+        .iter()
+        .all(|coverage| {
+            matches!(
+                coverage,
+                UsageCoverage::Complete | UsageCoverage::UserDisabled
+            )
+        }) {
         confirmed_subtotal
     } else {
         None
@@ -103,7 +118,22 @@ pub fn scan_sources(config: &SourceConfig, ledger: &mut Ledger) -> Result<ScanSu
     })
 }
 
-fn summarized_usage(ledger: &Ledger, agent: Agent, root_ok: bool) -> Result<TokenUsage, ScanError> {
+fn summarized_usage(
+    ledger: &Ledger,
+    agent: Agent,
+    root_ok: bool,
+    enabled: bool,
+) -> Result<TokenUsage, ScanError> {
+    if !enabled {
+        return Ok(TokenUsage {
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            coverage: UsageCoverage::UserDisabled,
+        });
+    }
     let mut usage = ledger.all_time_usage(agent)?;
     let invalid_count: i64 = ledger.connection.query_row(
         "SELECT COUNT(*) FROM source_checkpoint WHERE source_id LIKE ?1 AND status != 'complete'",
