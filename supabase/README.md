@@ -1,6 +1,6 @@
 # Token World shared-world database
 
-The versioned migrations and pgTAP tests run locally with Supabase CLI 2.118.0 and Docker. They have not been deployed to a hosted project.
+The versioned migrations and pgTAP tests run locally with Supabase CLI 2.118.0 and Docker. The migrations are deployed to the free hosted Token World project in the Seoul region; hosted pgTAP tests have not been run.
 
 ```sh
 npx --yes supabase@2.118.0 start --exclude gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
@@ -20,4 +20,4 @@ The world and membership tables enforce one shared world per account and at most
 
 The database requires a recognized world timezone and keeps it fixed. A world owner's account cannot be deleted while the world still points to it; ownership must be transferred or the world dissolved first. Later migrations implement single-use hashed invitations, idempotent per-device uploads, ownership transfer, leave, and deletion of a member's synced aggregates.
 
-For a newly created free hosted Supabase project, Token World needs a separately configured SMTP provider before the OTP email templates can be customized. This is the selected deployment path; no hosted SMTP provider or project is configured yet. Apply both OTP templates, verify code delivery and session refresh, then deploy migrations and rerun policy tests before inviting other users. See the [Supabase free-tier template change](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).
+The hosted Token World project and database migrations are ready, but a custom SMTP provider and verified sender domain are not configured. Hosted OTP delivery and its email templates therefore remain deferred. After SMTP is configured, apply both OTP templates and verify code delivery and session refresh before inviting other users. Local Auth and OTP development can use the Mailpit setup above. See the [Supabase free-tier template change](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).

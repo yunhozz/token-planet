@@ -13,7 +13,7 @@ npm run tauri -- dev
 
 From the repository root, prefix npm commands with `npm --prefix apps/desktop`. Build a macOS application bundle on a Mac with `npm run tauri -- build --bundles app`. A native Windows machine with the Tauri prerequisites is required to build and check the Windows tray app.
 
-To enable the shared-world controls in a development build, set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` before starting Tauri. The publishable key is a public client key; never embed a Supabase secret or service-role key. Without these values, solo use remains available. The hosted project and custom SMTP are not configured yet.
+To enable the shared-world controls in a development build, set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` before starting Tauri. The publishable key is a public client key; never embed a Supabase secret or service-role key. Without these values, solo use remains available. The hosted Supabase project and database migrations are ready; hosted email OTP remains deferred until custom SMTP and a verified sender domain are available. For local development, use local Supabase and Mailpit as described in the database README.
 
 ## Local sources and storage
 
