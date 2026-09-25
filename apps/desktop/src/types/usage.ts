@@ -25,10 +25,14 @@ export type TokenUsage = TokenBreakdown &
 export type ScanSummary = {
   codex: TokenUsage;
   claude_code: TokenUsage;
+  codex_source: SourceHealth;
+  claude_code_source: SourceHealth;
   confirmed_subtotal: number | null;
   complete_total: number | null;
   scanned_at_utc: string;
 };
+
+export type SourceHealth = "ready" | "not_found" | "permission_denied" | "unsupported_format" | "usage_unavailable" | "partial" | "user_disabled";
 
 export type WorldSnapshot = {
   usage: ScanSummary;

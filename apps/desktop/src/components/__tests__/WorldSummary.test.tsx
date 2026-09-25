@@ -9,6 +9,8 @@ const snapshot: WorldSnapshot = {
   usage: {
     codex: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: 125000, coverage: "complete" },
     claude_code: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: null, coverage: "unavailable" },
+    codex_source: "ready",
+    claude_code_source: "usage_unavailable",
     confirmed_subtotal: 125000,
     complete_total: null,
     scanned_at_utc: "2026-09-25T00:00:00Z",
@@ -21,7 +23,7 @@ const snapshot: WorldSnapshot = {
 
 describe("local world summary", () => {
   it("labels a known subtotal as incomplete without making missing Claude usage zero", () => {
-    render(<><UsageSummary snapshot={snapshot} /><SourceStatus agent="claude_code" usage={snapshot.usage.claude_code} /></>);
+    render(<><UsageSummary snapshot={snapshot} /><SourceStatus agent="claude_code" usage={snapshot.usage.claude_code} health={snapshot.usage.claude_code_source} /></>);
     expect(screen.getByText(/125,000/)).toBeInTheDocument();
     expect(screen.getByText(/집계 불완전/)).toBeInTheDocument();
     expect(screen.getByText(/사용량을 확인할 수 없음/)).toBeInTheDocument();

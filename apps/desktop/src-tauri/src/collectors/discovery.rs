@@ -43,6 +43,7 @@ impl RootOptions {
     }
 }
 
+#[derive(Clone)]
 pub struct SourceConfig {
     pub codex_root: PathBuf,
     pub claude_root: PathBuf,
@@ -73,9 +74,23 @@ pub fn resolve_roots(options: &RootOptions) -> SourceConfig {
 pub struct ScanSummary {
     pub codex: TokenUsage,
     pub claude_code: TokenUsage,
+    pub codex_source: SourceHealth,
+    pub claude_code_source: SourceHealth,
     pub confirmed_subtotal: Option<u64>,
     pub complete_total: Option<u64>,
     pub scanned_at_utc: DateTime<Utc>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SourceHealth {
+    Ready,
+    NotFound,
+    PermissionDenied,
+    UnsupportedFormat,
+    UsageUnavailable,
+    Partial,
+    UserDisabled,
 }
 
 pub fn scan_sources(config: &SourceConfig, ledger: &mut Ledger) -> Result<ScanSummary, ScanError> {
@@ -84,18 +99,40 @@ pub fn scan_sources(config: &SourceConfig, ledger: &mut Ledger) -> Result<ScanSu
     }
     let codex_enabled = ledger.agent_enabled(Agent::Codex)?;
     let claude_enabled = ledger.agent_enabled(Agent::ClaudeCode)?;
-    let codex_ok = if codex_enabled {
+    let codex_source = if codex_enabled {
         scan_root(&config.codex_root, Agent::Codex, ledger)?
     } else {
-        false
+        SourceHealth::UserDisabled
     };
-    let claude_ok = if claude_enabled {
+    let claude_code_source = if claude_enabled {
         scan_root(&config.claude_root, Agent::ClaudeCode, ledger)?
     } else {
-        false
+        SourceHealth::UserDisabled
     };
-    let codex = summarized_usage(ledger, Agent::Codex, codex_ok, codex_enabled)?;
-    let claude_code = summarized_usage(ledger, Agent::ClaudeCode, claude_ok, claude_enabled)?;
+    let codex = summarized_usage(
+        ledger,
+        Agent::Codex,
+        codex_source == SourceHealth::Ready,
+        codex_enabled,
+    )?;
+    let claude_code = summarized_usage(
+        ledger,
+        Agent::ClaudeCode,
+        claude_code_source == SourceHealth::Ready,
+        claude_enabled,
+    )?;
+    let source_health = |scan_health, coverage| {
+        if scan_health != SourceHealth::Ready {
+            return scan_health;
+        }
+        match coverage {
+            UsageCoverage::Complete => SourceHealth::Ready,
+            UsageCoverage::Partial => SourceHealth::Partial,
+            UsageCoverage::Unsupported => SourceHealth::UnsupportedFormat,
+            UsageCoverage::Unavailable => SourceHealth::UsageUnavailable,
+            UsageCoverage::UserDisabled => SourceHealth::UserDisabled,
+        }
+    };
     let confirmed_subtotal = known_subtotal(&[codex.clone(), claude_code.clone()]);
     let complete_total = if [codex.coverage, claude_code.coverage]
         .iter()
@@ -109,9 +146,13 @@ pub fn scan_sources(config: &SourceConfig, ledger: &mut Ledger) -> Result<ScanSu
     } else {
         None
     };
+    let codex_source = source_health(codex_source, codex.coverage);
+    let claude_code_source = source_health(claude_code_source, claude_code.coverage);
     Ok(ScanSummary {
         codex,
         claude_code,
+        codex_source,
+        claude_code_source,
         confirmed_subtotal,
         complete_total,
         scanned_at_utc: Utc::now(),
@@ -152,31 +193,55 @@ fn summarized_usage(
     Ok(usage)
 }
 
-fn scan_root(root: &Path, agent: Agent, ledger: &mut Ledger) -> Result<bool, ScanError> {
-    if !root.is_dir() {
-        return Ok(false);
+fn scan_root(root: &Path, agent: Agent, ledger: &mut Ledger) -> Result<SourceHealth, ScanError> {
+    match fs::metadata(root) {
+        Ok(metadata) if metadata.is_dir() => {}
+        Ok(_) => return Ok(SourceHealth::NotFound),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SourceHealth::NotFound)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Ok(SourceHealth::PermissionDenied)
+        }
+        Err(_) => return Ok(SourceHealth::UsageUnavailable),
     }
-    let mut readable = true;
+    let mut health = SourceHealth::Ready;
+    let mut found_file = false;
     for entry in WalkDir::new(root).follow_links(false) {
         match entry {
             Ok(entry)
                 if entry.file_type().is_file()
                     && entry.path().extension().is_some_and(|e| e == "jsonl") =>
             {
-                if scan_file(entry.path(), agent, ledger).is_err() {
-                    readable = false;
+                found_file = true;
+                match scan_file(entry.path(), agent, ledger) {
+                    Ok(()) => {}
+                    Err(ScanError::SourcePermission) => health = SourceHealth::PermissionDenied,
+                    Err(ScanError::SourceIo) => health = SourceHealth::UsageUnavailable,
+                    Err(error) => return Err(error),
                 }
             }
             Ok(_) => {}
-            Err(_) => readable = false,
+            Err(error)
+                if error
+                    .io_error()
+                    .is_some_and(|error| error.kind() == std::io::ErrorKind::PermissionDenied) =>
+            {
+                health = SourceHealth::PermissionDenied
+            }
+            Err(_) => health = SourceHealth::UsageUnavailable,
         }
     }
-    Ok(readable)
+    Ok(if !found_file && health == SourceHealth::Ready {
+        SourceHealth::UsageUnavailable
+    } else {
+        health
+    })
 }
 
 fn scan_file(path: &Path, agent: Agent, ledger: &mut Ledger) -> Result<(), ScanError> {
-    let file = File::open(path).map_err(|_| ScanError::SourceIo)?;
-    let meta = file.metadata().map_err(|_| ScanError::SourceIo)?;
+    let file = File::open(path).map_err(source_io_error)?;
+    let meta = file.metadata().map_err(source_io_error)?;
     let source_id = format!(
         "{}:{}",
         agent_name(agent),
@@ -268,6 +333,14 @@ fn scan_file(path: &Path, agent: Agent, ledger: &mut Ledger) -> Result<(), ScanE
     Ok(())
 }
 
+fn source_io_error(error: std::io::Error) -> ScanError {
+    if error.kind() == std::io::ErrorKind::PermissionDenied {
+        ScanError::SourcePermission
+    } else {
+        ScanError::SourceIo
+    }
+}
+
 fn file_fingerprint(path: &Path, metadata: &fs::Metadata) -> Result<String, ScanError> {
     let mut data = path.to_string_lossy().as_bytes().to_vec();
     let mut file = File::open(path).map_err(|_| ScanError::SourceIo)?;
@@ -289,7 +362,9 @@ fn hex_hash(input: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{resolve_roots, scan_sources, RootOptions, SourceConfig};
+    use super::{
+        resolve_roots, scan_sources, source_io_error, RootOptions, SourceConfig, SourceHealth,
+    };
     use crate::storage::ledger::Ledger;
     use chrono_tz::Asia::Seoul;
     use std::{fs, path::PathBuf};
@@ -317,6 +392,35 @@ mod tests {
         });
         assert_eq!(changed.codex_root, PathBuf::from("/chosen/codex"));
         assert_eq!(changed.claude_root, PathBuf::from("/claude/projects"));
+    }
+
+    #[test]
+    fn missing_source_and_empty_readable_source_have_distinct_health() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex = temp.path().join("codex");
+        fs::create_dir(&codex).unwrap();
+        let mut ledger = Ledger::open(&temp.path().join("ledger.db"), Seoul).unwrap();
+        let config = SourceConfig {
+            codex_root: codex,
+            claude_root: temp.path().join("missing"),
+            timezone: Seoul,
+        };
+        let summary = scan_sources(&config, &mut ledger).unwrap();
+        assert_eq!(summary.codex_source, SourceHealth::UsageUnavailable);
+        assert_eq!(summary.claude_code_source, SourceHealth::NotFound);
+        assert_eq!(summary.claude_code.total_tokens, None);
+    }
+
+    #[test]
+    fn denied_file_access_is_distinct_from_other_io_failures() {
+        assert_eq!(
+            source_io_error(std::io::Error::from(std::io::ErrorKind::PermissionDenied)),
+            crate::storage::ledger::ScanError::SourcePermission
+        );
+        assert_eq!(
+            source_io_error(std::io::Error::from(std::io::ErrorKind::Other)),
+            crate::storage::ledger::ScanError::SourceIo
+        );
     }
 
     #[test]
@@ -375,6 +479,10 @@ mod tests {
         assert_eq!(
             scan_sources(&config, &mut ledger).unwrap().codex.coverage,
             crate::domain::usage::UsageCoverage::Unsupported
+        );
+        assert_eq!(
+            scan_sources(&config, &mut ledger).unwrap().codex_source,
+            SourceHealth::UnsupportedFormat
         );
         assert_eq!(
             scan_sources(&config, &mut ledger).unwrap().codex.coverage,

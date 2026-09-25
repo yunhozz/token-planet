@@ -12,18 +12,23 @@ use collectors::discovery::{resolve_roots, scan_sources, RootOptions, SourceConf
 use domain::usage::Agent;
 use growth::{world_snapshot, WorldSnapshot};
 use storage::ledger::Ledger;
+use tauri_plugin_dialog::DialogExt;
 
 struct AppState {
-    config: SourceConfig,
+    config: Mutex<SourceConfig>,
     ledger: Mutex<Ledger>,
     latest: Mutex<Option<WorldSnapshot>>,
 }
 
 impl AppState {
     fn scan(&self) -> Result<WorldSnapshot, String> {
+        let config = self
+            .config
+            .lock()
+            .map_err(|_| "source settings unavailable")?
+            .clone();
         let mut ledger = self.ledger.lock().map_err(|_| "local ledger unavailable")?;
-        let summary =
-            scan_sources(&self.config, &mut ledger).map_err(|_| "usage scan unavailable")?;
+        let summary = scan_sources(&config, &mut ledger).map_err(|_| "usage scan unavailable")?;
         let snapshot = world_snapshot(&ledger, summary).map_err(|_| "world growth unavailable")?;
         *self.latest.lock().map_err(|_| "usage status unavailable")? = Some(snapshot.clone());
         Ok(snapshot)
@@ -65,6 +70,54 @@ fn set_source_enabled(
 }
 
 #[tauri::command]
+async fn choose_source_folder(
+    agent: Agent,
+    app: AppHandle,
+    state: State<'_, AppState>,
+) -> Result<Option<WorldSnapshot>, String> {
+    let title = match agent {
+        Agent::Codex => "Codex sessions 폴더 선택",
+        Agent::ClaudeCode => "Claude Code projects 폴더 선택",
+    };
+    let dialog_app = app.clone();
+    let selection = tauri::async_runtime::spawn_blocking(move || {
+        dialog_app
+            .dialog()
+            .file()
+            .set_title(title)
+            .blocking_pick_folder()
+    })
+    .await
+    .map_err(|_| "folder dialog unavailable")?;
+    let Some(folder) = selection else {
+        return Ok(None);
+    };
+    let folder = folder.into_path().map_err(|_| "folder unavailable")?;
+    if !folder.is_dir() {
+        return Err("folder unavailable".into());
+    }
+    state
+        .ledger
+        .lock()
+        .map_err(|_| "local ledger unavailable")?
+        .set_custom_root(agent, &folder)
+        .map_err(|_| "source setting unavailable")?;
+    {
+        let mut config = state
+            .config
+            .lock()
+            .map_err(|_| "source settings unavailable")?;
+        match agent {
+            Agent::Codex => config.codex_root = folder,
+            Agent::ClaudeCode => config.claude_root = folder,
+        }
+    }
+    let snapshot = state.scan()?;
+    let _ = platform::tray::refresh_status(&app, &snapshot);
+    Ok(Some(snapshot))
+}
+
+#[tauri::command]
 fn set_detail_view(detail: bool, window: WebviewWindow) -> Result<(), String> {
     let (width, height) = if detail {
         (820.0, 600.0)
@@ -81,12 +134,13 @@ fn set_detail_view(detail: bool, window: WebviewWindow) -> Result<(), String> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             refresh_usage,
             current_usage,
             set_source_enabled,
-            set_detail_view
+            set_detail_view,
+            choose_source_folder
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -104,12 +158,16 @@ pub fn run() {
                     .parse()
                     .map_err(|_| io::Error::other("system timezone is not an IANA timezone"))?,
             };
-            let roots = RootOptions::from_env(None, None, timezone)
-                .ok_or_else(|| io::Error::other("home directory unavailable"))?;
-            let config = resolve_roots(&roots);
             let ledger = Ledger::open(&ledger_path, timezone)?;
+            let roots = RootOptions::from_env(
+                ledger.custom_root(Agent::Codex)?,
+                ledger.custom_root(Agent::ClaudeCode)?,
+                timezone,
+            )
+            .ok_or_else(|| io::Error::other("home directory unavailable"))?;
+            let config = resolve_roots(&roots);
             let state = AppState {
-                config,
+                config: Mutex::new(config),
                 ledger: Mutex::new(ledger),
                 latest: Mutex::new(None),
             };

@@ -10,6 +10,7 @@ use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
 pub enum ScanError {
     Database,
     SourceIo,
+    SourcePermission,
     InvalidCount,
     TimezoneMismatch,
 }
@@ -22,6 +23,7 @@ impl fmt::Display for ScanError {
             match self {
                 Self::Database => "local database error",
                 Self::SourceIo => "source file unavailable",
+                Self::SourcePermission => "source file permission denied",
                 Self::InvalidCount => "token count exceeds local storage range",
                 Self::TimezoneMismatch => "world timezone differs from saved ledger",
             }
@@ -127,6 +129,26 @@ impl Ledger {
             )
             .optional()?;
         value.flatten().map(as_u64).transpose()
+    }
+
+    pub fn custom_root(&self, agent: Agent) -> Result<Option<std::path::PathBuf>, ScanError> {
+        let key = format!("{}_custom_root", agent_name(agent));
+        let saved: Option<String> = self
+            .connection
+            .query_row("SELECT value FROM setting WHERE key=?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?;
+        Ok(saved.map(std::path::PathBuf::from))
+    }
+
+    pub fn set_custom_root(&mut self, agent: Agent, folder: &Path) -> Result<(), ScanError> {
+        let key = format!("{}_custom_root", agent_name(agent));
+        self.connection.execute(
+            "INSERT INTO setting(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![key, folder.to_string_lossy().as_ref()],
+        )?;
+        Ok(())
     }
 
     pub fn agent_enabled(&self, agent: Agent) -> Result<bool, ScanError> {
@@ -352,6 +374,18 @@ mod tests {
             ledger.daily_total(Agent::Codex, "2026-09-25").unwrap(),
             Some(42)
         );
+    }
+
+    #[test]
+    fn custom_source_root_is_local_and_survives_restart() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let folder = std::path::PathBuf::from("/example/private/sessions");
+        {
+            let mut ledger = Ledger::open(file.path(), Seoul).unwrap();
+            ledger.set_custom_root(Agent::Codex, &folder).unwrap();
+        }
+        let ledger = Ledger::open(file.path(), Seoul).unwrap();
+        assert_eq!(ledger.custom_root(Agent::Codex).unwrap(), Some(folder));
     }
 
     #[test]

@@ -11,6 +11,7 @@ const EMPTY_SNAPSHOT: WorldSnapshot = {
   usage: {
     codex: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: null, coverage: "unavailable" },
     claude_code: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: null, coverage: "unavailable" },
+    codex_source: "usage_unavailable", claude_code_source: "usage_unavailable",
     confirmed_subtotal: null, complete_total: null, scanned_at_utc: "",
   },
   growth_credit: 0, stage: 0, progress_to_next: 0, incomplete: true,
@@ -53,6 +54,13 @@ function App() {
     } catch { setError(true); }
   }
 
+  async function selectFolder(agent: Agent) {
+    try {
+      const updated = await invoke<WorldSnapshot | null>("choose_source_folder", { agent });
+      if (updated) { setSnapshot(updated); setError(false); }
+    } catch { setError(true); }
+  }
+
   async function changeView() {
     const next = !detail;
     try { await invoke("set_detail_view", { detail: next }); } catch { /* Browser previews have no native window. */ }
@@ -75,7 +83,7 @@ function App() {
         <section className="world-info">
           <UsageSummary snapshot={snapshot ?? EMPTY_SNAPSHOT} />
           <div className="source-list" aria-label="수집 상태">
-            {snapshot ? <><SourceStatus agent="codex" usage={snapshot.usage.codex} onToggle={detail ? toggleSource : undefined} /><SourceStatus agent="claude_code" usage={snapshot.usage.claude_code} onToggle={detail ? toggleSource : undefined} /></> : <p className="empty-note">로컬 기록을 확인하고 있습니다.</p>}
+            {snapshot ? <><SourceStatus agent="codex" usage={snapshot.usage.codex} health={snapshot.usage.codex_source} onToggle={detail ? toggleSource : undefined} onSelectFolder={detail ? selectFolder : undefined} /><SourceStatus agent="claude_code" usage={snapshot.usage.claude_code} health={snapshot.usage.claude_code_source} onToggle={detail ? toggleSource : undefined} onSelectFolder={detail ? selectFolder : undefined} /></> : <p className="empty-note">로컬 기록을 확인하고 있습니다.</p>}
           </div>
           {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
           {detail && <div className="detail-note"><h2>함께 만드는 세계</h2><p>확인된 토큰이 매일의 성장 크레딧으로 바뀝니다. 지금은 나만의 세계입니다.</p><p>기록과 대화 내용은 이 기기에만 남습니다.</p></div>}

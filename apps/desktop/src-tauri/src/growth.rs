@@ -60,7 +60,10 @@ pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapsh
 #[cfg(test)]
 mod tests {
     use super::{contribution_credit, world_snapshot, K_TOKENS, STAGE_THRESHOLDS};
-    use crate::collectors::{discovery::ScanSummary, ParsedRecord, RecordKind};
+    use crate::collectors::{
+        discovery::{ScanSummary, SourceHealth},
+        ParsedRecord, RecordKind,
+    };
     use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
     use crate::storage::ledger::Ledger;
     use chrono::{DateTime, Utc};
@@ -82,6 +85,8 @@ mod tests {
         ScanSummary {
             codex,
             claude_code: claude,
+            codex_source: SourceHealth::Ready,
+            claude_code_source: SourceHealth::Ready,
             confirmed_subtotal: None,
             complete_total: None,
             scanned_at_utc: Utc::now(),
