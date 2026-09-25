@@ -6,7 +6,7 @@
 
 **Architecture:** The desktop Rust process sends idempotent daily snapshots for each linked device and agent. A managed relational service owns authentication, membership, invitations, and aggregate storage; row-level access rules protect every world. Other group members receive only the planet's combined totals and progress.
 
-**Tech Stack:** Tauri 2 + React + Rust client; backend provider is a decision gate. Recommended provider: managed PostgreSQL with authentication and row-level access policies (Supabase is the leading candidate).
+**Tech Stack:** Tauri 2 + React + Rust client; Supabase PostgreSQL, Auth, and row-level access policies for the shared service (user-selected).
 
 **Spec:** `docs/specs/token-world-mvp.md`
 
@@ -31,7 +31,7 @@
 
 ## File Structure
 
-The final files depend on the provider choice. If the recommended Supabase path is approved:
+The selected Supabase implementation uses:
 
 - `supabase/migrations/0001_worlds_and_memberships.sql`: worlds, membership roles, membership constraints, and row-level policies.
 - `supabase/migrations/0002_daily_usage_snapshots.sql`: per-device daily agent snapshots, uniqueness keys, and aggregate access policies.
@@ -45,8 +45,6 @@ The final files depend on the provider choice. If the recommended Supabase path 
 - `apps/desktop/src/components/InvitePanel.tsx`: invite creation, copy, revocation, and acceptance.
 - `apps/desktop/src/components/SyncStatus.tsx`: last successful sync and queued state.
 - `apps/desktop/src/lib/sharing.ts`: typed frontend commands for sharing state.
-
-If a different provider is selected, replace the `supabase/` files and repeat the same schema, policy, invitation, idempotency, and deletion acceptance criteria in that provider's native format before implementation.
 
 ## Provider and account options for review
 
@@ -64,7 +62,7 @@ Recommended account flow is email magic-link sign-in across both platforms. Reco
 
 **Files:** update this plan and `docs/specs/token-world-mvp.md` only after review; no implementation files yet.
 
-- [ ] Select Supabase, Firebase, or custom Rust API using the comparison above.
+- [x] Select Supabase, Firebase, or custom Rust API using the comparison above. The user selected Supabase.
 - [ ] Confirm email magic-link sign-in or select a different cross-platform sign-in method.
 - [ ] Confirm invite expiry, one-use behavior, and whether an owner may transfer ownership or must dissolve the world on departure.
 - [ ] Confirm device-scoped dedupe for MVP or select account-scoped pseudonymous event hashes; device-scoped dedupe is recommended and does not catch a user manually copying the same source history onto another device.

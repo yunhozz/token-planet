@@ -1,6 +1,6 @@
 # Token World MVP Product and Technical Specification
 
-**Status:** Approved product direction; the decision gates below remain for plan review before implementation.
+**Status:** Approved product direction; Supabase is selected for shared-world sync. Remaining shared-world decisions below require review before that implementation.
 
 ## Product goal
 
@@ -15,6 +15,7 @@ Token World is a private, cooperative desktop app where Codex and Claude Code us
 - Core metric: the combined number of eligible tokens known from the enabled sources.
 - Raw logs, message text, prompts, tool output, and source file paths stay on each device.
 - The shared service receives only per-member, per-device, per-day, per-agent aggregate counts and sync metadata. The service can read those aggregates; other members see the world total, not member-level totals or a leaderboard.
+- Shared-world service: Supabase PostgreSQL, Auth, and row-level access policies, as selected by the user.
 - A missing, unreadable, or unrecognized source is shown as unknown or incomplete. It is never silently converted to zero.
 - The desktop app parses records locally and stores its deduplication ledger locally.
 - Store the local ledger and pending sync outbox under Tauri's OS-managed application-local-data directory; keep it separate from the original agent logs.
@@ -97,7 +98,7 @@ For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. W
 ## Decision gates before implementation
 
 1. Use TypeScript for the React frontend and npm as the user-selected package manager; commit `package-lock.json` for reproducible installs.
-2. Select the authentication/backend provider. Options and tradeoffs are recorded in the shared-world plan; recommendation: managed PostgreSQL with row-level access policies.
+2. Backend provider selected: Supabase PostgreSQL, Auth, and row-level access policies. Sign-in method remains a review choice.
 3. Use `K = 100,000`, a world-creator IANA timezone fixed at world creation, and cumulative stage thresholds of 5, 20, 50, and 100 credits, as selected by the user. Use the per-member, per-day logarithmic curve above, with no hard contribution cap.
 4. Confirm invitation expiry and whether the owner may transfer ownership or must dissolve the world when leaving.
 5. Confirm device-scoped dedupe for MVP or choose account-scoped pseudonymous event hashes to deduplicate copied history across devices. Recommendation: device-scoped dedupe, with the copied-history limitation disclosed.
