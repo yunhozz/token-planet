@@ -1,11 +1,12 @@
 pub mod collectors;
 pub mod domain;
 pub mod growth;
+pub mod platform;
 pub mod storage;
 
 use std::{fs, io, sync::Mutex, time::Duration};
 
-use tauri::{Emitter, Manager, State};
+use tauri::{AppHandle, Emitter, LogicalSize, Manager, State, WebviewWindow, WindowEvent};
 
 use collectors::discovery::{resolve_roots, scan_sources, RootOptions, SourceConfig};
 use domain::usage::Agent;
@@ -30,8 +31,10 @@ impl AppState {
 }
 
 #[tauri::command]
-fn refresh_usage(state: State<'_, AppState>) -> Result<WorldSnapshot, String> {
-    state.scan()
+fn refresh_usage(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnapshot, String> {
+    let snapshot = state.scan()?;
+    let _ = platform::tray::refresh_status(&app, &snapshot);
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -48,6 +51,7 @@ fn set_source_enabled(
     agent: Agent,
     enabled: bool,
     state: State<'_, AppState>,
+    app: AppHandle,
 ) -> Result<WorldSnapshot, String> {
     state
         .ledger
@@ -55,7 +59,23 @@ fn set_source_enabled(
         .map_err(|_| "local ledger unavailable")?
         .set_agent_enabled(agent, enabled)
         .map_err(|_| "source setting unavailable")?;
-    state.scan()
+    let snapshot = state.scan()?;
+    let _ = platform::tray::refresh_status(&app, &snapshot);
+    Ok(snapshot)
+}
+
+#[tauri::command]
+fn set_detail_view(detail: bool, window: WebviewWindow) -> Result<(), String> {
+    let (width, height) = if detail {
+        (820.0, 600.0)
+    } else {
+        (390.0, 700.0)
+    };
+    window
+        .set_size(LogicalSize::new(width, height))
+        .map_err(|_| "window size unavailable")?;
+    window.center().map_err(|_| "window position unavailable")?;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -65,9 +85,15 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             refresh_usage,
             current_usage,
-            set_source_enabled
+            set_source_enabled,
+            set_detail_view
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            platform::macos::configure(app);
+            #[cfg(target_os = "windows")]
+            platform::windows::configure(app);
+            platform::tray::install(app)?;
             let app_data = app.path().app_local_data_dir()?;
             fs::create_dir_all(&app_data)?;
             let ledger_path = app_data.join("usage-ledger.sqlite3");
@@ -89,15 +115,31 @@ pub fn run() {
             };
             let _ = state.scan();
             app.manage(state);
+            if let Some(snapshot) = app
+                .state::<AppState>()
+                .latest
+                .lock()
+                .ok()
+                .and_then(|value| value.clone())
+            {
+                let _ = platform::tray::refresh_status(app.handle(), &snapshot);
+            }
             let handle = app.handle().clone();
             std::thread::spawn(move || loop {
                 std::thread::sleep(Duration::from_secs(60));
                 let state = handle.state::<AppState>();
                 if let Ok(summary) = state.scan() {
+                    let _ = platform::tray::refresh_status(&handle, &summary);
                     let _ = handle.emit("usage-updated", summary);
                 }
             });
             Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

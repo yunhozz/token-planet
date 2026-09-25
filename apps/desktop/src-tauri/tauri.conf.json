@@ -13,8 +13,9 @@
     "windows": [
       {
         "title": "Token World",
-        "width": 800,
-        "height": 600
+        "width": 390,
+        "height": 700,
+        "resizable": false
       }
     ],
     "security": {

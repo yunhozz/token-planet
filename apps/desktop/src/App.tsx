@@ -29,8 +29,9 @@ function App() {
     }).catch(() => { if (active) setError(true); });
     const unlisten = listen<WorldSnapshot>("usage-updated", (event) => {
       if (active) { setSnapshot(event.payload); setError(false); }
-    });
-    return () => { active = false; void unlisten.then((stop) => stop()); };
+    }).catch(() => () => {});
+    const unlistenCompact = listen("show-compact", () => { if (active) setDetail(false); }).catch(() => () => {});
+    return () => { active = false; void unlisten.then((stop) => stop()); void unlistenCompact.then((stop) => stop()); };
   }, []);
 
   async function refresh() {
@@ -50,6 +51,12 @@ function App() {
       setSnapshot(await invoke<WorldSnapshot>("set_source_enabled", { agent, enabled }));
       setError(false);
     } catch { setError(true); }
+  }
+
+  async function changeView() {
+    const next = !detail;
+    try { await invoke("set_detail_view", { detail: next }); } catch { /* Browser previews have no native window. */ }
+    setDetail(next);
   }
 
   const stage = snapshot?.stage ?? 0;
@@ -72,7 +79,7 @@ function App() {
           </div>
           {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
           {detail && <div className="detail-note"><h2>함께 만드는 세계</h2><p>확인된 토큰이 매일의 성장 크레딧으로 바뀝니다. 지금은 나만의 세계입니다.</p><p>기록과 대화 내용은 이 기기에만 남습니다.</p></div>}
-          <footer className="bottom-actions"><span className="sync-note">이 기기에서만 저장 중</span><button className="text-button" type="button" onClick={() => setDetail(!detail)}>{detail ? "간단히 보기" : "세계 자세히 보기"}</button></footer>
+          <footer className="bottom-actions"><span className="sync-note">이 기기에서만 저장 중</span><button className="text-button" type="button" onClick={changeView}>{detail ? "간단히 보기" : "세계 자세히 보기"}</button></footer>
         </section>
       </div>
     </main>
