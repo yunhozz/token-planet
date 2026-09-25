@@ -54,7 +54,7 @@ The selected Supabase implementation uses:
 | Firebase Auth + Firestore | Fast auth and realtime data flow | Aggregate-per-member/day access rules and reporting are less natural; denormalized rules need careful testing | Suitable if realtime-first experience becomes the priority |
 | Custom Rust API + PostgreSQL | Full control of invite, privacy, retention, and account flows | Requires operating, monitoring, securing, and updating a backend from day one | Defer until managed-provider limits are known |
 
-Recommended account flow is email magic-link sign-in across both platforms. Recommended invitation is a private, single-use, revocable random code/link with a 7-day expiry and a 10-member cap. Confirm provider, sign-in flow, expiry, and world-owner departure behavior before implementation.
+The user selected email verification-code sign-in inside the desktop app across both platforms. Recommended invitation is a private, single-use, revocable random code/link with a 7-day expiry and a 10-member cap. Confirm invite expiry and world-owner departure behavior before implementation.
 
 ## Tasks
 
@@ -63,7 +63,7 @@ Recommended account flow is email magic-link sign-in across both platforms. Reco
 **Files:** update this plan and `docs/specs/token-world-mvp.md` only after review; no implementation files yet.
 
 - [x] Select Supabase, Firebase, or custom Rust API using the comparison above. The user selected Supabase.
-- [ ] Confirm email magic-link sign-in or select a different cross-platform sign-in method.
+- [x] Confirm email magic-link sign-in or select a different cross-platform sign-in method. The user selected an email verification code entered in the app.
 - [ ] Confirm invite expiry, one-use behavior, and whether an owner may transfer ownership or must dissolve the world on departure.
 - [ ] Confirm device-scoped dedupe for MVP or select account-scoped pseudonymous event hashes; device-scoped dedupe is recommended and does not catch a user manually copying the same source history onto another device.
 - [ ] Confirm one shared world per account or multiple shared worlds; one shared world per account is recommended for MVP, while solo progress remains local until sharing starts.

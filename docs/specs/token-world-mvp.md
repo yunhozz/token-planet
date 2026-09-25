@@ -16,6 +16,7 @@ Token World is a private, cooperative desktop app where Codex and Claude Code us
 - Raw logs, message text, prompts, tool output, and source file paths stay on each device.
 - The shared service receives only per-member, per-device, per-day, per-agent aggregate counts and sync metadata. The service can read those aggregates; other members see the world total, not member-level totals or a leaderboard.
 - Shared-world service: Supabase PostgreSQL, Auth, and row-level access policies, as selected by the user.
+- Shared-world sign-in: a one-time email verification code entered inside the desktop app, as selected by the user.
 - A missing, unreadable, or unrecognized source is shown as unknown or incomplete. It is never silently converted to zero.
 - The desktop app parses records locally and stores its deduplication ledger locally.
 - Store the local ledger and pending sync outbox under Tauri's OS-managed application-local-data directory; keep it separate from the original agent logs.
@@ -98,7 +99,7 @@ For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. W
 ## Decision gates before implementation
 
 1. Use TypeScript for the React frontend and npm as the user-selected package manager; commit `package-lock.json` for reproducible installs.
-2. Backend provider selected: Supabase PostgreSQL, Auth, and row-level access policies. Sign-in method remains a review choice.
+2. Backend provider selected: Supabase PostgreSQL, Auth, and row-level access policies. Email verification code is the selected sign-in method.
 3. Use `K = 100,000`, a world-creator IANA timezone fixed at world creation, and cumulative stage thresholds of 5, 20, 50, and 100 credits, as selected by the user. Use the per-member, per-day logarithmic curve above, with no hard contribution cap.
 4. Confirm invitation expiry and whether the owner may transfer ownership or must dissolve the world when leaving.
 5. Confirm device-scoped dedupe for MVP or choose account-scoped pseudonymous event hashes to deduplicate copied history across devices. Recommendation: device-scoped dedupe, with the copied-history limitation disclosed.
@@ -109,6 +110,7 @@ For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. W
 
 - [Tauri create a project](https://v2.tauri.app/start/create-project/)
 - [Tauri tray API](https://v2.tauri.app/reference/javascript/api/namespacetray/)
+- [Supabase email passwordless sign-in](https://supabase.com/docs/guides/auth/auth-email-passwordless)
 - [Claude Code session files](https://code.claude.com/docs/en/sessions)
 - [Claude Code directory and configuration](https://code.claude.com/docs/en/claude-directory)
 - [Claude Code usage monitoring fields](https://code.claude.com/docs/en/monitoring-usage)
