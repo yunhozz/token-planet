@@ -54,7 +54,7 @@ The selected Supabase implementation uses:
 | Firebase Auth + Firestore | Fast auth and realtime data flow | Aggregate-per-member/day access rules and reporting are less natural; denormalized rules need careful testing | Suitable if realtime-first experience becomes the priority |
 | Custom Rust API + PostgreSQL | Full control of invite, privacy, retention, and account flows | Requires operating, monitoring, securing, and updating a backend from day one | Defer until managed-provider limits are known |
 
-The user selected email verification-code sign-in inside the desktop app across both platforms. The selected invitation is a private, single-use, revocable random code/link with a 7-day expiry and a 10-member cap. Confirm world-owner departure behavior before implementation.
+The user selected email verification-code sign-in inside the desktop app across both platforms. The selected invitation is a private, single-use, revocable random code/link with a 7-day expiry and a 10-member cap. An owner must transfer ownership to another member before leaving; leaving a solo shared world dissolves it.
 
 ## Tasks
 
@@ -64,7 +64,7 @@ The user selected email verification-code sign-in inside the desktop app across 
 
 - [x] Select Supabase, Firebase, or custom Rust API using the comparison above. The user selected Supabase.
 - [x] Confirm email magic-link sign-in or select a different cross-platform sign-in method. The user selected an email verification code entered in the app.
-- [ ] Confirm invite expiry, one-use behavior, and whether an owner may transfer ownership or must dissolve the world on departure. The 7-day, single-use, revocable invite is selected; owner departure remains open.
+- [x] Confirm invite expiry, one-use behavior, and whether an owner may transfer ownership or must dissolve the world on departure. The user selected the 7-day, single-use, revocable invite and owner transfer; a solo owner dissolves the world on departure.
 - [ ] Confirm device-scoped dedupe for MVP or select account-scoped pseudonymous event hashes; device-scoped dedupe is recommended and does not catch a user manually copying the same source history onto another device.
 - [ ] Confirm one shared world per account or multiple shared worlds; one shared world per account is recommended for MVP, while solo progress remains local until sharing starts.
 - [ ] Use the reviewed `K = 100,000`, the world creator's fixed IANA timezone, and cumulative thresholds 5, 20, 50, and 100 credits before defining the server growth aggregate.

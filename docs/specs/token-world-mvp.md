@@ -71,6 +71,7 @@ For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. W
 - A person starts with a solo world. Sharing requires signing in and creating or joining a private world.
 - A shared world has 1–10 members. There is no public directory or friend discovery in MVP.
 - Invitation: a hard-to-guess private link/code that expires after 7 days, can be used once, and can be revoked by its creator, as selected by the user.
+- A world owner transfers ownership to another member before leaving or deleting the account. If no other member remains, leaving dissolves that world.
 - Each installation has a stable device ID. The client sends absolute daily snapshots keyed by member, device, the approved day bucket, and agent, with a monotonic revision and idempotency hash. The server replaces the same snapshot on retry rather than adding it twice.
 - Recommended MVP dedupe is device-scoped: it handles scanner replays, app restarts, and network retries without sending event identifiers. If a user manually copies the same historical source logs to another device, those device snapshots can count the same usage twice. Account-scoped pseudonymous event hashes could prevent that but would add persistent per-event identifiers to server data; that choice remains for review.
 - The server stores world membership and aggregates, but no session IDs, prompts, conversation text, filesystem paths, or raw logs.
@@ -101,7 +102,7 @@ For a normalized curve, `T/K = 0, 1, 3, 7, 15` yields `0, 1, 2, 3, 4` credits. W
 1. Use TypeScript for the React frontend and npm as the user-selected package manager; commit `package-lock.json` for reproducible installs.
 2. Backend provider selected: Supabase PostgreSQL, Auth, and row-level access policies. Email verification code is the selected sign-in method.
 3. Use `K = 100,000`, a world-creator IANA timezone fixed at world creation, and cumulative stage thresholds of 5, 20, 50, and 100 credits, as selected by the user. Use the per-member, per-day logarithmic curve above, with no hard contribution cap.
-4. Invitation policy selected: 7-day expiry, one use, revocable. Confirm whether the owner may transfer ownership or must dissolve the world when leaving.
+4. Invitation policy selected: 7-day expiry, one use, revocable. Owner departure policy selected: transfer ownership to another member, or dissolve a solo world.
 5. Confirm device-scoped dedupe for MVP or choose account-scoped pseudonymous event hashes to deduplicate copied history across devices. Recommendation: device-scoped dedupe, with the copied-history limitation disclosed.
 6. Confirm whether each account may have one shared world or multiple shared worlds. Recommendation: one shared world per account in MVP, while keeping a solo world local until the user creates or joins a shared world.
 7. Before claiming Claude Code collection works for a given release, validate the adapter against a real native Windows Claude Code transcript that contains usage fields. Until then, missing or ambiguous usage remains explicitly unavailable.
