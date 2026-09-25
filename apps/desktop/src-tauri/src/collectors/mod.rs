@@ -1,5 +1,6 @@
 pub mod claude_code;
 pub mod codex;
+pub mod discovery;
 
 use chrono::{DateTime, Utc};
 use std::fmt;
