@@ -1,4 +1,4 @@
-# Token World shared-world database
+# Token Planet shared-world database
 
 The full migration chain and 121 pgTAP assertions are verified locally with Supabase CLI 2.118.0 and Docker (PostgreSQL 17). The personal-planet migration corrections have not been applied or tested on the hosted project.
 
@@ -20,4 +20,4 @@ The world and membership tables enforce one shared world per account and at most
 
 The database requires a recognized world timezone and keeps it fixed. A world owner's account cannot be deleted while the world still points to it; ownership must be transferred or the world dissolved first. Later migrations implement single-use hashed invitations, idempotent per-device uploads, ownership transfer, leave, and deletion of a member's synced aggregates.
 
-The hosted Token World project and database migrations are ready, but a custom SMTP provider and verified sender domain are not configured. Hosted OTP delivery and its email templates therefore remain deferred. After SMTP is configured, apply both OTP templates and verify code delivery and session refresh before inviting other users. Local Auth and OTP development can use the Mailpit setup above. See the [Supabase free-tier template change](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).
+The hosted `token-planet` project and database migrations are ready, but a custom SMTP provider and verified sender domain are not configured. Hosted OTP delivery and its email templates therefore remain deferred. After SMTP is configured, apply both OTP templates and verify code delivery and session refresh before inviting other users. Local Auth and OTP development can use the Mailpit setup above. See the [Supabase free-tier template change](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).
