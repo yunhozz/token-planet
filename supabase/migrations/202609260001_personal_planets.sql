@@ -51,14 +51,14 @@ language sql security definer set search_path = '' as $$
     'profile', jsonb_build_object('nickname', p.nickname, 'avatar', p.avatar),
     'timezone', p.timezone,
     'current_cycle_id', p.current_cycle_id,
-    'cycle_started_at_utc', to_char(p.cycle_started_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'),
-    'last_reset_at_utc', case when p.last_reset_at is null then null else to_char(p.last_reset_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') end,
+    'cycle_started_at_utc', to_char(p.cycle_started_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'),
+    'last_reset_at_utc', case when p.last_reset_at is null then null else to_char(p.last_reset_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') end,
     'wallet_balance', coalesce((select sum(w.amount) from private.planet_wallet_credits w where w.user_id=p.user_id), 0),
     'wallet_credits', coalesce((
       select jsonb_agg(jsonb_build_object(
         'previous_cycle_id', w.previous_cycle_id,
         'amount', w.amount,
-        'created_at_utc', to_char(w.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"')
+        'created_at_utc', to_char(w.created_at at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')
       ) order by w.created_at, w.previous_cycle_id)
       from private.planet_wallet_credits w where w.user_id=p.user_id
     ), '[]'::jsonb),
@@ -69,7 +69,7 @@ language sql security definer set search_path = '' as $$
     'progress_to_next', p.progress_to_next,
     'incomplete', p.incomplete,
     'can_reset', p.last_reset_at is null or now() >= p.last_reset_at + interval '24 hours',
-    'reset_available_at_utc', case when p.last_reset_at is null then null else to_char((p.last_reset_at + interval '24 hours') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"') end,
+    'reset_available_at_utc', case when p.last_reset_at is null then null else to_char((p.last_reset_at + interval '24 hours') at time zone 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') end,
     'objects', p.objects
   )
   from public.planet_member_state p where p.user_id = p_user_id;
@@ -232,14 +232,14 @@ begin
         'house', 'workshop', 'plaza', 'road', 'market', 'factory', 'power', 'rail', 'tower',
         'district', 'laboratory', 'satellite', 'rocket', 'solar', 'habitat'
       )
-      or not case (v_object->>'stage')::integer
+      or not (case (v_object->>'stage')::integer
         when 0 then v_object->>'kind' in ('rock', 'water', 'tree', 'fern', 'creature')
         when 1 then v_object->>'kind' in ('camp', 'crops', 'cottage', 'path', 'well')
         when 2 then v_object->>'kind' in ('house', 'workshop', 'plaza', 'road', 'market')
         when 3 then v_object->>'kind' in ('factory', 'power', 'rail', 'tower', 'district')
         when 4 then v_object->>'kind' in ('laboratory', 'satellite', 'rocket', 'solar', 'habitat')
         else false
-      end
+      end)
       or jsonb_typeof(v_object->'x') <> 'number'
       or jsonb_typeof(v_object->'y') <> 'number'
       or jsonb_typeof(v_object->'seed') <> 'number'
@@ -412,8 +412,8 @@ begin
       where m.world_id = p_world_id
     ), ranked as (
       select members.*,
-        rank() over (order by lifetime_tokens desc)::smallint as token_rank,
-        rank() over (order by growth_credit desc)::smallint as civilization_rank
+        rank() over (order by members.lifetime_tokens desc)::smallint as token_rank,
+        rank() over (order by members.growth_credit desc)::smallint as civilization_rank
       from members
     )
     select ranked.nickname, ranked.avatar, ranked.stage, ranked.current_planet_tokens,

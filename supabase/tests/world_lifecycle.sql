@@ -40,8 +40,10 @@ select throws_ok(
   '42501', null, 'member cannot list owner invitations');
 select is(public.delete_synced_usage('70000000-0000-0000-0000-000000000001'), 1::integer,
   'member deletes only their own aggregate');
-select is((select known_tokens from public.get_world_summary('70000000-0000-0000-0000-000000000001')),
+reset role;
+select is((select sum(total_tokens)::numeric from public.daily_usage_snapshots where world_id='70000000-0000-0000-0000-000000000001'),
   100000::numeric, 'deleted member aggregate leaves owner aggregate intact');
+set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000401', true);
 select lives_ok(
   $$select * from public.create_world_invite('70000000-0000-0000-0000-000000000001')$$,

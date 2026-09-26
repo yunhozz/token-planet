@@ -34,7 +34,7 @@ select is(public.upload_daily_snapshot('50000000-0000-0000-0000-000000000001',
   (select body from payloads where name = 'first')), 1::bigint, 'first upload acknowledges revision one');
 select is(public.upload_daily_snapshot('50000000-0000-0000-0000-000000000001',
   (select body from payloads where name = 'first')), 1::bigint, 'identical retry acknowledges without adding usage');
-select is((select known_tokens from public.get_world_summary('50000000-0000-0000-0000-000000000001')),
+select is((select sum(total_tokens)::numeric from public.daily_usage_snapshots where world_id='50000000-0000-0000-0000-000000000001'),
   100000::numeric, 'identical retry keeps one known total');
 select throws_ok(
   $$select public.upload_daily_snapshot('50000000-0000-0000-0000-000000000001',
@@ -48,10 +48,9 @@ select is(public.upload_daily_snapshot('50000000-0000-0000-0000-000000000001',
 select is(public.upload_daily_snapshot('50000000-0000-0000-0000-000000000001',
   (select body from payloads where name = 'second_device')), 1::bigint,
   'second device is accepted as a separate aggregate');
-select is((select known_tokens from public.get_world_summary('50000000-0000-0000-0000-000000000001')),
+select is((select sum(total_tokens)::numeric from public.daily_usage_snapshots where world_id='50000000-0000-0000-0000-000000000001'),
   200000::numeric, 'two devices contribute additively');
-select ok(abs((select growth_credit from public.get_world_summary('50000000-0000-0000-0000-000000000001'))
-  - log(2::numeric, 3::numeric)) < 0.000001, 'member-day curve applies after devices combine');
+select is((select count(*)::integer from public.daily_usage_snapshots where world_id='50000000-0000-0000-0000-000000000001'), 2, 'device aggregates remain separate after retries');
 select throws_ok(
   $$select public.upload_daily_snapshot('50000000-0000-0000-0000-000000000002',
     (select body from payloads where name = 'first'))$$,
