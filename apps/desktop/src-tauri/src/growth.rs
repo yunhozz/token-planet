@@ -166,6 +166,19 @@ mod tests {
     use chrono_tz::UTC;
     use std::path::Path;
 
+    fn fixture_ledger() -> Ledger {
+        let ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='2026-09-24T00:00:00Z'
+             WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
+                [],
+            )
+            .unwrap();
+        ledger
+    }
+
     fn usage(total: Option<u64>, coverage: UsageCoverage) -> TokenUsage {
         TokenUsage {
             input_tokens: None,
@@ -205,7 +218,7 @@ mod tests {
 
     #[test]
     fn zero_known_tokens_yield_proto_planet() {
-        let ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        let ledger = fixture_ledger();
         let world = world_snapshot(
             &ledger,
             summary(
@@ -221,7 +234,7 @@ mod tests {
 
     #[test]
     fn enabled_sources_combine_before_daily_curve() {
-        let mut ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        let mut ledger = fixture_ledger();
         insert(&mut ledger, Agent::Codex, "codex:r1", 50_000);
         insert(&mut ledger, Agent::ClaudeCode, "claude:r1", 50_000);
         let world = world_snapshot(
@@ -240,7 +253,7 @@ mod tests {
 
     #[test]
     fn missing_source_keeps_world_incomplete_while_known_credit_grows() {
-        let mut ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        let mut ledger = fixture_ledger();
         insert(&mut ledger, Agent::Codex, "codex:r1", 100_000);
         let world = world_snapshot(
             &ledger,
@@ -256,8 +269,9 @@ mod tests {
 
     #[test]
     fn disabled_agent_history_does_not_grow_the_world() {
-        let mut ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        let mut ledger = fixture_ledger();
         insert(&mut ledger, Agent::Codex, "codex:r1", 100_000);
+        assert_eq!(ledger.planet_usage_totals().unwrap().1, 100_000);
         ledger.set_agent_enabled(Agent::Codex, false).unwrap();
         let world = world_snapshot(
             &ledger,
@@ -268,6 +282,8 @@ mod tests {
         )
         .unwrap();
         assert_eq!(world.growth_credit, 0.0);
+        assert_eq!(world.planet.current_planet_tokens, 0);
+        assert_eq!(world.planet.lifetime_tokens, 0);
     }
 
     #[test]

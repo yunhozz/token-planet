@@ -466,6 +466,19 @@ mod tests {
     use crate::sync::aggregate::DailyUsageSnapshot;
     use chrono_tz::UTC;
 
+    fn fixture_ledger() -> Ledger {
+        let ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='2026-09-24T00:00:00Z'
+             WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
+                [],
+            )
+            .unwrap();
+        ledger
+    }
+
     fn snapshot(revision: u64, total: Option<u64>) -> DailyUsageSnapshot {
         DailyUsageSnapshot {
             device_id: "device-1".into(),
@@ -549,7 +562,7 @@ mod tests {
 
     #[test]
     fn preparing_changed_history_increments_revision_without_duplicate_queue_rows() {
-        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let mut ledger = fixture_ledger();
         let first = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
         ledger.insert(&first).unwrap();
         ledger
@@ -590,7 +603,7 @@ mod tests {
 
     #[test]
     fn deletion_cutoff_prevents_old_history_from_reappearing_after_resume() {
-        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let mut ledger = fixture_ledger();
         let old = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
         ledger.insert(&old).unwrap();
         ledger
@@ -616,7 +629,7 @@ mod tests {
 
     #[test]
     fn leaving_and_rejoining_does_not_reupload_old_history() {
-        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let mut ledger = fixture_ledger();
         let old = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
         ledger.insert(&old).unwrap();
         ledger
@@ -788,7 +801,7 @@ mod tests {
 
     #[test]
     fn disabled_agent_replaces_its_prior_total_with_unknown_status() {
-        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let mut ledger = fixture_ledger();
         let record = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
         ledger.insert(&record).unwrap();
         ledger
@@ -841,7 +854,7 @@ mod tests {
 
     #[test]
     fn unresolved_scan_failure_keeps_historical_shared_total_incomplete() {
-        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), UTC).unwrap();
+        let mut ledger = fixture_ledger();
         let record = crate::collectors::codex::parse_line(r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#).unwrap().unwrap();
         ledger.insert(&record).unwrap();
         ledger

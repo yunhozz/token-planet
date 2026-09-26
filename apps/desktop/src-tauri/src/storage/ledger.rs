@@ -393,6 +393,7 @@ impl Ledger {
         let mut statement = self.connection.prepare(
             "SELECT r.occurred_at_utc,r.total_tokens FROM usage_record r
              WHERE r.total_tokens IS NOT NULL AND r.occurred_at_utc > ?1
+               AND ((r.agent='codex' AND ?2) OR (r.agent='claude_code' AND ?3))
                AND EXISTS (SELECT 1 FROM planet_usage_owner o WHERE o.event_key=r.event_key
                  AND o.account_id=(SELECT value FROM setting WHERE key='planet_account_id'))
                AND (r.kind='response' OR NOT EXISTS (
@@ -403,9 +404,14 @@ impl Ledger {
                ))
              ORDER BY r.occurred_at_utc",
         )?;
-        let rows = statement.query_map(params![activation.to_rfc3339()], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
-        })?;
+        let rows = statement.query_map(
+            params![
+                activation.to_rfc3339(),
+                self.agent_enabled(Agent::Codex)?,
+                self.agent_enabled(Agent::ClaudeCode)?,
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+        )?;
         let mut daily = BTreeMap::new();
         let mut lifetime = 0_u64;
         let mut current = 0_u64;

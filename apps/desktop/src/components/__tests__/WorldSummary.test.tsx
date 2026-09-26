@@ -37,7 +37,7 @@ describe("local world summary", () => {
 
   it("shows no member names or member token breakdown in the world view", () => {
     render(<><UsageSummary snapshot={snapshot} /><PlanetScene stage={snapshot.stage} progress={snapshot.progress_to_next} /></>);
-    expect(screen.getByRole("img", { name: /행성/ })).toBeInTheDocument();
+    expect(screen.getByRole("img", { name: /자연 생태계, 다음 시대까지 23%/ })).toBeInTheDocument();
     expect(screen.queryByText(/순위|멤버별|기여자별/)).not.toBeInTheDocument();
   });
 });

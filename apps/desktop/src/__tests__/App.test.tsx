@@ -1,5 +1,5 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { beforeEach, expect, it, vi } from "vitest";
 import App from "../App";
 import type { SharingState } from "../lib/sharing";
 import type { WorldSnapshot } from "../types/usage";
@@ -27,8 +27,6 @@ const localSnapshot: WorldSnapshot = {
     can_reset: true, reset_available_at_utc: null, objects: [],
   },
 };
-
-afterEach(cleanup);
 
 it.each([false, true])("shows the new account's profile setup after sign-in (group lookup fails: %s)", async (groupLookupFails) => {
   let verified = false;
