@@ -26,6 +26,22 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn select_planet_account(&self, user_id: &str) -> Result<(), String> {
+        let changed = self
+            .ledger
+            .lock()
+            .map_err(|_| "local ledger unavailable")?
+            .ensure_planet_account(user_id)
+            .map_err(|_| "행성 계정을 변경할 수 없습니다")?;
+        if changed {
+            // Invalidate the previous account's frontend snapshot before any
+            // fallible scan, so it can never become an upload for this account.
+            *self.latest.lock().map_err(|_| "usage status unavailable")? = None;
+            self.scan()?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn scan(&self) -> Result<WorldSnapshot, String> {
         let config = self
             .config

@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../App";
 import type { SharingState } from "../lib/sharing";
 import type { WorldSnapshot } from "../types/usage";
@@ -27,6 +27,35 @@ const localSnapshot: WorldSnapshot = {
     can_reset: true, reset_available_at_utc: null, objects: [],
   },
 };
+
+afterEach(cleanup);
+
+it.each([false, true])("shows the new account's profile setup after sign-in (group lookup fails: %s)", async (groupLookupFails) => {
+  let verified = false;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state" || command === "sign_out") return {
+      ...ownerState, phase: "signed_out", world: null, sync_status: "local",
+    };
+    if (command === "verify_email_code") {
+      verified = true;
+      if (groupLookupFails) throw "공동 세계를 불러올 수 없습니다";
+      return { ...ownerState, phase: "signed_in", world: null, sync_status: "local" };
+    }
+    if (command === "current_usage") return verified
+      ? { ...structuredClone(localSnapshot), planet: { ...localSnapshot.planet, profile: null, lifetime_tokens: 0 } }
+      : structuredClone(localSnapshot);
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.change(await screen.findByLabelText("이메일"), { target: { value: "bob@example.test" } });
+  fireEvent.click(screen.getByRole("button", { name: "인증코드 받기" }));
+  fireEvent.change(await screen.findByLabelText("이메일 인증코드"), { target: { value: "123456" } });
+  fireEvent.click(screen.getByRole("button", { name: "코드 확인" }));
+  await screen.findByRole("heading", { name: "행성의 첫 주민을 골라주세요" });
+  expect(screen.queryByText("Orbit의 행성")).not.toBeInTheDocument();
+});
 
 beforeEach(() => {
   invokeMock.mockReset();

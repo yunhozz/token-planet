@@ -40,6 +40,7 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
     let Some(saved) = store.load().map_err(|_| "로그인 정보 오류")? else {
         return Ok(());
     };
+    state.select_planet_account(&saved.user.id)?;
     let session = match SupabaseAuthClient::new(config.clone())
         .session(&store)
         .await
@@ -59,6 +60,16 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
         }
     };
     let policy = if let Some(shell) = &shell {
+        state
+            .ledger
+            .lock()
+            .map_err(|_| "로컬 대기열 오류")?
+            .ensure_world_scope(
+                &shell.id,
+                &session.user.id,
+                shell.timezone.parse().map_err(|_| "세계 시간대 오류")?,
+            )
+            .map_err(|_| "세계 동기화 범위 오류")?;
         Some(
             client
                 .my_sync_policy(&session.access_token, &shell.id)
@@ -102,12 +113,13 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
             });
             (snapshot.planet.clone(), incomplete)
         });
-    let sharing_paused = state
-        .ledger
-        .lock()
-        .map_err(|_| "로컬 동기화 설정 오류")?
-        .sharing_paused()
-        .map_err(|_| "로컬 동기화 설정 오류")?;
+    let sharing_paused = shell.is_some()
+        && state
+            .ledger
+            .lock()
+            .map_err(|_| "로컬 동기화 설정 오류")?
+            .sharing_paused()
+            .map_err(|_| "로컬 동기화 설정 오류")?;
     let publish_planet = !sharing_paused && policy.as_ref().is_none_or(|policy| !policy.paused);
     if let Some((local_planet, incomplete)) = local_snapshot
         .filter(|(planet, _)| planet.profile.is_some())

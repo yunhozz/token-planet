@@ -93,8 +93,13 @@ impl Ledger {
     ) -> Result<Vec<SharedDailyTotal>, ScanError> {
         let mut statement = self.connection.prepare("SELECT agent,occurred_at_utc,input_tokens,output_tokens,
             cache_read_tokens,cache_write_tokens,total_tokens,coverage FROM usage_record r
-            WHERE (?1 IS NULL OR r.occurred_at_utc > ?1) AND (r.kind='response' OR NOT EXISTS (
+            WHERE (?1 IS NULL OR (r.occurred_at_utc > ?1 AND EXISTS (
+                SELECT 1 FROM planet_usage_owner o WHERE o.event_key=r.event_key
+                AND o.account_id=(SELECT value FROM setting WHERE key='planet_account_id')
+            ))) AND (r.kind='response' OR NOT EXISTS (
                 SELECT 1 FROM usage_record other WHERE other.source_id=r.source_id AND other.kind='response' AND other.agent=r.agent
+                AND (?1 IS NULL OR EXISTS (SELECT 1 FROM planet_usage_owner o WHERE o.event_key=other.event_key
+                  AND o.account_id=(SELECT value FROM setting WHERE key='planet_account_id')))
             ))")?;
         let rows = statement.query_map(params![since.map(|value| value.to_rfc3339())], |row| {
             Ok((
@@ -265,10 +270,12 @@ impl Ledger {
                 &uuid::Uuid::new_v4().to_string(),
             )?;
         }
-        Ok(Self {
+        let mut ledger = Self {
             connection,
             timezone,
-        })
+        };
+        ledger.initialize_planet_accounts()?;
+        Ok(ledger)
     }
 
     pub fn insert(&mut self, record: &ParsedRecord) -> Result<(), ScanError> {
@@ -386,9 +393,13 @@ impl Ledger {
         let mut statement = self.connection.prepare(
             "SELECT r.occurred_at_utc,r.total_tokens FROM usage_record r
              WHERE r.total_tokens IS NOT NULL AND r.occurred_at_utc > ?1
+               AND EXISTS (SELECT 1 FROM planet_usage_owner o WHERE o.event_key=r.event_key
+                 AND o.account_id=(SELECT value FROM setting WHERE key='planet_account_id'))
                AND (r.kind='response' OR NOT EXISTS (
                  SELECT 1 FROM usage_record other
                  WHERE other.source_id=r.source_id AND other.kind='response' AND other.agent=r.agent
+                   AND EXISTS (SELECT 1 FROM planet_usage_owner o WHERE o.event_key=other.event_key
+                     AND o.account_id=(SELECT value FROM setting WHERE key='planet_account_id'))
                ))
              ORDER BY r.occurred_at_utc",
         )?;
@@ -895,6 +906,11 @@ pub(crate) fn insert_record(
         optional_i64(record.usage.cache_read_tokens)?, optional_i64(record.usage.cache_write_tokens)?,
         optional_i64(record.usage.total_tokens)?, coverage_name(record.usage.coverage), version,
     ])?;
+    tx.execute(
+        "INSERT OR IGNORE INTO planet_usage_owner(event_key,account_id)
+         VALUES (?1,(SELECT value FROM setting WHERE key='planet_account_id'))",
+        [&event_key],
+    )?;
     Ok(())
 }
 
@@ -956,6 +972,193 @@ mod tests {
     use crate::collectors::codex;
     use crate::domain::usage::Agent;
     use chrono_tz::Asia::Seoul;
+
+    fn account_record(key: &str, tokens: u64) -> crate::collectors::ParsedRecord {
+        crate::collectors::ParsedRecord {
+            agent: Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: key.into(),
+            occurred_at_utc: chrono::Utc::now(),
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(tokens),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }
+    }
+
+    #[test]
+    fn planet_accounts_restore_profile_wallet_objects_and_owned_usage_after_restart() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), Seoul).unwrap();
+        ledger
+            .set_planet_profile("Alice", crate::domain::planet::PlanetAvatar::Feminine)
+            .unwrap();
+        let alice_record = account_record("alice:response", 42);
+        ledger.insert(&alice_record).unwrap();
+        ledger
+            .ensure_world_scope("world-a", "alice", Seoul)
+            .unwrap();
+        assert_eq!(
+            ledger
+                .planet_device_contribution(false)
+                .unwrap()
+                .lifetime_tokens,
+            42
+        );
+        ledger.reset_planet(chrono::Utc::now()).unwrap();
+        ledger
+            .ensure_planet_object(0, 0, "tree", 20, 30, 12)
+            .unwrap();
+        let alice_cycle = ledger.planet_cycle_id().unwrap();
+
+        ledger.ensure_world_scope("world-b", "bob", Seoul).unwrap();
+        assert!(
+            ledger.planet_profile().unwrap().is_none(),
+            "Bob must not inherit Alice's profile"
+        );
+        assert!(ledger.planet_wallet_credits().unwrap().is_empty());
+        assert!(ledger.planet_objects().unwrap().is_empty());
+        assert_eq!(
+            ledger
+                .planet_device_contribution(false)
+                .unwrap()
+                .lifetime_tokens,
+            0
+        );
+        ledger
+            .set_planet_profile("Bob", crate::domain::planet::PlanetAvatar::Masculine)
+            .unwrap();
+        ledger.insert(&account_record("bob:response", 7)).unwrap();
+        // Replaying an old record in a different account must retain its owner.
+        ledger
+            .connection
+            .execute(
+                "DELETE FROM usage_record WHERE event_key='alice:response'",
+                [],
+            )
+            .unwrap();
+        ledger.insert(&alice_record).unwrap();
+        assert_eq!(
+            ledger
+                .planet_device_contribution(false)
+                .unwrap()
+                .lifetime_tokens,
+            7
+        );
+        assert_eq!(
+            ledger.reform_daily_totals(Seoul).unwrap()[0].total_tokens,
+            Some(7)
+        );
+        drop(ledger);
+
+        let mut ledger = Ledger::open(file.path(), Seoul).unwrap();
+        ledger
+            .ensure_world_scope("world-a", "alice", Seoul)
+            .unwrap();
+        assert_eq!(ledger.planet_profile().unwrap().unwrap().nickname, "Alice");
+        assert_eq!(ledger.planet_cycle_id().unwrap(), alice_cycle);
+        assert_eq!(ledger.planet_wallet_credits().unwrap()[0].amount, 42);
+        assert_eq!(ledger.planet_objects().unwrap()[0].kind, "tree");
+        assert_eq!(
+            ledger
+                .planet_device_contribution(false)
+                .unwrap()
+                .lifetime_tokens,
+            42
+        );
+    }
+
+    #[test]
+    fn another_accounts_response_cannot_replace_a_cumulative_fallback() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), Seoul).unwrap();
+        ledger.ensure_planet_account("alice").unwrap();
+        let mut snapshot = account_record("alice:snapshot", 100);
+        snapshot.kind = crate::collectors::RecordKind::CumulativeSnapshot;
+        ledger.insert(&snapshot).unwrap();
+        ledger.ensure_planet_account("bob").unwrap();
+        ledger.insert(&account_record("bob:response", 7)).unwrap();
+        ledger.ensure_planet_account("alice").unwrap();
+        assert_eq!(
+            ledger
+                .planet_device_contribution(false)
+                .unwrap()
+                .lifetime_tokens,
+            100
+        );
+        assert_eq!(
+            ledger.reform_daily_totals(Seoul).unwrap()[0].total_tokens,
+            Some(100)
+        );
+    }
+
+    #[test]
+    fn old_world_cache_does_not_prove_the_owner_of_an_uploaded_planet() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), Seoul).unwrap();
+        ledger
+            .set_planet_profile("Alice", crate::domain::planet::PlanetAvatar::Feminine)
+            .unwrap();
+        ledger
+            .connection
+            .execute_batch(
+                "DELETE FROM setting WHERE key='planet_account_id';
+          INSERT INTO setting(key,value) VALUES ('sharing_user_id','alice'),
+          ('planet_remote_lifetime_tokens','500'); DELETE FROM planet_usage_owner;",
+            )
+            .unwrap();
+        drop(ledger);
+        let mut ledger = Ledger::open(file.path(), Seoul).unwrap();
+        ledger.ensure_planet_account("bob").unwrap();
+        assert!(ledger.planet_profile().unwrap().is_none());
+        assert!(ledger.synced_planet_lifetime_tokens().unwrap().is_none());
+        ledger.ensure_planet_account("alice").unwrap();
+        assert!(ledger.planet_profile().unwrap().is_none());
+        assert!(ledger.synced_planet_lifetime_tokens().unwrap().is_none());
+        let archived: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM planet_account_state WHERE account_id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1);
+    }
+
+    #[test]
+    fn old_uploaded_planet_with_unknown_owner_is_not_claimed_by_the_next_login() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), Seoul).unwrap();
+        ledger
+            .set_planet_profile("Unknown", crate::domain::planet::PlanetAvatar::Feminine)
+            .unwrap();
+        ledger
+            .connection
+            .execute_batch(
+                "DELETE FROM setting WHERE key='planet_account_id';
+          INSERT INTO setting(key,value) VALUES ('planet_remote_lifetime_tokens','500');
+          DELETE FROM planet_usage_owner;",
+            )
+            .unwrap();
+        drop(ledger);
+        let mut ledger = Ledger::open(file.path(), Seoul).unwrap();
+        ledger.ensure_planet_account("bob").unwrap();
+        assert!(ledger.planet_profile().unwrap().is_none());
+        assert!(ledger.synced_planet_lifetime_tokens().unwrap().is_none());
+        let archived: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT COUNT(*) FROM planet_account_state WHERE account_id='legacy'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(archived, 1);
+    }
 
     const RESPONSE: &str = r#"{"timestamp":"2026-09-24T15:30:00Z","type":"token_usage_record","payload":{"session_id":"s1","response_id":"r1","usage":{"total_tokens":42}}}"#;
 

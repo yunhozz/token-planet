@@ -48,10 +48,11 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    invoke<WorldSnapshot | null>("current_usage").then((value) => {
-      if (active) setSnapshot(value);
-    }).catch(() => { if (active) setError(true); });
-    sharing.state().then((value) => { if (active) setShared(value); }).catch(() => { if (active) setSharingError("공동 세계 연결을 확인하세요."); });
+    sharing.state().then((value) => { if (active) setShared(value); })
+      .catch(() => { if (active) setSharingError("공동 세계 연결을 확인하세요."); })
+      .then(() => invoke<WorldSnapshot | null>("current_usage"))
+      .then((value) => { if (active) setSnapshot(value); })
+      .catch(() => { if (active) setError(true); });
     const unlisten = listen<WorldSnapshot>("usage-updated", (event) => {
       if (active) { setSnapshot(event.payload); setError(false); }
     }).catch(() => () => {});
@@ -81,7 +82,11 @@ function App() {
     setSharingError("");
     try { setShared(await action()); }
     catch (cause) { setSharingError(typeof cause === "string" ? cause : "공동 세계 요청을 완료하지 못했습니다."); }
-    finally { setSharingBusy(false); }
+    finally {
+      try { setSnapshot(await invoke<WorldSnapshot | null>("current_usage")); }
+      catch { setError(true); }
+      setSharingBusy(false);
+    }
   }
 
   async function requestCode(email: string) {

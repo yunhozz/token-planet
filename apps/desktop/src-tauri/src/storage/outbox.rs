@@ -101,6 +101,8 @@ impl Ledger {
         user_id: &str,
         timezone: Tz,
     ) -> Result<(), OutboxError> {
+        self.ensure_planet_account(user_id)
+            .map_err(|_| OutboxError::Database)?;
         if let (Some(old_world), Some(old_user)) = (
             self.setting("sharing_world_id")?,
             self.setting("sharing_user_id")?,

@@ -124,13 +124,11 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
         return Ok(local_state("unavailable", None));
     };
     let store = SessionStore::new(&config).map_err(|_| "보안 저장소를 열 수 없습니다")?;
-    if store
-        .load()
-        .map_err(|_| "로그인 정보를 읽을 수 없습니다")?
-        .is_none()
-    {
+    let Some(saved) = store.load().map_err(|_| "로그인 정보를 읽을 수 없습니다")?
+    else {
         return Ok(local_state("signed_out", None));
-    }
+    };
+    state.select_planet_account(&saved.user.id)?;
     let auth = SupabaseAuthClient::new(config.clone());
     let session = match auth.session(&store).await {
         Ok(session) => session,
