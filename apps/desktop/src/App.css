@@ -245,7 +245,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .planet-figure[data-motion="active"] .avatar-sprite--walking .avatar-leg--left { animation: avatar-step-left .34s steps(2, end) infinite alternate; }
 .planet-figure[data-motion="active"] .avatar-sprite--walking .avatar-leg--right { animation: avatar-step-right .34s steps(2, end) infinite alternate; }
 .planet-avatar { overflow: visible; }
-.planet-scene-avatar { width: 24px; height: 30px; overflow: visible; }
+.planet-scene-avatar { width: 20px; height: 25px; overflow: visible; }
 
 @keyframes scene-enter {
   from { opacity: 0; transform: translateY(5px); }

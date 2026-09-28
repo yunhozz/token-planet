@@ -7,10 +7,10 @@ const STAGE_THRESHOLDS = [5, 20, 50, 100];
 const OBJECT_INTERVALS = [1, 2, 4, 8, 16];
 
 export const WALK_POINTS = [
-  { x: 94, y: 116 }, { x: 105, y: 116 }, { x: 120, y: 103 },
-  { x: 135, y: 114 }, { x: 150, y: 96 }, { x: 165, y: 88 },
-  { x: 180, y: 88 }, { x: 195, y: 101 }, { x: 210, y: 90 },
-  { x: 225, y: 90 }, { x: 240, y: 114 },
+  { x: 94, y: 170 }, { x: 105, y: 169 }, { x: 120, y: 169 },
+  { x: 135, y: 167 }, { x: 150, y: 166 }, { x: 165, y: 167 },
+  { x: 180, y: 166 }, { x: 195, y: 167 }, { x: 210, y: 169 },
+  { x: 225, y: 170 }, { x: 240, y: 171 },
 ];
 
 export function planWalk(startIndex: number, random: () => number) {

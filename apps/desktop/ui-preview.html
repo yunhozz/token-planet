@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Token Planet · UI preview</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module">
+      const snapshot = {
+        usage: {
+          codex: { input_tokens: 29000, output_tokens: 11000, cache_read_tokens: 8000, cache_write_tokens: 1000, total_tokens: 49000, coverage: "complete" },
+          claude_code: { input_tokens: 7000, output_tokens: 4000, cache_read_tokens: 0, cache_write_tokens: 0, total_tokens: 11000, coverage: "complete" },
+          codex_source: "ready", claude_code_source: "ready", confirmed_subtotal: 60000, complete_total: 60000, scanned_at_utc: "2026-09-28T00:00:00Z",
+        },
+        growth_credit: 24, stage: 2, progress_to_next: 0.58, incomplete: false,
+        planet: {
+          version: 1, profile: { nickname: "Orbit", avatar: "masculine" }, timezone: "Asia/Seoul", current_cycle_id: "preview-cycle", cycle_started_at_utc: "2026-09-01T00:00:00Z", last_reset_at_utc: null,
+          wallet_balance: 12000, wallet_credits: [], current_planet_tokens: 60000, lifetime_tokens: 124000, growth_credit: 24, stage: 2, progress_to_next: 0.58,
+          incomplete: false, can_reset: true, reset_available_at_utc: null,
+          objects: [
+            { stage: 0, ordinal: 1, kind: "rock", x: 12, y: 31, seed: 1 },
+            { stage: 0, ordinal: 2, kind: "tree", x: 26, y: 43, seed: 2 },
+            { stage: 0, ordinal: 3, kind: "water", x: 41, y: 55, seed: 3 },
+            { stage: 0, ordinal: 4, kind: "rock", x: 55, y: 33, seed: 4 },
+            { stage: 0, ordinal: 5, kind: "tree", x: 68, y: 48, seed: 5 },
+            { stage: 0, ordinal: 6, kind: "water", x: 79, y: 61, seed: 6 },
+            { stage: 0, ordinal: 7, kind: "rock", x: 35, y: 72, seed: 7 },
+            { stage: 0, ordinal: 8, kind: "tree", x: 61, y: 80, seed: 8 },
+          ],
+        },
+      };
+      const planet = (nickname, rank) => ({ nickname, avatar: rank === 1 ? "masculine" : "feminine", stage: rank, current_planet_tokens: 18000 * rank, lifetime_tokens: 30000 * rank, growth_credit: rank * 8, progress_to_next: 0.35, incomplete: false, objects: [], equipped_cosmetics: [], token_rank: rank, civilization_rank: rank });
+      const sharing = {
+        phase: "shared", email: "preview@example.test", sync_status: "synced", pending: 0, last_synced_at: null,
+        world: { id: "preview-world", name: "Together", timezone: "Asia/Seoul", is_owner: true, member_count: 2 },
+        planet_members: [planet("Orbit", 1), planet("Nova", 2)],
+      };
+      const shop = { slots: [], products: [], current_cycle_id: "preview-cycle", available_balance: 12000, owned_skus: [], equipped: [], slot_versions: {}, actions_require_online: true, action_unavailable_reason: null, guest_import_pending: false, guest_import_error: null };
+      let nextCallback = 0;
+      const callbacks = new Map();
+      window.__TAURI_INTERNALS__ = {
+        transformCallback(callback) { const id = `preview-callback-${++nextCallback}`; callbacks.set(id, callback); return id; },
+        unregisterCallback(id) { callbacks.delete(id); },
+        async invoke(command) {
+          if (command === "get_sharing_state") return sharing;
+          if (command === "current_usage" || command === "refresh_usage") return snapshot;
+          if (command === "get_shop_state") return shop;
+          if (command === "list_world_members") return [{ user_id: "owner", role: "owner" }, { user_id: "member", role: "member" }];
+          if (command === "list_invites") return [];
+          if (command === "plugin:event|listen") return `preview-listener-${nextCallback}`;
+          return null;
+        },
+      };
+      window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener() {} };
+      await import("/src/main.tsx");
+    </script>
+  </body>
+</html>

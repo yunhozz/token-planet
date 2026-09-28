@@ -4,7 +4,7 @@ export function AvatarSprite({ avatar, className = "", label, facing = "right", 
   const feminine = avatar === "feminine";
   const spriteClass = ["avatar-sprite", className, facing === "left" ? "avatar-sprite--facing-left" : "", walking ? "avatar-sprite--walking" : ""].filter(Boolean).join(" ");
   return (
-    <svg className={spriteClass} viewBox="0 0 16 20" role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true} shapeRendering="crispEdges">
+    <svg className={spriteClass} width="20" height="25" viewBox="0 0 16 20" role={label ? "img" : undefined} aria-label={label} aria-hidden={label ? undefined : true} shapeRendering="crispEdges">
       <g transform={facing === "left" ? "translate(16 0) scale(-1 1)" : undefined}>
         <rect x="5" y="1" width="7" height="2" fill={feminine ? "#51395f" : "#253c55"} />
         <rect x="3" y="3" width="11" height="5" fill={feminine ? "#51395f" : "#253c55"} />
