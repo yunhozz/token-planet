@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { FormattedNumber } from "./FormattedNumber";
 import type {
   CosmeticEquipAction,
   CosmeticProduct,
@@ -174,7 +175,7 @@ export function CosmeticShop({
 
       <div className="cosmetic-balance">
         <span>사용 가능 잔액</span>
-        <strong>{formatTokens(availableBalance)} <small>토큰</small></strong>
+        <strong><FormattedNumber value={availableBalance} /> <small>토큰</small></strong>
       </div>
 
       <div className="cosmetic-tabs" role="tablist" aria-label="장식 보기">
@@ -201,7 +202,7 @@ export function CosmeticShop({
                     <li className="cosmetic-item" key={product.sku}>
                       <div className="cosmetic-item-copy">
                         <strong>{product.display_name}{equipped && <span className="cosmetic-equipped">장착 중</span>}</strong>
-                        <span>{formatTokens(product.price)} 토큰</span>
+                        <span><FormattedNumber value={product.price} /> 토큰</span>
                       </div>
                       <div className="cosmetic-item-actions">
                         <button className="cosmetic-secondary" type="button" onClick={() => preview(product)} aria-label={`${product.display_name} 미리보기`}>미리보기</button>
@@ -266,8 +267,8 @@ export function CosmeticShop({
             >
               <p className="cosmetic-shop-kicker">구매는 장착과 별개입니다</p>
               <h3 id="cosmetic-confirm-title">{product.display_name} 구매 확인</h3>
-              <p>{formatTokens(product.price)} 토큰 차감</p>
-              <p>구매 후 잔액 {formatTokens(afterPurchase)} 토큰</p>
+              <p><FormattedNumber value={product.price} /> 토큰 차감</p>
+              <p>구매 후 잔액 <FormattedNumber value={afterPurchase} /> 토큰</p>
               <div className="cosmetic-confirm-actions">
                 <button type="button" className="cosmetic-secondary" onClick={() => setConfirmSku(null)}>취소</button>
                 <button type="button" className="cosmetic-primary" disabled={Boolean(slotUnavailableReason) || availableBalance < product.price} onClick={() => void confirmPurchase(product)}>구매 확인</button>

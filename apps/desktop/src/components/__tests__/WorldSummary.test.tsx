@@ -30,7 +30,7 @@ describe("local world summary", () => {
   it("labels a known subtotal as incomplete without making missing Claude usage zero", () => {
     render(<><UsageSummary snapshot={snapshot} /><SourceStatus agent="claude_code" usage={snapshot.usage.claude_code} health={snapshot.usage.claude_code_source} /></>);
     expect(screen.getByText(/125,000/)).toBeInTheDocument();
-    expect(screen.getByText(/집계 불완전/)).toBeInTheDocument();
+    expect(screen.getByText(/일부 기록 확인 중/)).toBeInTheDocument();
     expect(screen.getByText(/사용량을 확인할 수 없음/)).toBeInTheDocument();
     expect(screen.queryByText(/Claude Code.*0 토큰/)).not.toBeInTheDocument();
   });
