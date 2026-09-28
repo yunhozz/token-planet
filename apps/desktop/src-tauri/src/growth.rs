@@ -69,11 +69,7 @@ pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapsh
         || remote_incomplete;
     ensure_objects(ledger, growth_credit)?;
     let wallet_credits = ledger.planet_wallet_credits()?;
-    let wallet_balance = wallet_credits.iter().try_fold(0_u64, |balance, credit| {
-        balance
-            .checked_add(credit.amount)
-            .ok_or(ScanError::InvalidCount)
-    })?;
+    let wallet_balance = ledger.cosmetic_shop_state()?.available_balance;
     let now = chrono::Utc::now();
     let last_reset = ledger.last_reset_at()?;
     let reset_available = last_reset.map(|last| last + chrono::Duration::hours(24));
@@ -230,6 +226,29 @@ mod tests {
         assert_eq!(world.growth_credit, 0.0);
         assert_eq!(world.stage, 0);
         assert_eq!(world.progress_to_next, 0.0);
+    }
+
+    #[test]
+    fn planet_wallet_balance_reflects_cosmetic_purchase() {
+        let mut ledger = fixture_ledger();
+        ledger.connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES ('wallet-cycle',100000,'2026-09-25T00:00:00Z')",
+            [],
+        ).unwrap();
+        ledger.purchase_guest_cosmetic(
+            "77777777-7777-4777-8777-777777777777",
+            "star_cluster",
+        ).unwrap();
+
+        let world = world_snapshot(
+            &ledger,
+            summary(
+                usage(Some(0), UsageCoverage::Complete),
+                usage(Some(0), UsageCoverage::Complete),
+            ),
+        ).unwrap();
+        assert_eq!(world.planet.wallet_balance, 0);
     }
 
     #[test]

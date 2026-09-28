@@ -58,6 +58,62 @@ export type PlanetWalletCredit = {
   amount: number;
   created_at_utc: string;
 };
+export type CosmeticSlot = {
+  slot_id: string;
+  display_name: string;
+};
+export type CosmeticProduct = {
+  sku: string;
+  slot_id: string;
+  display_name: string;
+  price: number;
+  catalog_revision: number;
+  purchasable: boolean;
+};
+export type EquippedCosmetic = {
+  slot_id: string;
+  sku: string;
+  version: number;
+};
+export type CosmeticPurchaseStatus = "purchased" | "already_owned" | "insufficient_balance" | "catalog_mismatch" | "request_conflict";
+export type CosmeticPurchaseResult = {
+  purchase_id: string;
+  sku: string;
+  status: CosmeticPurchaseStatus;
+  price: number;
+  available_balance: number;
+};
+export type CosmeticEquipStatus = "equipped" | "unequipped" | "version_conflict" | "cycle_mismatch" | "catalog_mismatch" | "not_owned";
+export type CosmeticEquipResult = {
+  status: CosmeticEquipStatus;
+  cycle_id: string;
+  slot_id: string;
+  sku: string | null;
+  version: number;
+};
+export type CosmeticShopState = {
+  slots: CosmeticSlot[];
+  products: CosmeticProduct[];
+  current_cycle_id: string;
+  available_balance: number;
+  owned_skus: string[];
+  equipped: EquippedCosmetic[];
+  slot_versions: Record<string, number>;
+  actions_require_online: boolean;
+  action_unavailable_reason: string | null;
+  guest_import_pending: boolean;
+  guest_import_error: string | null;
+};
+export type CosmeticPurchaseAction = {
+  result: CosmeticPurchaseResult | null;
+  state: CosmeticShopState;
+  unavailable_reason: string | null;
+};
+export type CosmeticEquipAction = {
+  result: CosmeticEquipResult | null;
+  state: CosmeticShopState;
+  unavailable_reason: string | null;
+};
 export type GrowthJournalCycle = {
   cycle_id: string;
   started_at_utc: string | null;
@@ -113,6 +169,7 @@ export type WorldPlanet = {
   progress_to_next: number;
   incomplete: boolean;
   objects: PlanetObject[];
+  equipped_cosmetics: { slot_id: string; sku: string }[];
   token_rank: number;
   civilization_rank: number;
 };

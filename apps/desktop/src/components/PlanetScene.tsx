@@ -1,5 +1,5 @@
 import { useId } from "react";
-import type { PlanetAvatar, PlanetObject } from "../types/usage";
+import type { EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
 
 export const STAGE_NAMES = ["자연 생태계", "정착·농경", "마을·초기 도시", "산업 문명", "첨단·우주 문명"];
 const STAGE_THRESHOLDS = [5, 20, 50, 100];
@@ -45,7 +45,7 @@ function ObjectSprite({ object, x, y, scale }: { object: PlanetObject; x: number
   }
 }
 
-export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], compact = false }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; compact?: boolean }) {
+export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean }) {
   const name = STAGE_NAMES[stage] ?? STAGE_NAMES[4];
   const clipId = `planet-clip-${useId().replace(/:/g, "")}`;
   const tiles = new Map<string, { column: number; row: number; objects: PlanetObject[] }>();
@@ -57,6 +57,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
     tile.objects.push(object);
     tiles.set(key, tile);
   }
+  const hasCosmetic = (slotId: string, sku: string) => equippedCosmetics.some((item) => item.slot_id === slotId && item.sku === sku);
   return (
     <figure className={`planet-figure ${compact ? "planet-figure--compact" : ""}`}>
       <svg className="planet-svg" viewBox="0 0 360 320" role="img" aria-label={stage >= 4 ? `${name}, 최종 시대에서 발전이 계속됩니다` : `${name}, 다음 시대까지 ${Math.round(progress * 100)}%`} shapeRendering="crispEdges">
@@ -66,6 +67,8 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
         <g className="planet-stars" fill="#f6df9d">
           <rect x="49" y="53" width="4" height="4"/><rect x="290" y="68" width="3" height="3"/><rect x="278" y="199" width="4" height="4"/><rect x="68" y="220" width="3" height="3"/><rect x="113" y="35" width="3" height="3"/><rect x="245" y="245" width="3" height="3"/>
         </g>
+        {hasCosmetic("ring", "thin_ring") && <ellipse data-cosmetic="thin_ring" cx="180" cy="157" rx="146" ry="39" transform="rotate(-18 180 157)" fill="none" stroke="#f1cf89" strokeWidth="3"/>}
+        {hasCosmetic("ring", "double_ring") && <g data-cosmetic="double_ring" fill="none" stroke="#a6d9a2"><ellipse cx="180" cy="157" rx="151" ry="43" transform="rotate(-18 180 157)" strokeWidth="3"/><ellipse cx="180" cy="157" rx="141" ry="34" transform="rotate(-18 180 157)" strokeWidth="2"/></g>}
         <circle cx="180" cy="157" r="119" fill="#22364b" stroke="#e6c987" strokeWidth="4"/>
         <circle cx="180" cy="157" r="111" fill="#72c5bd" stroke="#3c6570" strokeWidth="3"/>
         <g clipPath={`url(#${clipId})`}>
@@ -76,6 +79,8 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
           {stage > 1 && <path d="M68 219h220v8H68zm30 5h8v38h-8zm70 0h8v38h-8zm72 0h8v38h-8z" fill="#a58a67"/>}
           {stage > 2 && <g fill="#5d6172"><path d="M95 132h17v31H95zM121 120h24v43h-24zM174 128h18v35h-18zM211 114h26v49h-26zM249 127h19v36h-19z"/><path d="M99 137h4v6h-4zm10 0h2v6h-2zm17-12h5v6h-5zm9 0h4v6h-4zm78-4h5v7h-5zm11 0h5v7h-5z" fill="#9fdbce"/></g>}
           {stage > 3 && <g fill="#d4e7cb"><path d="M169 96h9v28h-9zM173 84h2v12h-2zM157 101h9v5h-9zm24 0h9v5h-9z"/><path d="M243 91h18v5h-18zm6-5h6v15h-6z" fill="#65c9c7"/></g>}
+          {hasCosmetic("sky", "star_cluster") && <g data-cosmetic="star_cluster" fill="#fff0ad"><rect x="99" y="95" width="6" height="6"/><rect x="111" y="81" width="4" height="4"/><rect x="126" y="101" width="3" height="3"/><rect x="141" y="88" width="5" height="5"/><rect x="154" y="105" width="3" height="3"/><rect x="119" y="116" width="4" height="4"/></g>}
+          {hasCosmetic("sky", "aurora") && <g data-cosmetic="aurora" fill="none" stroke="#a6e6cf" strokeWidth="5" opacity=".72"><path d="M81 121h17v-8h15v-8h14v7h15v-8h15"/><path d="M94 136h18v-7h15v-8h18v5h14" stroke="#82d7d5" strokeWidth="3"/></g>}
           {[...tiles.entries()].map(([key, tile]) => {
             const x = 90 + tile.column * 16.5;
             const y = 150 + tile.row * 11;
@@ -94,6 +99,8 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
             <rect x="4" y="12" width="9" height="5" fill={avatar === "feminine" ? "#d57875" : "#4c9b9a"}/>
             <rect x="5" y="17" width="3" height="2" fill="#34374a"/><rect x="10" y="17" width="3" height="2" fill="#34374a"/>
           </g>
+          {hasCosmetic("surface", "flag") && <g data-cosmetic="flag" transform="translate(172 220)" shapeRendering="crispEdges"><rect x="8" y="0" width="4" height="35" fill="#8c6655"/><path d="M12 2h24v11H22l-10 7Z" fill="#ec8c78" stroke="#572f4b" strokeWidth="2"/><rect x="3" y="34" width="17" height="4" fill="#926e58"/></g>}
+          {hasCosmetic("surface", "crystal_tower") && <g data-cosmetic="crystal_tower" transform="translate(168 218)" shapeRendering="crispEdges"><rect x="2" y="23" width="27" height="15" fill="#536c91" stroke="#c2c6cf" strokeWidth="2"/><path d="M8 23V9l8-8 8 8v14Z" fill="#a6d9e2" stroke="#e3f0de" strokeWidth="2"/><path d="M16 3v19M10 14h12" stroke="#6ba9bb" strokeWidth="2"/><rect x="11" y="28" width="9" height="10" fill="#455471"/></g>}
           <path d="M180 50a107 107 0 0 1 0 214c44-48 63-155 0-214Z" fill="#19233a" opacity=".2"/>
         </g>
         <circle cx="180" cy="157" r="107" fill="none" stroke="#b8ebce" strokeWidth="2"/>
