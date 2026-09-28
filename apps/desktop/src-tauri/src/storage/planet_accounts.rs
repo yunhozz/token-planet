@@ -68,6 +68,18 @@ impl Ledger {
                 "UPDATE setting SET value=?1 WHERE key='planet_account_id'",
                 [&account_id],
             )?;
+            for table in [
+                "growth_journal_state",
+                "growth_journal_cycle",
+                "growth_journal_entry",
+                "growth_journal_remote_cycle",
+                "growth_journal_remote_entry",
+            ] {
+                tx.execute(
+                    &format!("UPDATE {table} SET account_id=?1 WHERE account_id='local'"),
+                    [&account_id],
+                )?;
+            }
             tx.commit()?;
             return Ok(true);
         }

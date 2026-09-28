@@ -56,6 +56,9 @@ impl AppState {
         ledger
             .set_source_health(Agent::ClaudeCode, summary.claude_code_source)
             .map_err(|_| "source health unavailable")?;
+        ledger
+            .prepare_growth_journal()
+            .map_err(|_| "growth journal unavailable")?;
         let snapshot = world_snapshot(&ledger, summary).map_err(|_| "world growth unavailable")?;
         *self.latest.lock().map_err(|_| "usage status unavailable")? = Some(snapshot.clone());
         Ok(snapshot)
@@ -207,6 +210,8 @@ pub fn run() {
             set_source_enabled,
             set_detail_view,
             choose_source_folder,
+            commands::growth_journal::get_growth_journal,
+            commands::growth_journal::delete_growth_journal,
             commands::sharing::get_sharing_state,
             commands::sharing::request_email_code,
             commands::sharing::verify_email_code,

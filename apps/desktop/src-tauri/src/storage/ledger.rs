@@ -275,6 +275,7 @@ impl Ledger {
             timezone,
         };
         ledger.initialize_planet_accounts()?;
+        ledger.initialize_growth_journal()?;
         Ok(ledger)
     }
 
@@ -902,11 +903,12 @@ pub(crate) fn insert_record(
         input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,coverage,parser_version
     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
     ON CONFLICT(event_key) DO UPDATE SET
+      source_id=excluded.source_id,agent=excluded.agent,kind=excluded.kind,
+      bucket_date=excluded.bucket_date,occurred_at_utc=excluded.occurred_at_utc,
       input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,
       cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,
       total_tokens=excluded.total_tokens,coverage=excluded.coverage,
-      parser_version=excluded.parser_version
-    WHERE usage_record.total_tokens IS NULL AND excluded.total_tokens IS NOT NULL", params![
+      parser_version=excluded.parser_version", params![
         event_key, source_id, agent_name(record.agent), kind, date, record.occurred_at_utc.to_rfc3339(),
         optional_i64(record.usage.input_tokens)?, optional_i64(record.usage.output_tokens)?,
         optional_i64(record.usage.cache_read_tokens)?, optional_i64(record.usage.cache_write_tokens)?,

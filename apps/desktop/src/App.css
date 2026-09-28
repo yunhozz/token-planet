@@ -193,3 +193,44 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 3px s
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; transition-duration: .01ms !important; }
 }
+
+.growth-journal-entry-button { width: 100%; margin: 12px 0 2px; padding: 9px 10px; border: 1px solid #77958a; color: var(--mint); background: #1d2b38; font-size: 10px; font-weight: 800; text-align: left; }
+.growth-journal-entry-button:hover { border-color: var(--mint); background: #263844; }
+.growth-journal { margin: 10px 0 15px; padding: 12px; border: 1px solid #526173; background: #1a2235; }
+.growth-journal-heading { display: flex; justify-content: space-between; align-items: center; padding-bottom: 9px; border-bottom: 1px solid #455368; }
+.growth-journal-heading h2 { margin: 3px 0 0; color: var(--paper); font-size: 14px; }
+.growth-journal-refresh { width: 34px; height: 34px; border: 1px solid #667785; color: var(--water); background: #222c40; font-size: 18px; }
+.growth-journal-controls { display: grid; grid-template-columns: 1fr; gap: 5px; padding: 10px 0; }
+.growth-journal-controls label { color: var(--muted); font-size: 10px; }
+.growth-journal-controls select { width: 100%; height: 34px; padding: 5px 7px; border: 1px solid #667785; border-radius: 0; color: var(--paper); background: #20283c; font-size: 10px; }
+.growth-journal-pager { display: grid; grid-template-columns: 31px minmax(0, 1fr) 31px; align-items: center; gap: 6px; margin-top: 3px; }
+.growth-journal-pager button { min-height: 32px; border: 1px solid #667785; color: var(--paper); background: #242e42; }
+.growth-journal-pager span { color: var(--muted); font-size: 10px; text-align: center; font-variant-numeric: tabular-nums; }
+.growth-journal-cycle-note { display: grid; gap: 4px; margin: 2px 0 8px; padding: 8px; border-left: 3px solid var(--gold); background: #20283c; }
+.growth-journal-cycle-note strong { color: var(--gold); font-size: 10px; }
+.growth-journal-cycle-note span { color: var(--muted); font-size: 9px; line-height: 1.4; }
+.growth-journal-milestones { display: flex; flex-wrap: wrap; gap: 5px; margin: 7px 0; }
+.growth-journal-milestones span, .growth-journal-era { padding: 4px 6px; border: 1px solid #6f8e75; color: var(--mint); background: #20313a; font-size: 9px; }
+.growth-journal-days { display: grid; gap: 7px; padding: 0; margin: 8px 0 0; list-style: none; }
+.growth-journal-day { padding: 8px; border: 1px solid #46566b; background: #20283c; }
+.growth-journal-day-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; color: var(--muted); font-size: 10px; }
+.growth-journal-day-top time { color: var(--paper); font-size: 10px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.growth-journal-day-top span { text-align: right; }
+.growth-journal-total { display: block; margin: 5px 0; color: var(--gold); font-size: 14px; font-variant-numeric: tabular-nums; }
+.growth-journal-total small { color: var(--muted); font-size: 10px; font-weight: 400; }
+.growth-journal-agents { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding-top: 6px; border-top: 1px dashed #46566b; }
+.growth-journal-agents span { display: grid; gap: 3px; min-width: 0; }
+.growth-journal-agents b { color: var(--paper); font-size: 10px; }
+.growth-journal-agents em { color: var(--muted); font-size: 9px; font-style: normal; }
+.growth-journal-agents strong { color: var(--water); font-size: 10px; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.growth-journal-era { display: inline-block; margin-top: 6px; }
+.growth-journal-empty, .growth-journal-footnote { margin: 8px 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
+.growth-journal-delete { margin-top: 4px; padding: 7px 0; border: 0; color: #ffb3a3; background: transparent; font-size: 10px; text-align: left; }
+
+@media (min-width: 690px) {
+  .growth-journal-controls { grid-template-columns: minmax(0, .7fr) minmax(0, 1.3fr); align-items: end; }
+  .growth-journal-controls label { grid-column: 1 / -1; }
+  .growth-journal-controls select { grid-column: 1 / -1; }
+  .growth-journal-pager { grid-column: 1 / -1; }
+  .growth-journal-day { padding: 9px 10px; }
+}

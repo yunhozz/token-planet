@@ -113,13 +113,12 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
             });
             (snapshot.planet.clone(), incomplete)
         });
-    let sharing_paused = shell.is_some()
-        && state
-            .ledger
-            .lock()
-            .map_err(|_| "로컬 동기화 설정 오류")?
-            .sharing_paused()
-            .map_err(|_| "로컬 동기화 설정 오류")?;
+    let sharing_paused = state
+        .ledger
+        .lock()
+        .map_err(|_| "로컬 동기화 설정 오류")?
+        .sharing_paused()
+        .map_err(|_| "로컬 동기화 설정 오류")?;
     let publish_planet = !sharing_paused && policy.as_ref().is_none_or(|policy| !policy.paused);
     if let Some((local_planet, incomplete)) = local_snapshot
         .filter(|(planet, _)| planet.profile.is_some())
@@ -144,6 +143,50 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
         state
             .scan()
             .map_err(|_| "행성 상태를 새로 계산할 수 없습니다")?;
+    }
+
+    let remote = client
+        .growth_journal(&session.access_token)
+        .await
+        .map_err(|_| "성장 일지 상태를 불러올 수 없습니다")?;
+    let (journal, pending) = {
+        let mut ledger = state.ledger.lock().map_err(|_| "성장 일지 대기열 오류")?;
+        ledger
+            .apply_growth_journal_state(&remote)
+            .map_err(|_| "성장 일지 상태를 반영할 수 없습니다")?;
+        ledger
+            .prepare_growth_journal()
+            .map_err(|_| "성장 일지를 준비할 수 없습니다")?;
+        (
+            ledger
+                .growth_journal()
+                .map_err(|_| "성장 일지를 읽을 수 없습니다")?,
+            ledger
+                .pending_growth_journal_entries()
+                .map_err(|_| "성장 일지 대기열을 읽을 수 없습니다")?,
+        )
+    };
+    if publish_planet {
+        let canonical = client
+            .upsert_growth_journal(
+                &session.access_token,
+                journal.generation,
+                journal
+                    .timezone
+                    .as_deref()
+                    .ok_or("행성 시간대를 읽을 수 없습니다")?,
+                &journal.cycles,
+                &pending,
+            )
+            .await
+            .map_err(|_| "성장 일지 동기화 실패")?;
+        let mut ledger = state.ledger.lock().map_err(|_| "성장 일지 상태 오류")?;
+        ledger
+            .apply_growth_journal_state(&canonical)
+            .map_err(|_| "성장 일지 동기화 상태를 반영할 수 없습니다")?;
+        ledger
+            .prepare_growth_journal()
+            .map_err(|_| "성장 일지를 갱신할 수 없습니다")?;
     }
     let Some(shell) = shell else { return Ok(()) };
     let timezone = shell.timezone.parse().map_err(|_| "세계 시간대 오류")?;

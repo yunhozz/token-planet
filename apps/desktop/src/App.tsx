@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { InvitePanel } from "./components/InvitePanel";
+import { GrowthJournal } from "./components/GrowthJournal";
 import { PlanetProfileSetup } from "./components/PlanetProfileSetup";
 import { objectName, objectProgress, PlanetScene, STAGE_NAMES } from "./components/PlanetScene";
 import { SharingSetup } from "./components/SharingSetup";
@@ -11,7 +12,7 @@ import { UsageSummary } from "./components/UsageSummary";
 import { WorldCommunity } from "./components/WorldCommunity";
 import { AvatarSprite } from "./components/AvatarSprite";
 import { sharing, type InviteInfo, type InviteLink, type SharingState, type WorldMember } from "./lib/sharing";
-import type { Agent, PlanetAvatar, WorldSnapshot } from "./types/usage";
+import type { Agent, GrowthJournal as GrowthJournalData, PlanetAvatar, WorldSnapshot } from "./types/usage";
 import "./App.css";
 
 const EMPTY_SNAPSHOT: WorldSnapshot = {
@@ -45,6 +46,11 @@ function App() {
   const [planetBusy, setPlanetBusy] = useState(false);
   const [planetError, setPlanetError] = useState("");
   const [resetCheckAt, setResetCheckAt] = useState(0);
+  const [journalOpen, setJournalOpen] = useState(false);
+  const [journal, setJournal] = useState<GrowthJournalData | null>(null);
+  const [journalOwner, setJournalOwner] = useState("");
+  const [journalBusy, setJournalBusy] = useState(false);
+  const [journalError, setJournalError] = useState("");
 
   useEffect(() => {
     let active = true;
@@ -163,6 +169,36 @@ function App() {
     const next = !detail;
     try { await invoke("set_detail_view", { detail: next }); } catch { /* Browser previews have no native window. */ }
     setDetail(next);
+    if (!next) setJournalOpen(false);
+  }
+
+  async function loadGrowthJournal() {
+    setJournalBusy(true);
+    setJournalError("");
+    setJournal(null);
+    try {
+      const value = await invoke<GrowthJournalData>("get_growth_journal");
+      setJournal(value);
+      setJournalOwner(shared?.email ?? "local");
+    } catch (cause) {
+      setJournalError(typeof cause === "string" ? cause : "성장 일지를 불러오지 못했습니다.");
+    } finally {
+      setJournalBusy(false);
+    }
+  }
+
+  async function deleteGrowthJournal() {
+    setJournalBusy(true);
+    setJournalError("");
+    try {
+      const value = await invoke<GrowthJournalData>("delete_growth_journal");
+      setJournal(value);
+      setJournalOwner(shared?.email ?? "local");
+    } catch (cause) {
+      setJournalError(typeof cause === "string" ? cause : "개인 일지를 삭제하지 못했습니다.");
+    } finally {
+      setJournalBusy(false);
+    }
   }
 
   const view = snapshot ?? EMPTY_SNAPSHOT;
@@ -176,6 +212,9 @@ function App() {
     const timer = window.setTimeout(() => setResetCheckAt(Date.now()), wait);
     return () => window.clearTimeout(timer);
   }, [planet.can_reset, planet.reset_available_at_utc]);
+  useEffect(() => {
+    if (journalOpen) void loadGrowthJournal();
+  }, [journalOpen, shared?.email]);
   if (snapshot && !profile) {
     return <>
       <PlanetProfileSetup busy={planetBusy} onSave={saveProfile} />
@@ -220,6 +259,29 @@ function App() {
             <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} onToggle={detail ? toggleSource : undefined} onSelectFolder={detail ? selectFolder : undefined} />
             <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} onToggle={detail ? toggleSource : undefined} onSelectFolder={detail ? selectFolder : undefined} />
           </div>
+          {detail && <button
+            className="growth-journal-entry-button"
+            type="button"
+            aria-expanded={journalOpen}
+            onClick={() => {
+              if (journalOpen) setJournalOpen(false);
+              else setJournalOpen(true);
+            }}
+          >
+            {journalOpen ? "성장 일지 접기" : "성장 일지 보기"}
+          </button>}
+          {detail && journalOpen && <>
+            {journalBusy && !journal && <p className="growth-journal-empty">성장 일지를 불러오는 중입니다.</p>}
+            {journalError && !journal && <p className="error-note" role="alert">{journalError}</p>}
+            {journal && journalOwner === (shared?.email ?? "local") && <GrowthJournal
+              journal={journal}
+              busy={journalBusy}
+              error={journalError}
+              canDelete={shared?.phase === "signed_in" || shared?.phase === "shared"}
+              onReload={() => void loadGrowthJournal()}
+              onDelete={() => void deleteGrowthJournal()}
+            />}
+          </>}
           {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
           {planetError && <p className="error-note" role="alert">{planetError}</p>}
           {detail && <div className="sharing-stack">

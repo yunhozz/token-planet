@@ -1,6 +1,7 @@
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
 use crate::domain::planet::{PlanetDeviceContribution, PlanetState, WorldPlanet};
 use crate::sync::aggregate::DailyUsageSnapshot;
 
@@ -125,6 +126,53 @@ impl SupabaseSyncClient {
             access_token,
             "upsert_my_planet_state",
             &serde_json::json!({ "p_state": state, "p_device_contribution": contribution }),
+        )
+        .await
+    }
+
+    pub async fn growth_journal(&self, access_token: &str) -> Result<GrowthJournal, SyncError> {
+        self.post_rpc(
+            access_token,
+            "get_my_growth_journal",
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn upsert_growth_journal(
+        &self,
+        access_token: &str,
+        generation: u64,
+        timezone: &str,
+        cycles: &[GrowthJournalCycle],
+        entries: &[GrowthJournalEntry],
+    ) -> Result<GrowthJournal, SyncError> {
+        if entries.iter().any(|entry| {
+            entry.generation != generation || entry.payload_hash != entry.compute_hash()
+        }) {
+            return Err(SyncError::InvalidSnapshot);
+        }
+        self.post_rpc(
+            access_token,
+            "upsert_my_growth_journal",
+            &serde_json::json!({
+                "p_generation": generation,
+                "p_timezone": timezone,
+                "p_cycles": cycles,
+                "p_entries": entries,
+            }),
+        )
+        .await
+    }
+
+    pub async fn delete_growth_journal(
+        &self,
+        access_token: &str,
+    ) -> Result<GrowthJournal, SyncError> {
+        self.post_rpc(
+            access_token,
+            "delete_my_growth_journal",
+            &serde_json::json!({}),
         )
         .await
     }

@@ -58,6 +58,32 @@ export type PlanetWalletCredit = {
   amount: number;
   created_at_utc: string;
 };
+export type GrowthJournalCycle = {
+  cycle_id: string;
+  started_at_utc: string | null;
+  ended_at_utc: string | null;
+  wallet_credit: number | null;
+  wallet_credit_at_utc: string | null;
+};
+export type GrowthJournalEntry = {
+  device_id: string;
+  cycle_id: string;
+  bucket_date: string;
+  agent: Agent;
+  revision: number;
+  generation: number;
+  present: boolean;
+  confirmed_tokens: number | null;
+  coverage: UsageCoverage;
+  payload_hash: string;
+};
+export type GrowthJournal = {
+  generation: number;
+  deleted_at_utc: string | null;
+  timezone: string | null;
+  cycles: GrowthJournalCycle[];
+  entries: GrowthJournalEntry[];
+};
 export type PlanetState = {
   version: number;
   profile: PlanetProfile | null;
