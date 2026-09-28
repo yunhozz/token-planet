@@ -1,9 +1,38 @@
-import { useId } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { AvatarSprite } from "./AvatarSprite";
 import type { EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
 
 export const STAGE_NAMES = ["자연 생태계", "정착·농경", "마을·초기 도시", "산업 문명", "첨단·우주 문명"];
 const STAGE_THRESHOLDS = [5, 20, 50, 100];
 const OBJECT_INTERVALS = [1, 2, 4, 8, 16];
+
+export const WALK_POINTS = [
+  { x: 94, y: 170 }, { x: 105, y: 169 }, { x: 120, y: 169 },
+  { x: 135, y: 167 }, { x: 150, y: 166 }, { x: 165, y: 167 },
+  { x: 180, y: 166 }, { x: 195, y: 167 }, { x: 210, y: 169 },
+  { x: 225, y: 170 }, { x: 240, y: 171 },
+];
+
+export function planWalk(startIndex: number, random: () => number) {
+  let direction = random() < 0.5 ? -1 : 1;
+  const steps = 2 + Math.floor(random() * 3);
+  let currentIndex = startIndex;
+  const route: number[] = [];
+  for (let step = 0; step < steps; step += 1) {
+    let nextIndex = currentIndex + direction;
+    if (nextIndex < 0 || nextIndex >= WALK_POINTS.length) {
+      direction *= -1;
+      nextIndex = currentIndex + direction;
+    }
+    route.push(nextIndex);
+    currentIndex = nextIndex;
+  }
+  return route;
+}
+
+function objectIdentity(object: PlanetObject) {
+  return `${object.stage}-${object.ordinal}`;
+}
 
 export function objectProgress(growthCredit: number, stage: number) {
   let start = 0;
@@ -45,9 +74,25 @@ function ObjectSprite({ object, x, y, scale }: { object: PlanetObject; x: number
   }
 }
 
-export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean }) {
+export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean }) {
   const name = STAGE_NAMES[stage] ?? STAGE_NAMES[4];
   const clipId = `planet-clip-${useId().replace(/:/g, "")}`;
+  const sceneRef = useRef<HTMLElement | null>(null);
+  const initialPosition = Math.floor(WALK_POINTS.length / 2);
+  const [avatarPosition, setAvatarPosition] = useState(initialPosition);
+  const avatarPositionRef = useRef(initialPosition);
+  const [avatarFacing, setAvatarFacing] = useState<"left" | "right">("right");
+  const [avatarWalking, setAvatarWalking] = useState(false);
+  const [eyesClosed, setEyesClosed] = useState(false);
+  const [isIntersecting, setIsIntersecting] = useState(() => typeof IntersectionObserver === "undefined");
+  const [documentVisible, setDocumentVisible] = useState(() => !document.hidden);
+  const [reducedMotion, setReducedMotion] = useState(() => typeof window.matchMedia === "function" && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+  const [sceneEntering, setSceneEntering] = useState(false);
+  const sceneHasEntered = useRef(false);
+  const [enteringObjects, setEnteringObjects] = useState<Set<string>>(() => new Set());
+  const knownObjectIds = useRef(new Set(objects.map(objectIdentity)));
+  const motionActive = animate && !compact && isIntersecting && documentVisible && !reducedMotion;
+  const motionState = compact ? "paused" : reducedMotion ? "reduced" : motionActive ? "active" : "paused";
   const tiles = new Map<string, { column: number; row: number; objects: PlanetObject[] }>();
   for (const object of objects) {
     const column = Math.min(9, Math.floor(object.x / 10));
@@ -58,9 +103,146 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
     tiles.set(key, tile);
   }
   const hasCosmetic = (slotId: string, sku: string) => equippedCosmetics.some((item) => item.slot_id === slotId && item.sku === sku);
+
+  useEffect(() => {
+    const node = sceneRef.current;
+    if (!node || typeof IntersectionObserver === "undefined") {
+      setIsIntersecting(true);
+      return;
+    }
+    const observer = new IntersectionObserver((entries) => {
+      setIsIntersecting(entries.some((entry) => entry.target === node && entry.isIntersecting));
+    });
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, []);
+
+  useEffect(() => {
+    const node = sceneRef.current;
+    if (!node) return;
+    const finishAnimation = (event: Event) => {
+      if (event.target === node.querySelector(".planet-svg")) setSceneEntering(false);
+      if (event.target instanceof Element) {
+        const identity = event.target.getAttribute("data-object-id");
+        if (identity) finishObjectEntrance(identity);
+      }
+    };
+    node.addEventListener("animationend", finishAnimation);
+    return () => node.removeEventListener("animationend", finishAnimation);
+  }, []);
+
+  useEffect(() => {
+    const updateVisibility = () => setDocumentVisible(!document.hidden);
+    document.addEventListener("visibilitychange", updateVisibility);
+    return () => document.removeEventListener("visibilitychange", updateVisibility);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window.matchMedia !== "function") return;
+    const preference = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const updatePreference = () => setReducedMotion(preference.matches);
+    updatePreference();
+    preference.addEventListener?.("change", updatePreference);
+    return () => preference.removeEventListener?.("change", updatePreference);
+  }, []);
+
+  useEffect(() => {
+    if (reducedMotion) {
+      sceneHasEntered.current = true;
+      setSceneEntering(false);
+      return;
+    }
+    if (motionActive && !sceneHasEntered.current) {
+      sceneHasEntered.current = true;
+      setSceneEntering(true);
+    }
+  }, [motionActive, reducedMotion]);
+
+  useEffect(() => {
+    const added = objects.map(objectIdentity).filter((identity) => !knownObjectIds.current.has(identity));
+    objects.forEach((object) => knownObjectIds.current.add(objectIdentity(object)));
+    if (motionActive && added.length) {
+      setEnteringObjects((current) => new Set([...current, ...added]));
+    }
+  }, [objects, motionActive]);
+
+  useEffect(() => {
+    if (!motionActive) {
+      setAvatarWalking(false);
+      setEyesClosed(false);
+      setSceneEntering(false);
+      setEnteringObjects(new Set());
+      return;
+    }
+    let movementTimer: number | undefined;
+    let blinkTimer: number | undefined;
+    let blinkCloseTimer: number | undefined;
+    let walking = false;
+    let cancelled = false;
+
+    const scheduleWalk = () => {
+      movementTimer = window.setTimeout(() => {
+        const route = planWalk(avatarPositionRef.current, Math.random);
+        let step = 0;
+        walking = true;
+        setAvatarWalking(true);
+        setEyesClosed(false);
+        const moveNext = () => {
+          if (cancelled) return;
+          const nextPosition = route[step];
+          step += 1;
+          if (nextPosition === undefined) {
+            walking = false;
+            setAvatarWalking(false);
+            movementTimer = window.setTimeout(scheduleWalk, 2300);
+            return;
+          }
+          const previousPosition = avatarPositionRef.current;
+          setAvatarFacing(nextPosition < previousPosition ? "left" : "right");
+          avatarPositionRef.current = nextPosition;
+          setAvatarPosition(nextPosition);
+          movementTimer = window.setTimeout(moveNext, 380);
+        };
+        moveNext();
+      }, 2600 + Math.random() * 1400);
+    };
+
+    const scheduleBlink = () => {
+      blinkTimer = window.setTimeout(() => {
+        if (walking) {
+          scheduleBlink();
+          return;
+        }
+        setEyesClosed(true);
+        blinkCloseTimer = window.setTimeout(() => {
+          setEyesClosed(false);
+          scheduleBlink();
+        }, 130);
+      }, 3000 + Math.random() * 2500);
+    };
+
+    scheduleWalk();
+    scheduleBlink();
+    return () => {
+      cancelled = true;
+      if (movementTimer !== undefined) window.clearTimeout(movementTimer);
+      if (blinkTimer !== undefined) window.clearTimeout(blinkTimer);
+      if (blinkCloseTimer !== undefined) window.clearTimeout(blinkCloseTimer);
+    };
+  }, [motionActive]);
+
+  function finishObjectEntrance(identity: string) {
+    setEnteringObjects((current) => {
+      if (!current.has(identity)) return current;
+      const next = new Set(current);
+      next.delete(identity);
+      return next;
+    });
+  }
+
   return (
-    <figure className={`planet-figure ${compact ? "planet-figure--compact" : ""}`}>
-      <svg className="planet-svg" viewBox="0 0 360 320" role="img" aria-label={stage >= 4 ? `${name}, 최종 시대에서 발전이 계속됩니다` : `${name}, 다음 시대까지 ${Math.round(progress * 100)}%`} shapeRendering="crispEdges">
+    <figure ref={sceneRef} className={`planet-figure ${compact ? "planet-figure--compact" : ""}`} data-motion={motionState}>
+      <svg className={`planet-svg${motionActive ? " planet-svg--floating" : ""}${motionActive && sceneEntering ? " planet-svg--entering" : ""}`} viewBox="0 0 360 320" role="img" aria-label={stage >= 4 ? `${name}, 최종 시대에서 발전이 계속됩니다` : `${name}, 다음 시대까지 ${Math.round(progress * 100)}%`} shapeRendering="crispEdges">
         <defs>
           <clipPath id={clipId}><circle cx="180" cy="157" r="107" /></clipPath>
         </defs>
@@ -86,18 +268,15 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
             const y = 150 + tile.row * 11;
             const visible = tile.objects.slice(-4);
             return <g key={key}>
-              {visible.map((object, index) => <ObjectSprite key={`${object.stage}-${object.ordinal}`} object={object} x={x + (tile.objects.length === 1 ? 0 : (index % 2) * 8.5)} y={y + (tile.objects.length === 1 ? 0 : Math.floor(index / 2) * 8)} scale={tile.objects.length === 1 ? 0.55 : 0.42} />)}
+              {visible.map((object, index) => {
+                const identity = objectIdentity(object);
+                return <g key={identity} data-object-id={identity} className={motionActive && enteringObjects.has(identity) ? "planet-object--entering" : undefined}><ObjectSprite object={object} x={x + (tile.objects.length === 1 ? 0 : (index % 2) * 8.5)} y={y + (tile.objects.length === 1 ? 0 : Math.floor(index / 2) * 8)} scale={tile.objects.length === 1 ? 0.55 : 0.42} /></g>;
+              })}
               {tile.objects.length > 4 && <g transform={`translate(${x + 9} ${y + 8})`}><rect width="13" height="8" fill="#29354a" stroke="#f0d288" strokeWidth=".7"/><text x="6.5" y="6" fill="#f6eed3" fontSize="5" textAnchor="middle">+{tile.objects.length - 4 > 99 ? "99+" : tile.objects.length - 4}</text></g>}
             </g>;
           })}
-          <g transform="translate(169 126) scale(1.05)">
-            <rect x="5" y="1" width="7" height="2" fill={avatar === "feminine" ? "#51395f" : "#253c55"}/>
-            <rect x="3" y="3" width="11" height="5" fill={avatar === "feminine" ? "#51395f" : "#253c55"}/>
-            <rect x="4" y="5" width="9" height="6" fill="#f3c995"/>
-            {avatar === "feminine" && <><rect x="2" y="5" width="2" height="7" fill="#51395f"/><rect x="13" y="5" width="2" height="7" fill="#51395f"/></>}
-            <rect x="5" y="7" width="1" height="1" fill="#292b3b"/><rect x="10" y="7" width="1" height="1" fill="#292b3b"/>
-            <rect x="4" y="12" width="9" height="5" fill={avatar === "feminine" ? "#d57875" : "#4c9b9a"}/>
-            <rect x="5" y="17" width="3" height="2" fill="#34374a"/><rect x="10" y="17" width="3" height="2" fill="#34374a"/>
+          <g data-planet-avatar="true" className={avatarWalking ? "planet-avatar planet-avatar--walking" : "planet-avatar"} transform={`translate(${WALK_POINTS[avatarPosition].x} ${WALK_POINTS[avatarPosition].y}) scale(1.05)`}>
+            <AvatarSprite avatar={avatar} className="planet-scene-avatar" facing={avatarFacing} eyesClosed={eyesClosed} walking={avatarWalking} />
           </g>
           {hasCosmetic("surface", "flag") && <g data-cosmetic="flag" transform="translate(172 220)" shapeRendering="crispEdges"><rect x="8" y="0" width="4" height="35" fill="#8c6655"/><path d="M12 2h24v11H22l-10 7Z" fill="#ec8c78" stroke="#572f4b" strokeWidth="2"/><rect x="3" y="34" width="17" height="4" fill="#926e58"/></g>}
           {hasCosmetic("surface", "crystal_tower") && <g data-cosmetic="crystal_tower" transform="translate(168 218)" shapeRendering="crispEdges"><rect x="2" y="23" width="27" height="15" fill="#536c91" stroke="#c2c6cf" strokeWidth="2"/><path d="M8 23V9l8-8 8 8v14Z" fill="#a6d9e2" stroke="#e3f0de" strokeWidth="2"/><path d="M16 3v19M10 14h12" stroke="#6ba9bb" strokeWidth="2"/><rect x="11" y="28" width="9" height="10" fill="#455471"/></g>}

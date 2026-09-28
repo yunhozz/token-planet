@@ -5,6 +5,33 @@ import { InvitePanel } from "../InvitePanel";
 import { SyncStatus } from "../SyncStatus";
 import { WorldCommunity } from "../WorldCommunity";
 import { planetGrowth, type SharingState } from "../../lib/sharing";
+import type { WorldPlanet } from "../../types/usage";
+
+const member = (nickname: string, rank = 1): WorldPlanet => ({
+  nickname, avatar: "masculine", stage: 0, current_planet_tokens: rank * 10,
+  lifetime_tokens: rank * 20, growth_credit: rank * 0.5, progress_to_next: 0.1,
+  incomplete: false, objects: [], equipped_cosmetics: [],
+  token_rank: rank, civilization_rank: rank,
+});
+
+it("opens the first member planet by default and selects another with the keyboard", () => {
+  render(<WorldCommunity name="Together" members={[member("Nova", 2), member("Mira", 1)]} />);
+  expect(screen.getByRole("region", { name: "Nova의 행성 자세히 보기" })).toBeInTheDocument();
+  const mira = screen.getByRole("button", { name: "Mira의 행성 크게 보기" });
+  fireEvent.keyDown(screen.getByRole("button", { name: "Nova의 행성 크게 보기" }), { key: "ArrowRight" });
+  expect(mira).toHaveFocus();
+  expect(mira).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("region", { name: "Mira의 행성 자세히 보기" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "누적 토큰 사용량" }).querySelector("li")?.textContent).toContain("Mira");
+  expect(screen.getByRole("region", { name: "문명 발전" }).querySelector("li")?.textContent).toContain("Mira");
+});
+
+it("falls back to the first available member when the selected member disappears", () => {
+  const { rerender } = render(<WorldCommunity name="Together" members={[member("Nova"), member("Mira")]} />);
+  fireEvent.click(screen.getByRole("button", { name: "Mira의 행성 크게 보기" }));
+  rerender(<WorldCommunity name="Together" members={[member("Nova")]} />);
+  expect(screen.getByRole("region", { name: "Nova의 행성 자세히 보기" })).toBeInTheDocument();
+});
 
 describe("sharing setup", () => {
   it("keeps solo use available while offering email code sign-in", () => {
@@ -57,9 +84,10 @@ describe("shared world controls", () => {
       civilization_rank: 1,
     }]} />);
 
-    expect(container.querySelectorAll('[data-cosmetic="thin_ring"]')).toHaveLength(1);
+    expect(container.querySelectorAll('[data-cosmetic="thin_ring"]')).toHaveLength(2);
     fireEvent.click(screen.getByRole("button", { name: "Nova의 행성 크게 보기" }));
     expect(container.querySelectorAll('[data-cosmetic="thin_ring"]')).toHaveLength(2);
+    expect(screen.getByRole("region", { name: "Nova의 행성 자세히 보기" })).toBeInTheDocument();
     expect(screen.queryByText(/지갑 잔액|구매 기록|보관함/)).not.toBeInTheDocument();
   });
 

@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
+import { FormattedNumber } from "./FormattedNumber";
 import { STAGE_NAMES } from "./PlanetScene";
 import type { GrowthJournal as GrowthJournalData, GrowthJournalCycle, GrowthJournalEntry, UsageCoverage } from "../types/usage";
 
@@ -120,10 +121,6 @@ function coverageLabel(coverage: UsageCoverage | null): string {
   }
 }
 
-function numberLabel(value: number | null): string {
-  return value === null ? "확인 불가" : value.toLocaleString("ko-KR");
-}
-
 export function GrowthJournal({ journal, busy, error, canDelete, onReload, onDelete }: Props) {
   const timezone = validTimezone(journal.timezone);
   const today = dateInTimezone(new Date(), timezone);
@@ -213,7 +210,7 @@ export function GrowthJournal({ journal, busy, error, canDelete, onReload, onDel
           <strong>{selectedCycle.ended_at_utc ? "초기화 완료" : "현재 주기 진행 중"}</strong>
           <span>시작 {selectedCycle.started_at_utc ? formatDateTime(selectedCycle.started_at_utc, timezone) : "시각 확인 불가"}</span>
           {selectedCycle.ended_at_utc && <span>초기화 {formatDateTime(selectedCycle.ended_at_utc, timezone)}</span>}
-          {selectedCycle.ended_at_utc && <span>지갑 적립 {selectedCycle.wallet_credit === null ? "원장 값 없음" : `${numberLabel(selectedCycle.wallet_credit)} 토큰`}</span>}
+          {selectedCycle.ended_at_utc && <span>지갑 적립 {selectedCycle.wallet_credit === null ? "원장 값 없음" : <><FormattedNumber value={selectedCycle.wallet_credit} /> 토큰</>}</span>}
         </div>
       )}
 
@@ -235,12 +232,12 @@ export function GrowthJournal({ journal, busy, error, canDelete, onReload, onDel
             <li key={day.date} className="growth-journal-day">
               <div className="growth-journal-day-top">
                 <time dateTime={day.date}>{day.date}</time>
-                <span>{day.credit === null ? "성장 점수 확인 불가" : `성장 +${day.credit.toLocaleString("ko-KR", { maximumFractionDigits: 6 })}`}</span>
+                <span>{day.credit === null ? "성장 점수 확인 불가" : <>성장 +<FormattedNumber value={day.credit} maximumFractionDigits={6} /></>}</span>
               </div>
-              <strong className="growth-journal-total">{numberLabel(day.total)} <small>확인 토큰</small></strong>
+              <strong className="growth-journal-total">{day.total === null ? "확인 불가" : <FormattedNumber value={day.total} />} <small>확인 토큰</small></strong>
               <div className="growth-journal-agents">
-                <span><b>Codex</b><em>{coverageLabel(day.codex.coverage)}</em><strong>{numberLabel(day.codex.total)}</strong></span>
-                <span><b>Claude Code</b><em>{coverageLabel(day.claudeCode.coverage)}</em><strong>{numberLabel(day.claudeCode.total)}</strong></span>
+                <span><b>Codex</b><em>{coverageLabel(day.codex.coverage)}</em><strong>{day.codex.total === null ? "확인 불가" : <FormattedNumber value={day.codex.total} />}</strong></span>
+                <span><b>Claude Code</b><em>{coverageLabel(day.claudeCode.coverage)}</em><strong>{day.claudeCode.total === null ? "확인 불가" : <FormattedNumber value={day.claudeCode.total} />}</strong></span>
               </div>
               {[5, 20, 50, 100].filter((threshold) => milestones.get(threshold) === day.date).map((threshold) => (
                 <span className="growth-journal-era" key={threshold}>{STAGE_NAMES[MILESTONES.indexOf(threshold) + 1]} 시대 도달</span>

@@ -1,4 +1,5 @@
 import type { Agent, SourceHealth, TokenUsage } from "../types/usage";
+import { FormattedNumber } from "./FormattedNumber";
 
 const names: Record<Agent, string> = { codex: "Codex", claude_code: "Claude Code" };
 const labels = {
@@ -20,7 +21,7 @@ export function SourceStatus({ agent, usage, health, onToggle, onSelectFolder }:
         <span className="source-name">{names[agent]}</span>
         <span className="source-state">{labels[health]}</span>
       </div>
-      <span className="source-count">{count === null ? "—" : `${count.toLocaleString("ko-KR")} 토큰`}</span>
+      <span className="source-count">{count === null ? "—" : <><FormattedNumber value={count} /> 토큰</>}</span>
       {onSelectFolder && <button className="source-toggle" type="button" onClick={() => onSelectFolder(agent)}>폴더 선택</button>}
       {onToggle && <button className="source-toggle" type="button" onClick={() => onToggle(agent, usage.coverage === "user_disabled")}>{usage.coverage === "user_disabled" ? "다시 포함" : "사용 안 함"}</button>}
     </div>

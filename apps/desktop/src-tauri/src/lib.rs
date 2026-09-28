@@ -187,7 +187,14 @@ async fn choose_source_folder(
 #[tauri::command]
 fn set_detail_view(detail: bool, window: WebviewWindow) -> Result<(), String> {
     let (width, height) = if detail {
-        (820.0, 600.0)
+        let mut target: (f64, f64) = (960.0, 700.0);
+        if let Ok(Some(monitor)) = window.current_monitor() {
+            let size = monitor.size();
+            let scale = monitor.scale_factor();
+            target.0 = target.0.min((size.width as f64 / scale - 80.0).max(1.0));
+            target.1 = target.1.min((size.height as f64 / scale - 120.0).max(1.0));
+        }
+        target
     } else {
         (390.0, 700.0)
     };
