@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { InvitePanel } from "./components/InvitePanel";
@@ -11,8 +11,9 @@ import { SyncStatus } from "./components/SyncStatus";
 import { UsageSummary } from "./components/UsageSummary";
 import { WorldCommunity } from "./components/WorldCommunity";
 import { AvatarSprite } from "./components/AvatarSprite";
+import { CosmeticShop } from "./components/CosmeticShop";
 import { sharing, type InviteInfo, type InviteLink, type SharingState, type WorldMember } from "./lib/sharing";
-import type { Agent, GrowthJournal as GrowthJournalData, PlanetAvatar, WorldSnapshot } from "./types/usage";
+import type { Agent, CosmeticEquipAction, CosmeticPurchaseAction, CosmeticShopState, EquippedCosmetic, GrowthJournal as GrowthJournalData, PlanetAvatar, WorldSnapshot } from "./types/usage";
 import "./App.css";
 
 const EMPTY_SNAPSHOT: WorldSnapshot = {
@@ -51,6 +52,17 @@ function App() {
   const [journalOwner, setJournalOwner] = useState("");
   const [journalBusy, setJournalBusy] = useState(false);
   const [journalError, setJournalError] = useState("");
+  const cosmeticShopContext = JSON.stringify([shared?.email ?? null, snapshot?.planet.current_cycle_id ?? null]);
+  const cosmeticShopContextRef = useRef(cosmeticShopContext);
+  cosmeticShopContextRef.current = cosmeticShopContext;
+  const [cosmeticShopEntry, setCosmeticShopEntry] = useState<{ context: string; state: CosmeticShopState } | null>(null);
+  const cosmeticShop = cosmeticShopEntry?.context === cosmeticShopContext ? cosmeticShopEntry.state : null;
+  const [cosmeticPreview, setCosmeticPreview] = useState<EquippedCosmetic[] | null>(null);
+  const [cosmeticShopError, setCosmeticShopError] = useState("");
+
+  function storeCosmeticShop(context: string, shop: CosmeticShopState) {
+    if (cosmeticShopContextRef.current === context) setCosmeticShopEntry({ context, state: shop });
+  }
 
   useEffect(() => {
     let active = true;
@@ -66,6 +78,10 @@ function App() {
     const unlistenSync = listen("sync-status-updated", () => {
       void sharing.state().then((value) => { if (active) setShared(value); }).catch(() => {});
       void invoke<WorldSnapshot | null>("current_usage").then((value) => { if (active && value) setSnapshot(value); }).catch(() => {});
+      const context = cosmeticShopContextRef.current;
+      void invoke<CosmeticShopState>("get_shop_state")
+        .then((value) => { if (active) storeCosmeticShop(context, value); })
+        .catch(() => {});
     }).catch(() => () => {});
     return () => { active = false; void unlisten.then((stop) => stop()); void unlistenCompact.then((stop) => stop()); void unlistenSync.then((stop) => stop()); };
   }, []);
@@ -82,6 +98,18 @@ function App() {
     }).catch(() => {});
     return () => { active = false; };
   }, [shared]);
+
+  useEffect(() => {
+    const context = cosmeticShopContext;
+    let active = true;
+    setCosmeticShopEntry(null);
+    setCosmeticPreview(null);
+    setCosmeticShopError("");
+    invoke<CosmeticShopState>("get_shop_state")
+      .then((value) => { if (active) storeCosmeticShop(context, value); })
+      .catch((cause) => { if (active) setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다."); });
+    return () => { active = false; };
+  }, [cosmeticShopContext]);
 
   async function changeSharing(action: () => Promise<SharingState>) {
     setSharingBusy(true);
@@ -165,11 +193,50 @@ function App() {
     } catch { setError(true); }
   }
 
+  async function purchaseCosmetic(sku: string): Promise<CosmeticPurchaseAction> {
+    const context = cosmeticShopContext;
+    const action = await invoke<CosmeticPurchaseAction>("purchase_cosmetic", { sku });
+    storeCosmeticShop(context, action.state);
+    if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
+    return action;
+  }
+
+  async function equipCosmetic(
+    slotId: string,
+    sku: string | null,
+    cycleId: string,
+    expectedVersion: number,
+  ): Promise<CosmeticEquipAction> {
+    const context = cosmeticShopContext;
+    const action = await invoke<CosmeticEquipAction>("equip_cosmetic", { slotId, sku, cycleId, expectedVersion });
+    storeCosmeticShop(context, action.state);
+    if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
+    return action;
+  }
+
+  async function retryLoadCosmeticShop() {
+    const context = cosmeticShopContext;
+    setCosmeticShopError("");
+    try { storeCosmeticShop(context, await invoke<CosmeticShopState>("get_shop_state")); }
+    catch (cause) {
+      if (cosmeticShopContextRef.current === context) {
+        setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
+      }
+    }
+  }
+
+  async function refreshCosmeticShop() {
+    const context = cosmeticShopContext;
+    const updated = await invoke<CosmeticShopState>("get_shop_state");
+    storeCosmeticShop(context, updated);
+    return updated;
+  }
+
   async function changeView() {
     const next = !detail;
     try { await invoke("set_detail_view", { detail: next }); } catch { /* Browser previews have no native window. */ }
     setDetail(next);
-    if (!next) setJournalOpen(false);
+    if (!next) { setJournalOpen(false); setCosmeticPreview(null); }
   }
 
   async function loadGrowthJournal() {
@@ -206,6 +273,11 @@ function App() {
   const profile = planet.profile;
   const canReset = planet.can_reset || Boolean(planet.reset_available_at_utc && resetCheckAt >= Date.parse(planet.reset_available_at_utc));
   const nextObjectProgress = objectProgress(planet.growth_credit, planet.stage);
+  const confirmedCosmetics = cosmeticShop?.current_cycle_id === planet.current_cycle_id
+    ? cosmeticShop.equipped
+    : [];
+  const sceneCosmetics = cosmeticPreview ?? confirmedCosmetics;
+  const availableWalletBalance = cosmeticShop?.available_balance ?? planet.wallet_balance;
   useEffect(() => {
     if (planet.can_reset || !planet.reset_available_at_utc) return;
     const wait = Math.max(0, Date.parse(planet.reset_available_at_utc) - Date.now()) + 25;
@@ -231,7 +303,7 @@ function App() {
       </header>
       <div className="world-layout">
         <section className="world-visual" aria-label="나의 행성">
-          <PlanetScene stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} />
+          <PlanetScene stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} />
           <div className="stage-progress">
             {planet.stage < 4 ? <div className="progress-row"><span>다음 시대까지</span><div className="progress-track" role="progressbar" aria-valuenow={Math.round(planet.progress_to_next * 100)} aria-valuemin={0} aria-valuemax={100} aria-label="다음 시대 진행도"><span style={{ width: `${planet.progress_to_next * 100}%` }} /></div><span>{Math.round(planet.progress_to_next * 100)}%</span></div> : <p className="final-stage-note">최종 시대 · 발전은 계속됩니다</p>}
             <div className="progress-row"><span>다음 오브젝트까지</span><div className="progress-track progress-track--object" role="progressbar" aria-valuenow={Math.round(nextObjectProgress * 100)} aria-valuemin={0} aria-valuemax={100} aria-label="다음 오브젝트 생성 진행도"><span style={{ width: `${nextObjectProgress * 100}%` }} /></div><span>{Math.round(nextObjectProgress * 100)}%</span></div>
@@ -245,7 +317,7 @@ function App() {
               <div className="ledger-cell"><span className="ledger-label">현재 행성 토큰</span><strong className="ledger-value">{planet.current_planet_tokens.toLocaleString("ko-KR")}</strong></div>
               <div className="ledger-cell"><span className="ledger-label">개편 후 누적</span><strong className="ledger-value">{planet.lifetime_tokens.toLocaleString("ko-KR")}</strong></div>
               <div className="ledger-cell"><span className="ledger-label">문명 발전 점수</span><strong className="ledger-value">{planet.growth_credit.toLocaleString("ko-KR", { maximumFractionDigits: 12 })}</strong></div>
-              <div className="ledger-cell"><span className="ledger-label">지갑 잔액</span><strong className="ledger-value">{planet.wallet_balance.toLocaleString("ko-KR")}</strong></div>
+              <div className="ledger-cell"><span className="ledger-label">지갑 잔액</span><strong className="ledger-value">{availableWalletBalance.toLocaleString("ko-KR")}</strong></div>
             </div>
             <p className="credit-line"><span>현재 시대</span><strong>{STAGE_NAMES[planet.stage] ?? STAGE_NAMES[4]}</strong></p>
             {planet.incomplete && <p className="usage-footnote">확인된 토큰만 성장에 반영했습니다. 집계되지 않은 기록이 있습니다.</p>}
@@ -254,6 +326,18 @@ function App() {
               <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!canReset || planetBusy}>{planetBusy ? "처리 중" : "행성 초기화"}</button>
             </div>
           </div>
+          {detail && (cosmeticShop
+            ? <CosmeticShop
+              state={cosmeticShop}
+              onPurchase={purchaseCosmetic}
+              onEquip={equipCosmetic}
+              onPreviewChange={setCosmeticPreview}
+              onRefresh={refreshCosmeticShop}
+            />
+            : <div className="cosmetic-load-state" role="status">
+              <p>{cosmeticShopError || "상점을 불러오고 있습니다."}</p>
+              {cosmeticShopError && <button className="cosmetic-entry" type="button" onClick={() => void retryLoadCosmeticShop()}>다시 불러오기</button>}
+            </div>)}
           <UsageSummary snapshot={view} />
           <div className="source-list" aria-label="수집 상태">
             <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} onToggle={detail ? toggleSource : undefined} onSelectFolder={detail ? selectFolder : undefined} />

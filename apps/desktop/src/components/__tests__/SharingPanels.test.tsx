@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { SharingSetup } from "../SharingSetup";
 import { InvitePanel } from "../InvitePanel";
 import { SyncStatus } from "../SyncStatus";
+import { WorldCommunity } from "../WorldCommunity";
 import { planetGrowth, type SharingState } from "../../lib/sharing";
 
 describe("sharing setup", () => {
@@ -38,6 +39,28 @@ describe("shared world controls", () => {
     expect(screen.getByText(/2명/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "초대 코드 만들기" }));
     expect(onCreate).toHaveBeenCalledOnce();
+  });
+
+  it("renders equipped cosmetics on member cards and the expanded planet only", () => {
+    const { container } = render(<WorldCommunity name="Together" members={[{
+      nickname: "Nova",
+      avatar: "feminine",
+      stage: 0,
+      current_planet_tokens: 100,
+      lifetime_tokens: 100,
+      growth_credit: 0.2,
+      progress_to_next: 0.04,
+      incomplete: false,
+      objects: [],
+      equipped_cosmetics: [{ slot_id: "ring", sku: "thin_ring" }],
+      token_rank: 1,
+      civilization_rank: 1,
+    }]} />);
+
+    expect(container.querySelectorAll('[data-cosmetic="thin_ring"]')).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Nova의 행성 크게 보기" }));
+    expect(container.querySelectorAll('[data-cosmetic="thin_ring"]')).toHaveLength(2);
+    expect(screen.queryByText(/지갑 잔액|구매 기록|보관함/)).not.toBeInTheDocument();
   });
 
   it("shows the current code and the member ranking disclosure", () => {

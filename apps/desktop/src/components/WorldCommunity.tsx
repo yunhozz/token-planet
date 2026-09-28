@@ -37,14 +37,14 @@ export function WorldCommunity({ name, members }: { name: string; members: World
       {members.length === 0 ? <p className="community-empty">멤버의 행성을 동기화하고 있습니다.</p> : <>
         {selected && <section className="selected-planet-detail" aria-label={`${selected.nickname}의 행성 자세히 보기`}>
           <div className="selected-planet-heading"><strong>{selected.nickname}의 행성</strong><button type="button" onClick={() => setSelectedIndex(null)}>닫기</button></div>
-          <PlanetScene stage={selected.stage} progress={selected.progress_to_next} avatar={selected.avatar} objects={selected.objects} />
+          <PlanetScene stage={selected.stage} progress={selected.progress_to_next} avatar={selected.avatar} objects={selected.objects} equippedCosmetics={selected.equipped_cosmetics ?? []} />
           <div className="selected-planet-stats"><span>현재 행성</span><strong>{selected.current_planet_tokens.toLocaleString("ko-KR")} 토큰</strong><span>누적 사용량</span><strong>{selected.lifetime_tokens.toLocaleString("ko-KR")} 토큰</strong><span>문명 발전</span><strong>{selected.growth_credit.toLocaleString("ko-KR", { maximumFractionDigits: 12 })} 크레딧</strong></div>
         </section>}
         <div className="planet-gallery">
           {members.map((member, index) => (
             <button className="planet-card" type="button" key={index} aria-pressed={selectedIndex === index} aria-label={`${member.nickname}의 행성 크게 보기`} onClick={() => setSelectedIndex(selectedIndex === index ? null : index)}>
               <div className="planet-card-top"><AvatarSprite avatar={member.avatar} /><span>{stages[member.stage] ?? stages[4]}</span></div>
-              <PlanetScene stage={member.stage} progress={member.progress_to_next} avatar={member.avatar} objects={member.objects} compact />
+              <PlanetScene stage={member.stage} progress={member.progress_to_next} avatar={member.avatar} objects={member.objects} equippedCosmetics={member.equipped_cosmetics ?? []} compact />
               <h3>{member.nickname}</h3>
               <div className="planet-card-stats">
                 <span>이번 행성</span><strong>{member.current_planet_tokens.toLocaleString("ko-KR")}</strong>

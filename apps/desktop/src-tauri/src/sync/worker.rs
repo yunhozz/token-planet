@@ -52,6 +52,7 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
         }
     };
     let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
+    import_pending_guest_cosmetics(state, &client, &session.access_token).await?;
     let shell = match client.current_world(&session.access_token).await {
         Ok(shell) => shell,
         Err(_) => {
@@ -94,6 +95,17 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
             .scan()
             .map_err(|_| "행성 상태를 새로 계산할 수 없습니다")?;
     }
+    let server_upload_credits = state
+        .ledger
+        .lock()
+        .map_err(|_| "로컬 지갑 오류")?
+        .planet_wallet_credits_for_server_upload()
+        .map_err(|_| "서버 지갑 전송 내역 오류")?;
+    let server_upload_balance = server_upload_credits.iter().try_fold(0_u64, |balance, credit| {
+        balance
+            .checked_add(credit.amount)
+            .ok_or("서버 지갑 잔액 범위 오류")
+    })?;
     let local_snapshot = state
         .latest
         .lock()
@@ -111,7 +123,10 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
                     UsageCoverage::Complete | UsageCoverage::UserDisabled
                 )
             });
-            (snapshot.planet.clone(), incomplete)
+            let mut planet = snapshot.planet.clone();
+            planet.wallet_credits = server_upload_credits.clone();
+            planet.wallet_balance = server_upload_balance;
+            (planet, incomplete)
         });
     let sharing_paused = state
         .ledger
@@ -227,6 +242,43 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
             .map_err(|_| "집계 확인 오류")?;
     }
     Ok(())
+}
+
+pub async fn import_pending_guest_cosmetics(
+    state: &AppState,
+    client: &SupabaseSyncClient,
+    access_token: &str,
+) -> Result<bool, String> {
+    let pending = state
+        .ledger
+        .lock()
+        .map_err(|_| "게스트 구매 기록 오류")?
+        .pending_guest_cosmetic_import()
+        .map_err(|_| "게스트 구매 기록 오류")?;
+    let Some(import) = pending else {
+        return Ok(false);
+    };
+    let result = client
+        .import_guest_cosmetics(access_token, &import)
+        .await
+        .map_err(|_| "게스트 구매 기록을 가져오지 못했습니다")?;
+    if result.status != "imported" {
+        return Err(match result.status.as_str() {
+            "insufficient_balance" => "게스트 구매 기록의 서버 잔액을 확인할 수 없습니다".into(),
+            _ => "게스트 구매 기록을 검증할 수 없습니다".into(),
+        });
+    }
+    let canonical = client
+        .cosmetic_shop_state(access_token)
+        .await
+        .map_err(|_| "가져온 상점 상태를 확인할 수 없습니다")?;
+    state
+        .ledger
+        .lock()
+        .map_err(|_| "게스트 구매 상태 오류")?
+        .mark_guest_cosmetic_imported(&import.import_id, &canonical)
+        .map_err(|_| "게스트 구매 상태를 저장할 수 없습니다")?;
+    Ok(true)
 }
 
 #[cfg(test)]

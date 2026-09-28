@@ -276,6 +276,7 @@ impl Ledger {
         };
         ledger.initialize_planet_accounts()?;
         ledger.initialize_growth_journal()?;
+        ledger.initialize_cosmetic_shop()?;
         Ok(ledger)
     }
 
@@ -589,6 +590,12 @@ impl Ledger {
         }
         tx.execute("DELETE FROM setting WHERE key IN ('planet_remote_cycle_id','planet_remote_current_tokens','planet_remote_growth_credit','planet_remote_incomplete')", [])?;
         tx.execute("DELETE FROM planet_object", [])?;
+        tx.execute(
+            "DELETE FROM cosmetic_equipment
+             WHERE account_id=(SELECT value FROM setting WHERE key='planet_account_id')
+               AND cycle_id=?1",
+            [&previous_cycle_id],
+        )?;
         tx.commit()?;
         Ok(current_tokens)
     }

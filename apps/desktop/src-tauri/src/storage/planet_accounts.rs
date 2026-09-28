@@ -5,6 +5,7 @@ use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use super::ledger::{Ledger, ScanError};
+use crate::domain::cosmetic_shop::{GuestCosmeticImport, GuestCosmeticPurchase};
 use crate::domain::planet::{PlanetObject, PlanetWalletCredit};
 
 #[derive(Deserialize, Serialize)]
@@ -59,7 +60,53 @@ impl Ledger {
             return Ok(false);
         }
         if current == "local" {
+            let guest_wallet_credits = self.planet_wallet_credits()?;
+            let guest_purchases = {
+                let mut statement = self.connection.prepare(
+                    "SELECT purchase_id,sku,price,purchased_at_utc FROM cosmetic_purchase
+                     WHERE account_id='local' ORDER BY purchased_at_utc,purchase_id",
+                )?;
+                let rows = statement.query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?;
+                rows.map(|row| {
+                    let (purchase_id, sku, price, purchased_at_utc) = row?;
+                    Ok(GuestCosmeticPurchase {
+                        purchase_id,
+                        sku,
+                        price: u64::try_from(price).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        purchased_at_utc,
+                    })
+                })
+                .collect::<Result<Vec<_>, rusqlite::Error>>()?
+            };
+            let guest_import = if guest_wallet_credits.is_empty() && guest_purchases.is_empty() {
+                None
+            } else {
+                Some(GuestCosmeticImport {
+                    import_id: uuid::Uuid::new_v4().to_string(),
+                    wallet_credits: guest_wallet_credits,
+                    purchases: guest_purchases,
+                })
+            };
+            let guest_import_json = guest_import
+                .as_ref()
+                .map(serde_json::to_string)
+                .transpose()
+                .map_err(|_| ScanError::Database)?;
             let tx = self.connection.transaction()?;
+            if let (Some(import), Some(payload_json)) = (guest_import, guest_import_json) {
+                tx.execute(
+                    "INSERT OR IGNORE INTO cosmetic_guest_import(account_id,import_id,payload_json)
+                     VALUES (?1,?2,?3)",
+                    params![account_id, import.import_id, payload_json],
+                )?;
+            }
             tx.execute(
                 "UPDATE planet_usage_owner SET account_id=?1 WHERE account_id='local'",
                 [&account_id],

@@ -1,12 +1,14 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import App from "../App";
 import type { SharingState } from "../lib/sharing";
-import type { WorldSnapshot } from "../types/usage";
+import type { CosmeticShopState, WorldSnapshot } from "../types/usage";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const listenMock = vi.hoisted(() => vi.fn());
 vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => {}) }));
+vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
+const listeners = new Map<string, (event: unknown) => void>();
 
 const ownerState: SharingState = {
   phase: "shared", email: "owner@example.test", sync_status: "synced", pending: 0, last_synced_at: null,
@@ -27,6 +29,14 @@ const localSnapshot: WorldSnapshot = {
     can_reset: true, reset_available_at_utc: null, objects: [],
   },
 };
+
+function shopState(balance: number): CosmeticShopState {
+  return {
+    slots: [], products: [], current_cycle_id: "cycle-1", available_balance: balance,
+    owned_skus: [], equipped: [], slot_versions: {}, actions_require_online: true,
+    action_unavailable_reason: null, guest_import_pending: false, guest_import_error: null,
+  };
+}
 
 it.each([false, true])("shows the new account's profile setup after sign-in (group lookup fails: %s)", async (groupLookupFails) => {
   let verified = false;
@@ -57,6 +67,12 @@ it.each([false, true])("shows the new account's profile setup after sign-in (gro
 
 beforeEach(() => {
   invokeMock.mockReset();
+  listenMock.mockReset();
+  listeners.clear();
+  listenMock.mockImplementation(async (event: string, handler: (event: unknown) => void) => {
+    listeners.set(event, handler);
+    return () => {};
+  });
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
@@ -87,4 +103,52 @@ it("refreshes owner candidates even when the member count stays the same", async
   await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "list_world_members")).toHaveLength(2));
   await screen.findByRole("option", { name: /member-c/ });
   expect(screen.getByLabelText("소유권을 넘길 참여자")).toHaveValue("");
+});
+
+it("refreshes the confirmed shop state after sync finishes", async () => {
+  let synced = false;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return shopState(synced ? 100_000 : 0);
+    if (command === "list_world_members") return [];
+    if (command === "list_invites") return [];
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("0 토큰"));
+
+  synced = true;
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰"));
+});
+
+it("does not show the previous account shop when the next account lookup fails", async () => {
+  let currentAccount = ownerState;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") {
+      if (currentAccount.email === "next@example.test") throw "서버에서 상점 상태를 불러오지 못했습니다";
+      return shopState(600_000);
+    }
+    if (command === "list_world_members") return [];
+    if (command === "list_invites") return [];
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("600,000 토큰"));
+
+  currentAccount = { ...ownerState, email: "next@example.test", phase: "signed_in", world: null };
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")).toBeNull());
+  expect(await screen.findByText("서버에서 상점 상태를 불러오지 못했습니다")).toBeInTheDocument();
 });

@@ -1,6 +1,10 @@
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 
+use crate::domain::cosmetic_shop::{
+    CosmeticEquipResult, CosmeticPurchaseResult, CosmeticShopState, GuestCosmeticImport,
+    GuestCosmeticImportResult,
+};
 use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
 use crate::domain::planet::{PlanetDeviceContribution, PlanetState, WorldPlanet};
 use crate::sync::aggregate::DailyUsageSnapshot;
@@ -17,6 +21,36 @@ pub enum SyncError {
 struct UploadBody<'a> {
     p_world_id: &'a str,
     p_snapshot: &'a DailyUsageSnapshot,
+}
+
+fn purchase_cosmetic_rpc_body(purchase_id: &str, sku: &str, catalog_revision: u32) -> serde_json::Value {
+    serde_json::json!({
+        "p_purchase_id": purchase_id,
+        "p_sku": sku,
+        "p_catalog_revision": catalog_revision,
+    })
+}
+
+fn equip_cosmetic_rpc_body(
+    cycle_id: &str,
+    slot_id: &str,
+    sku: Option<&str>,
+    expected_version: u64,
+) -> serde_json::Value {
+    serde_json::json!({
+        "p_cycle_id": cycle_id,
+        "p_slot_id": slot_id,
+        "p_sku": sku,
+        "p_expected_version": expected_version,
+    })
+}
+
+fn guest_import_rpc_body(import: &GuestCosmeticImport) -> serde_json::Value {
+    serde_json::json!({
+        "p_import_id": import.import_id,
+        "p_wallet_credits": import.wallet_credits,
+        "p_purchases": import.purchases,
+    })
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -114,6 +148,58 @@ impl SupabaseSyncClient {
     ) -> Result<Option<PlanetState>, SyncError> {
         self.post_rpc(access_token, "get_my_planet_state", &serde_json::json!({}))
             .await
+    }
+
+    pub async fn cosmetic_shop_state(
+        &self,
+        access_token: &str,
+    ) -> Result<CosmeticShopState, SyncError> {
+        self.post_rpc(access_token, "get_my_cosmetic_state", &serde_json::json!({}))
+            .await
+    }
+
+    pub async fn purchase_cosmetic(
+        &self,
+        access_token: &str,
+        purchase_id: &str,
+        sku: &str,
+        catalog_revision: u32,
+    ) -> Result<CosmeticPurchaseResult, SyncError> {
+        self.post_rpc(
+            access_token,
+            "purchase_my_cosmetic",
+            &purchase_cosmetic_rpc_body(purchase_id, sku, catalog_revision),
+        )
+        .await
+    }
+
+    pub async fn equip_cosmetic(
+        &self,
+        access_token: &str,
+        cycle_id: &str,
+        slot_id: &str,
+        sku: Option<&str>,
+        expected_version: u64,
+    ) -> Result<CosmeticEquipResult, SyncError> {
+        self.post_rpc(
+            access_token,
+            "equip_my_cosmetic",
+            &equip_cosmetic_rpc_body(cycle_id, slot_id, sku, expected_version),
+        )
+        .await
+    }
+
+    pub async fn import_guest_cosmetics(
+        &self,
+        access_token: &str,
+        import: &GuestCosmeticImport,
+    ) -> Result<GuestCosmeticImportResult, SyncError> {
+        self.post_rpc(
+            access_token,
+            "import_my_guest_cosmetics",
+            &guest_import_rpc_body(import),
+        )
+        .await
     }
 
     pub async fn upload_planet_state(
@@ -411,7 +497,9 @@ fn one_row<T>(mut rows: Vec<T>) -> Result<T, SyncError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{one_row, MySyncPolicy, SyncError, UploadBody, WorldSummary};
+    use super::{guest_import_rpc_body, one_row, MySyncPolicy, SyncError, UploadBody, WorldSummary};
+    use crate::domain::cosmetic_shop::{GuestCosmeticImport, GuestCosmeticPurchase};
+    use crate::domain::planet::PlanetWalletCredit;
     use crate::domain::usage::{Agent, UsageCoverage};
     use crate::sync::aggregate::DailyUsageSnapshot;
 
@@ -480,6 +568,25 @@ mod tests {
     }
 
     #[test]
+    fn world_planet_accepts_equipped_keys_and_rejects_private_wallet_fields() {
+        let value = serde_json::json!({
+            "nickname": "Nova", "avatar": "feminine", "stage": 0,
+            "current_planet_tokens": 0, "lifetime_tokens": 100000,
+            "growth_credit": 1.0, "progress_to_next": 0.2, "incomplete": false,
+            "objects": [], "equipped_cosmetics": [{"slot_id":"sky", "sku":"star_cluster"}],
+            "token_rank": 1, "civilization_rank": 1
+        });
+        let planet: crate::domain::planet::WorldPlanet = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(planet.equipped_cosmetics[0].slot_id, "sky");
+        assert_eq!(planet.equipped_cosmetics[0].sku, "star_cluster");
+        assert!(value.get("wallet_balance").is_none());
+
+        let mut contaminated = value;
+        contaminated["wallet_balance"] = serde_json::json!(100000);
+        assert!(serde_json::from_value::<crate::domain::planet::WorldPlanet>(contaminated).is_err());
+    }
+
+    #[test]
     fn deletion_policy_response_contains_only_own_cutoff_and_pause() {
         let value = serde_json::json!({"deleted_through":"2026-09-25","paused":true});
         let policy: MySyncPolicy = serde_json::from_value(value).unwrap();
@@ -489,5 +596,29 @@ mod tests {
             "deleted_through": null, "paused": false, "member_totals": [42]
         }))
         .is_err());
+    }
+
+    #[test]
+    fn guest_import_rpc_body_keeps_the_same_import_id_and_only_guest_rows() {
+        let import = GuestCosmeticImport {
+            import_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            wallet_credits: vec![PlanetWalletCredit {
+                previous_cycle_id: "guest-cycle".into(),
+                amount: 100000,
+                created_at_utc: "2026-09-28T00:00:00Z".into(),
+            }],
+            purchases: vec![GuestCosmeticPurchase {
+                purchase_id: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb".into(),
+                sku: "star_cluster".into(),
+                price: 100000,
+                purchased_at_utc: "2026-09-28T00:00:00Z".into(),
+            }],
+        };
+        let body = guest_import_rpc_body(&import);
+        assert_eq!(body.as_object().unwrap().len(), 3);
+        assert_eq!(body["p_import_id"], import.import_id);
+        assert_eq!(body["p_wallet_credits"][0]["previous_cycle_id"], "guest-cycle");
+        assert_eq!(body["p_purchases"][0]["purchase_id"], import.purchases[0].purchase_id);
+        assert!(body.get("user_id").is_none());
     }
 }

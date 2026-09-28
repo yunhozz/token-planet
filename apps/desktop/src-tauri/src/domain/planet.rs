@@ -64,6 +64,7 @@ pub struct PlanetDeviceContribution {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct WorldPlanet {
     pub nickname: String,
     pub avatar: PlanetAvatar,
@@ -74,6 +75,15 @@ pub struct WorldPlanet {
     pub progress_to_next: f64,
     pub incomplete: bool,
     pub objects: Vec<PlanetObject>,
+    #[serde(default)]
+    pub equipped_cosmetics: Vec<SharedEquippedCosmetic>,
     pub token_rank: u8,
     pub civilization_rank: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SharedEquippedCosmetic {
+    pub slot_id: String,
+    pub sku: String,
 }
