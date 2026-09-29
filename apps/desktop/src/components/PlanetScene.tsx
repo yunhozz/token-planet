@@ -99,6 +99,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
     "--avatar-hit-top": `${(avatarPoint.y + 12) / 3.2}%`,
     "--avatar-bubble-left": `${(avatarPoint.x + 10) / 3.6}%`,
     "--avatar-bubble-top": `${avatarPoint.y / 3.2}%`,
+    "--avatar-step-ms": `${avatarStepDuration}ms`,
   } as CSSProperties;
 
   useEffect(() => {
@@ -277,7 +278,8 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
 
   return (
     <figure ref={sceneRef} className={`planet-figure ${compact ? "planet-figure--compact" : ""}`} data-motion={motionState}>
-      <svg className={`planet-svg${motionActive ? " planet-svg--floating" : ""}${motionActive && sceneEntering ? " planet-svg--entering" : ""}`} viewBox="0 0 360 320" role="img" aria-label={stage >= 4 ? `${name}, 최종 시대에서 발전이 계속됩니다` : `${name}, 다음 시대까지 ${Math.round(progress * 100)}%`} shapeRendering="crispEdges">
+      <div className="planet-scene-canvas">
+        <svg className={`planet-svg${motionActive ? " planet-svg--floating" : ""}${motionActive && sceneEntering ? " planet-svg--entering" : ""}`} viewBox="0 0 360 320" role="img" aria-label={stage >= 4 ? `${name}, 최종 시대에서 발전이 계속됩니다` : `${name}, 다음 시대까지 ${Math.round(progress * 100)}%`} shapeRendering="crispEdges">
         <defs>
           <clipPath id={clipId}><circle cx="180" cy="157" r="107" /></clipPath>
         </defs>
@@ -326,12 +328,13 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
         {hasCosmetic("forecourt", "lantern") && <g data-cosmetic="lantern" transform="translate(169 270)" shapeRendering="crispEdges"><rect x="-4" y="34" width="30" height="4" fill="#677b63"/><rect x="9" y="11" width="4" height="23" fill="#8f6b4e"/><rect x="3" y="2" width="16" height="14" fill="#e8c67d" stroke="#754e52" strokeWidth="2"/><rect x="7" y="5" width="8" height="8" fill="#fff0ad"/><path d="M1 2h20M5 -2h12" stroke="#754e52" strokeWidth="2"/></g>}
         {hasCosmetic("forecourt", "rover") && <g data-cosmetic="rover" transform="translate(152 279)" shapeRendering="crispEdges"><rect x="2" y="9" width="48" height="16" fill="#ce9b68" stroke="#564d58" strokeWidth="2"/><rect x="11" y="1" width="20" height="10" fill="#8ac8c4" stroke="#564d58" strokeWidth="2"/><rect x="20" y="-5" width="3" height="7" fill="#e8d58f"/><circle cx="13" cy="26" r="5" fill="#34475a" stroke="#e2d59d" strokeWidth="2"/><circle cx="40" cy="26" r="5" fill="#34475a" stroke="#e2d59d" strokeWidth="2"/><rect x="4" y="14" width="7" height="4" fill="#f2d287"/><path d="M33 12h12v3H33z" fill="#a3ddd1"/></g>}
         {hasCosmetic("forecourt", "greenhouse") && <g data-cosmetic="greenhouse" transform="translate(147 273)" shapeRendering="crispEdges"><path d="M1 34V12L33 1l32 11v22Z" fill="#84c8bd" fillOpacity=".78" stroke="#d8e6bd" strokeWidth="2"/><path d="M5 14h55M11 11v23m22-30v30m21-23v23" stroke="#607e79" strokeWidth="2"/><rect x="26" y="22" width="14" height="12" fill="#8eb76c"/><path d="M33 22v-8m-4 8 4-4 4 4" fill="#79a966" stroke="#477451" strokeWidth="2"/><rect x="-4" y="34" width="74" height="4" fill="#677b63"/></g>}
-      </svg>
-      {interactive && <div className="planet-interaction-layer" style={interactionStyle}>
-        <button type="button" className="planet-hit-area" aria-label="행성에게 말 걸기" onClick={() => speak("planet")} />
-        <button type="button" className="avatar-hit-area" aria-label="아바타에게 말 걸기" onClick={() => speak("avatar")} />
-        {speechLine && <div className="planet-speech-bubble" role="status" aria-atomic="true">{speechLine}</div>}
-      </div>}
+        </svg>
+        {interactive && <div className="planet-interaction-layer" data-avatar-walking={avatarWalking ? "true" : "false"} style={interactionStyle}>
+          <button type="button" className="planet-hit-area" aria-label="행성에게 말 걸기" onClick={() => speak("planet")} />
+          <button type="button" className="avatar-hit-area" aria-label="아바타에게 말 걸기" onClick={() => speak("avatar")} />
+          {speechLine && <div className="planet-speech-bubble" role="status" aria-atomic="true">{speechLine}</div>}
+        </div>}
+      </div>
       {!compact && <figcaption className="planet-caption">{name}</figcaption>}
     </figure>
   );

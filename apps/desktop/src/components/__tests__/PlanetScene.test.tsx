@@ -220,6 +220,34 @@ it("uses a complete static scene when reduced motion is requested", async () => 
 });
 
 describe("planet speech interaction", () => {
+  it("anchors the hit areas to the same compact canvas as the SVG", () => {
+    const { container } = render(<PlanetScene stage={0} progress={0} compact interactive />);
+    const canvas = container.querySelector(".planet-scene-canvas");
+    const svg = container.querySelector(".planet-svg");
+    const interactionLayer = container.querySelector(".planet-interaction-layer");
+
+    expect(canvas).not.toBeNull();
+    expect(svg?.parentElement).toBe(canvas);
+    expect(interactionLayer?.parentElement).toBe(canvas);
+  });
+
+  it("moves the avatar hit area with the SVG avatar using the same step timing", () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { container } = render(<PlanetScene stage={0} progress={0} interactive animate />);
+    const interactionLayer = container.querySelector<HTMLElement>(".planet-interaction-layer")!;
+    const avatar = container.querySelector<SVGGElement>("[data-planet-avatar]")!;
+
+    expect(interactionLayer).toHaveAttribute("data-avatar-walking", "false");
+    expect(interactionLayer.style.getPropertyValue("--avatar-step-ms")).toBe(avatar.style.getPropertyValue("--avatar-step-ms"));
+
+    act(() => vi.advanceTimersByTime(1_500));
+    expect(interactionLayer).toHaveAttribute("data-avatar-walking", "true");
+    expect(interactionLayer.style.getPropertyValue("--avatar-hit-left")).toBe(`${(WALK_POINTS[4].x + 10) / 3.6}%`);
+    expect(interactionLayer.style.getPropertyValue("--avatar-step-ms")).toBe("300ms");
+    expect(avatar.style.getPropertyValue("--avatar-step-ms")).toBe("300ms");
+  });
+
   it("exposes separate focusable planet and avatar targets with one status bubble", () => {
     vi.spyOn(Math, "random").mockReturnValue(0);
     const { container } = render(<PlanetScene stage={1} progress={0} interactive />);
