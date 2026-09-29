@@ -14,10 +14,21 @@ For local Auth and REST verification, start Supabase with Auth, Kong, Mailpit, a
 npx --yes supabase@2.118.0 start --exclude realtime,storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
 ```
 
+If the DB-only stack above is already running, stop this local project first with `npx --yes supabase@2.118.0 stop --project-id token-planet`, then run the Auth start command. Stopping without `--no-backup` preserves its local database data.
+
 The local `confirmation` and `magic_link` templates use `{{ .Token }}` so the six-digit code can be entered inside the desktop window. Test mail is visible in the local Mailpit service. OTP expiry is configured at one hour; hosted SMTP must be verified for delivery and resend limits before release.
 
 The world and membership tables enforce one shared world per account and at most 10 members. Authenticated members can read their world shell and their own usage snapshot rows. The `get_world_planets(uuid)` API replaces the retired `get_world_summary(uuid)` and returns member profiles, derived planet state, token totals, growth, coverage, and ranks after checking membership. `get_my_planet_state()` and `upsert_my_planet_state(jsonb,jsonb)` isolate private planet and wallet state by `auth.uid()`. Raw logs, paths, prompts, session IDs, and wallet credits are excluded from group responses. Tests cover account isolation, device retries and addition, canonical reset timestamp round trips, wallet deduplication, cooldown, coverage, and access control.
 
 The database requires a recognized world timezone and keeps it fixed. A world owner's account cannot be deleted while the world still points to it; ownership must be transferred or the world dissolved first. Later migrations implement single-use hashed invitations, idempotent per-device uploads, ownership transfer, leave, and deletion of a member's synced aggregates.
 
-The hosted `token-planet` project and database migrations are ready, but a custom SMTP provider and verified sender domain are not configured. Hosted OTP delivery and its email templates therefore remain deferred. After SMTP is configured, apply both OTP templates and verify code delivery and session refresh before inviting other users. Local Auth and OTP development can use the Mailpit setup above. See the [Supabase free-tier template change](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier).
+The hosted `token-planet` project and database migrations are ready, but a custom SMTP provider and verified sender domain are not configured. Hosted OTP delivery and its email templates therefore remain deferred. Local Auth and OTP development can use the Mailpit setup above.
+
+For hosted email delivery with Resend:
+
+1. Create a Resend account, add a sender domain (prefer an `auth.` subdomain), and complete the DNS verification shown by Resend.
+2. In the hosted Supabase project's Authentication SMTP settings, enable custom SMTP with host `smtp.resend.com`, port `465`, username `resend`, password set to a Resend API key, and a From address on the verified domain (for example, `no-reply@auth.example.com`). Enter the credential in the dashboard; do not put it in this repository or the desktop environment.
+3. In hosted Supabase Authentication email templates, set both Confirmation and Magic Link to the subject and HTML in `supabase/templates/otp.html`, preserving `{{ .Token }}` for the six-digit in-app code. Keep email confirmation enabled and review the Auth email rate limit before external invitations.
+4. Request and verify a code with a real recipient, then confirm session refresh and a second user's invitation flow before calling hosted email ready.
+
+See the [Supabase custom SMTP guide](https://supabase.com/docs/guides/auth/auth-smtp), [Resend SMTP settings](https://resend.com/changelog/smtp-service), and [Supabase free-tier template change](https://supabase.com/changelog/46599-changes-to-email-template-customisation-on-free-tier). The Resend account, domain, and SMTP credential are still needed to complete these hosted steps.

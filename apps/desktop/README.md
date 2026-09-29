@@ -13,7 +13,45 @@ npm run tauri -- dev
 
 From the repository root, prefix npm commands with `npm --prefix apps/desktop`. Build a macOS application bundle on a Mac with `npm run tauri -- build --bundles app`. A native Windows machine with the Tauri prerequisites is required to build and check the Windows tray app.
 
-To enable the shared-world controls in a development build, set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` before starting Tauri. The publishable key is a public client key; never embed a Supabase secret or service-role key. Without these values, solo use remains available. The hosted Supabase project and database migrations are ready; hosted email OTP remains deferred until custom SMTP and a verified sender domain are available. For local development, use local Supabase and Mailpit as described in the database README.
+### Local Supabase and Mailpit
+
+On each macOS machine, install and start [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/), then install the Node/npm and Rust versions noted above and the [Tauri macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos). Clone this repository; its `supabase/config.toml`, migrations, and OTP template are already tracked, so do not run `supabase init` or copy keys from another machine.
+
+From the repository root, install desktop dependencies and start the local Supabase services used by desktop Auth:
+
+If a DB-only `token-planet` local stack is already running, stop it first; rerunning `start` will not add Auth or Mailpit to that stack. This preserves its database backup and volume. Do not use `--no-backup`:
+
+```sh
+npx --yes supabase@2.118.0 stop --project-id token-planet
+```
+
+```sh
+npm --prefix apps/desktop ci
+npx --yes supabase@2.118.0 start --exclude realtime,storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
+npm --prefix apps/desktop run dev:local
+```
+
+`dev:local` reads `API_URL` and `PUBLISHABLE_KEY` from the local CLI status, requires an HTTP loopback URL and a non-empty publishable key, then overrides only `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` for `tauri dev`. This keeps a hosted URL inherited from a shell or launchd from being used by the local launch. The CLI status also contains secret keys; the launcher does not display or save its output or those keys.
+
+Open the local Mailpit inbox at `http://127.0.0.1:54324` (`local_smtp.port` in `supabase/config.toml`). The local CLI reports the same inbox URL as `INBUCKET_URL` in `supabase status -o json`. Local OTP messages appear there and are not delivered externally.
+
+Each Mac has its own local database, Auth users, and Mailpit inbox. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_WORLD_SUPABASE_*` values or Resend credentials need to be copied between machines. Two Macs using separate local stacks cannot exchange invitations or join the same shared world; that requires both apps to use one reachable Supabase project. To stop the local stack without deleting its data, run `npx --yes supabase@2.118.0 stop --project-id token-planet` from the repository root.
+
+### Hosted Supabase development
+
+For hosted development, create an ignored, machine-local settings file from the tracked template on each Mac:
+
+```sh
+cp apps/desktop/.env.example apps/desktop/.env.local
+```
+
+Set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` in `.env.local`, then run from the repository root:
+
+```sh
+npm --prefix apps/desktop run dev:hosted
+```
+
+The launcher requires a non-empty publishable key and an HTTPS URL, then overrides only those two settings for `tauri dev`. The publishable key is a public client key; never put a Supabase secret or service-role key in this file. Local development with `dev:local` uses the local Supabase CLI and does not need `.env.local`. Running `npm run tauri -- dev` without hosted settings still allows solo use. The hosted project and database migrations are ready, but hosted email OTP remains deferred until custom SMTP and a verified sender domain are available.
 
 ## Local sources and storage
 
