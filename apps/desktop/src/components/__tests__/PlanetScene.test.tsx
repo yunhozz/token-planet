@@ -1,6 +1,7 @@
 import { act, fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PlanetScene } from "../PlanetScene";
+import { PlanetScene, planWalk, WALK_POINTS } from "../PlanetScene";
+import { restDuration, stepDuration } from "../sceneMotion";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -40,30 +41,37 @@ it("keeps compact member scenes static even when motion is requested", () => {
   expect(container.querySelector(".planet-figure")).toHaveAttribute("data-motion", "paused");
 });
 
-it("chooses different nearby directions and stays inside the surface path", async () => {
-  type MotionExports = { planWalk?: (start: number, random: () => number) => number[]; WALK_POINTS?: { x: number; y: number }[] };
-  const { planWalk, WALK_POINTS } = await import("../PlanetScene") as typeof import("../PlanetScene") & MotionExports;
-  expect(planWalk).toBeTypeOf("function");
-  expect(WALK_POINTS).toBeDefined();
-  if (!planWalk || !WALK_POINTS) return;
-  const start = Math.floor(WALK_POINTS.length / 2);
-  const left = planWalk(start, () => 0);
-  const right = planWalk(start, () => 0.99);
-  expect(left).toHaveLength(2);
-  expect(right).toHaveLength(4);
-  expect(left[0]).toBe(start - 1);
-  expect(right[0]).toBe(start + 1);
-  for (const [origin, route] of [[start, left], [start, right], [0, planWalk(0, () => 0)]] as const) {
-    let previous = origin;
-    for (const index of route) {
-      expect(index).toBeGreaterThanOrEqual(0);
-      expect(index).toBeLessThan(WALK_POINTS.length);
-      expect(Math.abs(index - previous)).toBe(1);
-      const point = WALK_POINTS[index];
-      expect(Math.hypot(point.x + 12 - 180, point.y + 15 - 157)).toBeLessThan(80);
-      previous = index;
+it("plans bounded walks from the middle and both path edges", () => {
+  const starts = [0, Math.floor(WALK_POINTS.length / 2), WALK_POINTS.length - 1];
+  for (const start of starts) {
+    for (const value of [0, 0.5, 0.99]) {
+      const route = planWalk(start, null, () => value);
+      expect(route.length).toBeGreaterThanOrEqual(1);
+      expect(route.length).toBeLessThanOrEqual(5);
+      let previous = start;
+      for (const index of route) {
+        expect(index).toBeGreaterThanOrEqual(0);
+        expect(index).toBeLessThan(WALK_POINTS.length);
+        expect(Math.abs(index - previous)).toBe(1);
+        previous = index;
+      }
     }
   }
+});
+
+it("rerolls a route that would immediately return to the previous destination", () => {
+  const start = Math.floor(WALK_POINTS.length / 2);
+  const previousDestination = start + 5;
+  const route = planWalk(start, previousDestination, () => 0.99);
+  expect(route[route.length - 1]).not.toBe(previousDestination);
+  expect(route[0]).toBe(start - 1);
+});
+
+it("samples rest and step durations at their inclusive endpoints", () => {
+  expect(restDuration(() => 0)).toBe(1500);
+  expect(restDuration(() => 1)).toBe(5000);
+  expect(stepDuration(() => 0)).toBe(300);
+  expect(stepDuration(() => 1)).toBe(550);
 });
 
 it("animates a new object once but not a mount or data refresh", () => {
@@ -160,7 +168,7 @@ it("resumes movement after the idle pause when the scene returns on-screen", () 
 
   act(() => observer([{ isIntersecting: true, target: scene } as IntersectionObserverEntry], {} as IntersectionObserver));
   expect(container.querySelector(".planet-figure")).toHaveAttribute("data-motion", "active");
-  act(() => vi.advanceTimersByTime(2600));
+  act(() => vi.advanceTimersByTime(1500));
   const walkingTransform = avatar.getAttribute("transform");
   expect(walkingTransform).not.toBe(initialTransform);
   expect(container.querySelector("[data-planet-avatar]")).toHaveClass("planet-avatar--walking");
@@ -172,7 +180,7 @@ it("resumes movement after the idle pause when the scene returns on-screen", () 
   expect(avatar).toHaveAttribute("transform", walkingTransform);
 
   act(() => observer([{ isIntersecting: true, target: scene } as IntersectionObserverEntry], {} as IntersectionObserver));
-  act(() => vi.advanceTimersByTime(2599));
+  act(() => vi.advanceTimersByTime(1499));
   expect(avatar).toHaveAttribute("transform", walkingTransform);
   act(() => vi.advanceTimersByTime(1));
   expect(avatar.getAttribute("transform")).not.toBe(walkingTransform);

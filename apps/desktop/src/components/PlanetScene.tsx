@@ -1,34 +1,13 @@
-import { useEffect, useId, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useId, useRef, useState } from "react";
 import { AvatarSprite } from "./AvatarSprite";
 import type { EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
+import { planWalk, restDuration, stepDuration, WALK_POINTS } from "./sceneMotion";
+
+export { planWalk, WALK_POINTS } from "./sceneMotion";
 
 export const STAGE_NAMES = ["자연 생태계", "정착·농경", "마을·초기 도시", "산업 문명", "첨단·우주 문명"];
 const STAGE_THRESHOLDS = [5, 20, 50, 100];
 const OBJECT_INTERVALS = [1, 2, 4, 8, 16];
-
-export const WALK_POINTS = [
-  { x: 94, y: 170 }, { x: 105, y: 169 }, { x: 120, y: 169 },
-  { x: 135, y: 167 }, { x: 150, y: 166 }, { x: 165, y: 167 },
-  { x: 180, y: 166 }, { x: 195, y: 167 }, { x: 210, y: 169 },
-  { x: 225, y: 170 }, { x: 240, y: 171 },
-];
-
-export function planWalk(startIndex: number, random: () => number) {
-  let direction = random() < 0.5 ? -1 : 1;
-  const steps = 2 + Math.floor(random() * 3);
-  let currentIndex = startIndex;
-  const route: number[] = [];
-  for (let step = 0; step < steps; step += 1) {
-    let nextIndex = currentIndex + direction;
-    if (nextIndex < 0 || nextIndex >= WALK_POINTS.length) {
-      direction *= -1;
-      nextIndex = currentIndex + direction;
-    }
-    route.push(nextIndex);
-    currentIndex = nextIndex;
-  }
-  return route;
-}
 
 function objectIdentity(object: PlanetObject) {
   return `${object.stage}-${object.ordinal}`;
@@ -81,6 +60,8 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   const initialPosition = Math.floor(WALK_POINTS.length / 2);
   const [avatarPosition, setAvatarPosition] = useState(initialPosition);
   const avatarPositionRef = useRef(initialPosition);
+  const previousDestinationRef = useRef<number | null>(null);
+  const [avatarStepDuration, setAvatarStepDuration] = useState(380);
   const [avatarFacing, setAvatarFacing] = useState<"left" | "right">("right");
   const [avatarWalking, setAvatarWalking] = useState(false);
   const [eyesClosed, setEyesClosed] = useState(false);
@@ -182,7 +163,11 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
 
     const scheduleWalk = () => {
       movementTimer = window.setTimeout(() => {
-        const route = planWalk(avatarPositionRef.current, Math.random);
+        const startIndex = avatarPositionRef.current;
+        const route = planWalk(startIndex, previousDestinationRef.current, Math.random);
+        previousDestinationRef.current = startIndex;
+        const duration = stepDuration(Math.random);
+        setAvatarStepDuration(duration);
         let step = 0;
         walking = true;
         setAvatarWalking(true);
@@ -194,17 +179,17 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
           if (nextPosition === undefined) {
             walking = false;
             setAvatarWalking(false);
-            movementTimer = window.setTimeout(scheduleWalk, 2300);
+            scheduleWalk();
             return;
           }
           const previousPosition = avatarPositionRef.current;
           setAvatarFacing(nextPosition < previousPosition ? "left" : "right");
           avatarPositionRef.current = nextPosition;
           setAvatarPosition(nextPosition);
-          movementTimer = window.setTimeout(moveNext, 380);
+          movementTimer = window.setTimeout(moveNext, duration);
         };
         moveNext();
-      }, 2600 + Math.random() * 1400);
+      }, restDuration(Math.random));
     };
 
     const scheduleBlink = () => {
@@ -275,7 +260,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
               {tile.objects.length > 4 && <g transform={`translate(${x + 9} ${y + 8})`}><rect width="13" height="8" fill="#29354a" stroke="#f0d288" strokeWidth=".7"/><text x="6.5" y="6" fill="#f6eed3" fontSize="5" textAnchor="middle">+{tile.objects.length - 4 > 99 ? "99+" : tile.objects.length - 4}</text></g>}
             </g>;
           })}
-          <g data-planet-avatar="true" className={avatarWalking ? "planet-avatar planet-avatar--walking" : "planet-avatar"} transform={`translate(${WALK_POINTS[avatarPosition].x} ${WALK_POINTS[avatarPosition].y}) scale(1.05)`}>
+          <g data-planet-avatar="true" className={avatarWalking ? "planet-avatar planet-avatar--walking" : "planet-avatar"} style={{ "--avatar-step-ms": `${avatarStepDuration}ms` } as CSSProperties} transform={`translate(${WALK_POINTS[avatarPosition].x} ${WALK_POINTS[avatarPosition].y}) scale(1.05)`}>
             <AvatarSprite avatar={avatar} className="planet-scene-avatar" facing={avatarFacing} eyesClosed={eyesClosed} walking={avatarWalking} />
           </g>
           {hasCosmetic("surface", "flag") && <g data-cosmetic="flag" transform="translate(172 220)" shapeRendering="crispEdges"><rect x="8" y="0" width="4" height="35" fill="#8c6655"/><path d="M12 2h24v11H22l-10 7Z" fill="#ec8c78" stroke="#572f4b" strokeWidth="2"/><rect x="3" y="34" width="17" height="4" fill="#926e58"/></g>}

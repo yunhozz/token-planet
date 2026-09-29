@@ -247,7 +247,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .planet-figure[data-motion="active"] .planet-svg--floating { animation: planet-float 6s ease-in-out infinite; }
 .planet-figure[data-motion="active"] .planet-svg--entering { animation: scene-enter .48s steps(4, end) both, planet-float 6s ease-in-out infinite; }
 .planet-figure[data-motion="active"] .planet-object--entering { animation: object-enter .36s steps(3, end) both; }
-.planet-figure[data-motion="active"] .planet-avatar--walking { transition: transform .38s linear; }
+.planet-figure[data-motion="active"] .planet-avatar--walking { transition: transform var(--avatar-step-ms, .38s) linear; }
 .planet-figure[data-motion="active"] .avatar-sprite--walking .avatar-leg { transform-box: fill-box; transform-origin: center; }
 .planet-figure[data-motion="active"] .avatar-sprite--walking .avatar-leg--left { animation: avatar-step-left .34s steps(2, end) infinite alternate; }
 .planet-figure[data-motion="active"] .avatar-sprite--walking .avatar-leg--right { animation: avatar-step-right .34s steps(2, end) infinite alternate; }
