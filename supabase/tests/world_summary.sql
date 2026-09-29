@@ -14,6 +14,9 @@ insert into public.worlds(id, owner_id, name, timezone) values
   ('20000000-0000-0000-0000-000000000002', '00000000-0000-0000-0000-000000000103', 'B', 'Asia/Seoul');
 insert into public.world_members(world_id, user_id, role)
 values ('20000000-0000-0000-0000-000000000001', '00000000-0000-0000-0000-000000000102', 'member');
+insert into private.planet_wallet_credits(user_id, previous_cycle_id, amount, created_at) values
+  ('00000000-0000-0000-0000-000000000101', 'alice-shop-funding', 500000, '2026-09-28T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000102', 'bob-shop-funding', 500000, '2026-09-28T00:00:00Z');
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000101', true);
 do $$ begin perform public.upsert_my_planet_state(pg_temp.planet_state('Alice', 'cycle-1', null,
@@ -37,16 +40,16 @@ select throws_ok($$select * from public.planet_member_state$$, '42501', null, 'm
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000102', true);
 select is((select count(*)::int from public.get_world_planets('20000000-0000-0000-0000-000000000001')), 2, 'non-owner can read the group planets');
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000101', true);
-select is((public.purchase_my_cosmetic('11111111-1111-4111-8111-111111111111', 'star_cluster', 1)->>'status'), 'purchased', 'Alice can buy a private cosmetic');
-select is((public.equip_my_cosmetic('cycle-1', 'sky', 'star_cluster', 0)->>'status'), 'equipped', 'Alice can equip the purchased cosmetic');
+select is((public.purchase_my_cosmetic('11111111-1111-4111-8111-111111111111', 'star_cluster_v2', 1)->>'status'), 'purchased', 'Alice can buy a private cosmetic');
+select is((public.equip_my_cosmetic('cycle-1', 'sky', 'star_cluster_v2', 0)->>'status'), 'equipped', 'Alice can equip the purchased cosmetic');
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000102', true);
-select is((public.purchase_my_cosmetic('22222222-2222-4222-8222-222222222222', 'thin_ring', 1)->>'status'), 'purchased', 'Bob can buy a private cosmetic');
-select is((public.equip_my_cosmetic('cycle-1', 'ring', 'thin_ring', 0)->>'status'), 'equipped', 'Bob can equip the purchased cosmetic');
+select is((public.purchase_my_cosmetic('22222222-2222-4222-8222-222222222222', 'thin_ring_v2', 1)->>'status'), 'purchased', 'Bob can buy a private cosmetic');
+select is((public.equip_my_cosmetic('cycle-1', 'ring', 'thin_ring_v2', 0)->>'status'), 'equipped', 'Bob can equip the purchased cosmetic');
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000101', true);
 select is((select equipped_cosmetics from public.get_world_planets('20000000-0000-0000-0000-000000000001') where nickname='Alice'),
-  '[{"slot_id":"sky","sku":"star_cluster"}]'::jsonb, 'Alice group row exposes only her current equipped keys');
+  '[{"slot_id":"sky","sku":"star_cluster_v2"}]'::jsonb, 'Alice group row exposes only her current equipped keys');
 select is((select equipped_cosmetics from public.get_world_planets('20000000-0000-0000-0000-000000000001') where nickname='Bob'),
-  '[{"slot_id":"ring","sku":"thin_ring"}]'::jsonb, 'Bob group row exposes only his current equipped keys');
+  '[{"slot_id":"ring","sku":"thin_ring_v2"}]'::jsonb, 'Bob group row exposes only his current equipped keys');
 select ok(not exists (select 1 from public.get_world_planets('20000000-0000-0000-0000-000000000001') p
   where to_jsonb(p) ?| array['user_id', 'device_id', 'wallet_balance', 'wallet_credits', 'source_path',
     'purchase_id', 'price', 'available_balance', 'owned_skus']), 'group response excludes cosmetic ownership and wallet data');

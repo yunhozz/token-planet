@@ -81,14 +81,21 @@ describe("shared world controls", () => {
       progress_to_next: 0.04,
       incomplete: false,
       objects: [],
-      equipped_cosmetics: [{ slot_id: "ring", sku: "thin_ring" }],
+      equipped_cosmetics: [
+        { slot_id: "sky", sku: "star_cluster_v2" },
+        { slot_id: "forecourt", sku: "pond" },
+        { slot_id: "future_slot", sku: "future_item" },
+      ],
       token_rank: 1,
       civilization_rank: 1,
     }]} />);
 
-    expect(container.querySelectorAll('[data-cosmetic="thin_ring"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-cosmetic="star_cluster"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-cosmetic="pond"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-cosmetic="future_item"]')).toHaveLength(0);
     fireEvent.click(screen.getByRole("button", { name: "Nova의 행성 크게 보기" }));
-    expect(container.querySelectorAll('[data-cosmetic="thin_ring"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-cosmetic="star_cluster"]')).toHaveLength(2);
+    expect(container.querySelectorAll('[data-cosmetic="pond"]')).toHaveLength(2);
     expect(screen.getByRole("region", { name: "Nova의 행성 자세히 보기" })).toBeInTheDocument();
     expect(screen.queryByText(/지갑 잔액|구매 기록|보관함/)).not.toBeInTheDocument();
   });

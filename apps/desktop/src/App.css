@@ -343,7 +343,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .cosmetic-tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; padding: 8px 10px 0; }
 .cosmetic-tabs button { min-height: 44px; border: 1px solid #667689; color: var(--muted); background: #202a40; font-size: 14px; }
 .cosmetic-tabs button[aria-selected="true"] { border: 2px solid var(--mint); color: var(--paper); background: #2a3a48; font-weight: 800; }
-.cosmetic-list { padding: 1px 10px 7px; }
+.cosmetic-list { max-height: min(58vh, 540px); padding: 1px 10px 7px; overflow-y: auto; overscroll-behavior: contain; }
 .cosmetic-slot { padding: 9px 0 2px; border-bottom: 1px solid #46566b; }
 .cosmetic-slot:last-child { border-bottom: 0; }
 .cosmetic-slot h3 { margin: 0 0 5px; color: var(--water); font-size: 20px; }

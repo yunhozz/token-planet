@@ -11,29 +11,55 @@ afterEach(() => {
 });
 
 describe("planet cosmetics", () => {
-  it("draws supported slot and SKU pairs at every planet stage", () => {
+  it("draws all replacement and new art styles at every planet stage", () => {
     for (const stage of [0, 1, 2, 3, 4]) {
       const { container, unmount } = render(
         <PlanetScene
           stage={stage}
           progress={0.5}
           equippedCosmetics={[
-            { slot_id: "sky", sku: "star_cluster" },
-            { slot_id: "sky", sku: "aurora" },
-            { slot_id: "ring", sku: "thin_ring" },
-            { slot_id: "ring", sku: "double_ring" },
-            { slot_id: "surface", sku: "flag" },
-            { slot_id: "surface", sku: "crystal_tower" },
+            { slot_id: "sky", sku: "star_cluster_v2" },
+            { slot_id: "sky", sku: "aurora_v2" },
+            { slot_id: "ring", sku: "thin_ring_v2" },
+            { slot_id: "ring", sku: "double_ring_v2" },
+            { slot_id: "surface", sku: "flag_v2" },
+            { slot_id: "surface", sku: "crystal_tower_v2" },
+            { slot_id: "sky", sku: "meteor_shower" },
+            { slot_id: "ring", sku: "moonlets" },
+            { slot_id: "surface", sku: "flower_garden" },
+            { slot_id: "surface", sku: "observatory" },
+            { slot_id: "forecourt", sku: "pond" },
+            { slot_id: "forecourt", sku: "lantern" },
+            { slot_id: "forecourt", sku: "rover" },
+            { slot_id: "forecourt", sku: "greenhouse" },
             { slot_id: "sky", sku: "future_item" },
             { slot_id: "future_slot", sku: "star_cluster" },
           ]}
         />,
       );
 
-      expect([...container.querySelectorAll("[data-cosmetic]")].map((node) => node.getAttribute("data-cosmetic")))
-        .toEqual(["thin_ring", "double_ring", "star_cluster", "aurora", "flag", "crystal_tower"]);
+      const drawn = [...container.querySelectorAll("[data-cosmetic]")].map((node) => node.getAttribute("data-cosmetic"));
+      expect(drawn).toHaveLength(14);
+      expect(drawn).toEqual(expect.arrayContaining([
+        "star_cluster", "aurora", "thin_ring", "double_ring", "flag", "crystal_tower",
+        "meteor_shower", "moonlets", "flower_garden", "observatory", "pond", "lantern", "rover", "greenhouse",
+      ]));
+      expect(drawn).not.toContain("future_item");
       unmount();
     }
+  });
+
+  it("draws one equipped item in each of four slots at once", () => {
+    const { container } = render(<PlanetScene stage={3} progress={0.4} equippedCosmetics={[
+      { slot_id: "sky", sku: "star_cluster_v2" },
+      { slot_id: "ring", sku: "moonlets" },
+      { slot_id: "surface", sku: "observatory" },
+      { slot_id: "forecourt", sku: "pond" },
+    ]} />);
+
+    expect([...container.querySelectorAll("[data-cosmetic]")].map((node) => node.getAttribute("data-cosmetic")))
+      .toEqual(expect.arrayContaining(["star_cluster", "moonlets", "observatory", "pond"]));
+    expect(container.querySelectorAll("[data-cosmetic]")).toHaveLength(4);
   });
 });
 

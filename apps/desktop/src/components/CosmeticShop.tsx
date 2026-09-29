@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { FormattedNumber } from "./FormattedNumber";
+import { legacyEquivalent, SUPPORTED_SKUS, SUPPORTED_SLOTS } from "./cosmeticStyles";
 import type {
   CosmeticEquipAction,
   CosmeticProduct,
@@ -7,9 +8,6 @@ import type {
   CosmeticShopState,
   EquippedCosmetic,
 } from "../types/usage";
-
-const DEFAULT_SUPPORTED_SLOTS = ["sky", "ring", "surface"];
-const DEFAULT_SUPPORTED_SKUS = ["star_cluster", "aurora", "thin_ring", "double_ring", "flag", "crystal_tower"];
 
 type CosmeticShopProps = {
   state: CosmeticShopState;
@@ -56,8 +54,8 @@ export function CosmeticShop({
   onEquip,
   onPreviewChange,
   onRefresh,
-  supportedSlots = DEFAULT_SUPPORTED_SLOTS,
-  supportedSkus = DEFAULT_SUPPORTED_SKUS,
+  supportedSlots = SUPPORTED_SLOTS,
+  supportedSkus = SUPPORTED_SKUS,
 }: CosmeticShopProps) {
   const [open, setOpen] = useState(false);
   const [tab, setTab] = useState<"shop" | "inventory">("shop");
@@ -79,6 +77,8 @@ export function CosmeticShop({
     [state.products, supportedSkus, supportedSlots],
   );
   const owned = new Set(state.owned_skus);
+  const saleProducts = products.filter((product) => product.purchasable && !owned.has(product.sku)
+    && !(legacyEquivalent(product.sku) && owned.has(legacyEquivalent(product.sku)!)));
   const availableBalance = state.available_balance;
   const slotUnavailableReason = state.action_unavailable_reason
     ?? (state.guest_import_pending ? state.guest_import_error : null);
@@ -187,7 +187,7 @@ export function CosmeticShop({
         {slots.map((slot) => {
           const slotProducts = products.filter((product) => product.slot_id === slot.slot_id);
           const visibleProducts = tab === "shop"
-            ? slotProducts.filter((product) => product.purchasable && !owned.has(product.sku))
+            ? saleProducts.filter((product) => product.slot_id === slot.slot_id)
             : slotProducts.filter((product) => owned.has(product.sku));
           if (visibleProducts.length === 0) return null;
           return (
@@ -231,7 +231,7 @@ export function CosmeticShop({
                   );
                 })}
               </ul>
-              {tab === "shop" && slotProducts.some((product) => !owned.has(product.sku) && availableBalance < product.price)
+              {tab === "shop" && saleProducts.some((product) => product.slot_id === slot.slot_id && availableBalance < product.price)
                 && <p className="cosmetic-shortfall">잔액이 부족한 상품이 있습니다. 현재 잔액과 상품 가격을 확인하세요.</p>}
             </section>
           );

@@ -1,6 +1,7 @@
 import { type CSSProperties, useEffect, useId, useRef, useState } from "react";
 import { AvatarSprite } from "./AvatarSprite";
 import type { EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
+import { styleIdForSku } from "./cosmeticStyles";
 import { planWalk, restDuration, stepDuration, WALK_POINTS } from "./sceneMotion";
 import { pickDialogue, type DialogueTarget } from "./sceneDialogue";
 
@@ -89,7 +90,9 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
     tile.objects.push(object);
     tiles.set(key, tile);
   }
-  const hasCosmetic = (slotId: string, sku: string) => equippedCosmetics.some((item) => item.slot_id === slotId && item.sku === sku);
+  const hasCosmetic = (slotId: string, styleId: string) => equippedCosmetics.some(
+    (item) => item.slot_id === slotId && styleIdForSku(item.sku) === styleId,
+  );
   const avatarPoint = WALK_POINTS[avatarPosition];
   const interactionStyle = {
     "--avatar-hit-left": `${(avatarPoint.x + 10) / 3.6}%`,
@@ -283,6 +286,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
         </g>
         {hasCosmetic("ring", "thin_ring") && <ellipse data-cosmetic="thin_ring" cx="180" cy="157" rx="146" ry="39" transform="rotate(-18 180 157)" fill="none" stroke="#f1cf89" strokeWidth="3"/>}
         {hasCosmetic("ring", "double_ring") && <g data-cosmetic="double_ring" fill="none" stroke="#a6d9a2"><ellipse cx="180" cy="157" rx="151" ry="43" transform="rotate(-18 180 157)" strokeWidth="3"/><ellipse cx="180" cy="157" rx="141" ry="34" transform="rotate(-18 180 157)" strokeWidth="2"/></g>}
+        {hasCosmetic("ring", "moonlets") && <g data-cosmetic="moonlets" fill="#d7d5bd" stroke="#7e9a9a" strokeWidth="2" shapeRendering="crispEdges"><ellipse cx="180" cy="157" rx="157" ry="49" transform="rotate(-18 180 157)" fill="none" stroke="#82a9a6" strokeWidth="1.5"/><rect x="62" y="126" width="10" height="10"/><rect x="104" y="103" width="6" height="6"/><rect x="243" y="202" width="12" height="12"/><rect x="286" y="168" width="7" height="7"/><rect x="198" y="213" width="5" height="5" fill="#f0d28b"/></g>}
         <circle cx="180" cy="157" r="119" fill="#22364b" stroke="#e6c987" strokeWidth="4"/>
         <circle cx="180" cy="157" r="111" fill="#72c5bd" stroke="#3c6570" strokeWidth="3"/>
         <g clipPath={`url(#${clipId})`}>
@@ -295,6 +299,9 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
           {stage > 3 && <g fill="#d4e7cb"><path d="M169 96h9v28h-9zM173 84h2v12h-2zM157 101h9v5h-9zm24 0h9v5h-9z"/><path d="M243 91h18v5h-18zm6-5h6v15h-6z" fill="#65c9c7"/></g>}
           {hasCosmetic("sky", "star_cluster") && <g data-cosmetic="star_cluster" fill="#fff0ad"><rect x="99" y="95" width="6" height="6"/><rect x="111" y="81" width="4" height="4"/><rect x="126" y="101" width="3" height="3"/><rect x="141" y="88" width="5" height="5"/><rect x="154" y="105" width="3" height="3"/><rect x="119" y="116" width="4" height="4"/></g>}
           {hasCosmetic("sky", "aurora") && <g data-cosmetic="aurora" fill="none" stroke="#a6e6cf" strokeWidth="5" opacity=".72"><path d="M81 121h17v-8h15v-8h14v7h15v-8h15"/><path d="M94 136h18v-7h15v-8h18v5h14" stroke="#82d7d5" strokeWidth="3"/></g>}
+          {hasCosmetic("sky", "meteor_shower") && <g data-cosmetic="meteor_shower" shapeRendering="crispEdges"><path d="m94 96 18-15h4L98 98Z" fill="#f3d38e"/><path d="m96 95 8-7" stroke="#fff0ad" strokeWidth="2"/><path d="m233 122 20-17h4l-18 18Z" fill="#9de0d3"/><path d="m236 120 8-7" stroke="#e6f1cf" strokeWidth="2"/><rect x="135" y="71" width="4" height="4" fill="#fff0ad"/><rect x="260" y="143" width="3" height="3" fill="#fff0ad"/></g>}
+          {hasCosmetic("surface", "flower_garden") && <g data-cosmetic="flower_garden" transform="translate(119 220)" shapeRendering="crispEdges"><path d="M0 27h39v7H0z" fill="#8c7653"/><path d="M4 23h31v4H4z" fill="#5d9561"/><path d="M8 22v-9m10 9V9m10 13v-8" stroke="#4d875a" strokeWidth="2"/><rect x="5" y="10" width="6" height="6" fill="#efad7a"/><rect x="16" y="6" width="7" height="7" fill="#f1d27f"/><rect x="27" y="11" width="6" height="6" fill="#d992b1"/><rect x="7" y="12" width="2" height="2" fill="#fff0ad"/><rect x="18" y="8" width="2" height="2" fill="#fff0ad"/><rect x="29" y="13" width="2" height="2" fill="#fff0ad"/></g>}
+          {hasCosmetic("surface", "observatory") && <g data-cosmetic="observatory" transform="translate(217 215)" shapeRendering="crispEdges"><rect x="1" y="20" width="31" height="24" fill="#596c82" stroke="#d6c58d" strokeWidth="2"/><path d="M0 20a17 13 0 0 1 34 0Z" fill="#8ec7c5" stroke="#f0d28b" strokeWidth="2"/><path d="M13 3h7v17h-7zM9 10h15v5H9z" fill="#d7e6cd"/><rect x="6" y="26" width="5" height="5" fill="#f6d58c"/><rect x="21" y="26" width="5" height="5" fill="#f6d58c"/><rect x="14" y="33" width="5" height="11" fill="#39475e"/></g>}
           {[...tiles.entries()].map(([key, tile]) => {
             const x = 90 + tile.column * 16.5;
             const y = 150 + tile.row * 11;
@@ -315,6 +322,10 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
           <path d="M180 50a107 107 0 0 1 0 214c44-48 63-155 0-214Z" fill="#19233a" opacity=".2"/>
         </g>
         <circle cx="180" cy="157" r="107" fill="none" stroke="#b8ebce" strokeWidth="2"/>
+        {hasCosmetic("forecourt", "pond") && <g data-cosmetic="pond" transform="translate(151 276)" shapeRendering="crispEdges"><path d="M0 9h58v16H0z" fill="#8d7757" stroke="#d9c288" strokeWidth="2"/><path d="M5 12h48v9H5z" fill="#4c9f9e"/><path d="M12 13h10v2H12zm23 5h12v2H35z" fill="#b6e3ca"/><rect x="-7" y="25" width="72" height="4" fill="#677b63"/></g>}
+        {hasCosmetic("forecourt", "lantern") && <g data-cosmetic="lantern" transform="translate(169 270)" shapeRendering="crispEdges"><rect x="-4" y="34" width="30" height="4" fill="#677b63"/><rect x="9" y="11" width="4" height="23" fill="#8f6b4e"/><rect x="3" y="2" width="16" height="14" fill="#e8c67d" stroke="#754e52" strokeWidth="2"/><rect x="7" y="5" width="8" height="8" fill="#fff0ad"/><path d="M1 2h20M5 -2h12" stroke="#754e52" strokeWidth="2"/></g>}
+        {hasCosmetic("forecourt", "rover") && <g data-cosmetic="rover" transform="translate(152 279)" shapeRendering="crispEdges"><rect x="2" y="9" width="48" height="16" fill="#ce9b68" stroke="#564d58" strokeWidth="2"/><rect x="11" y="1" width="20" height="10" fill="#8ac8c4" stroke="#564d58" strokeWidth="2"/><rect x="20" y="-5" width="3" height="7" fill="#e8d58f"/><circle cx="13" cy="26" r="5" fill="#34475a" stroke="#e2d59d" strokeWidth="2"/><circle cx="40" cy="26" r="5" fill="#34475a" stroke="#e2d59d" strokeWidth="2"/><rect x="4" y="14" width="7" height="4" fill="#f2d287"/><path d="M33 12h12v3H33z" fill="#a3ddd1"/></g>}
+        {hasCosmetic("forecourt", "greenhouse") && <g data-cosmetic="greenhouse" transform="translate(147 273)" shapeRendering="crispEdges"><path d="M1 34V12L33 1l32 11v22Z" fill="#84c8bd" fillOpacity=".78" stroke="#d8e6bd" strokeWidth="2"/><path d="M5 14h55M11 11v23m22-30v30m21-23v23" stroke="#607e79" strokeWidth="2"/><rect x="26" y="22" width="14" height="12" fill="#8eb76c"/><path d="M33 22v-8m-4 8 4-4 4 4" fill="#79a966" stroke="#477451" strokeWidth="2"/><rect x="-4" y="34" width="74" height="4" fill="#677b63"/></g>}
       </svg>
       {interactive && <div className="planet-interaction-layer" style={interactionStyle}>
         <button type="button" className="planet-hit-area" aria-label="행성에게 말 걸기" onClick={() => speak("planet")} />
