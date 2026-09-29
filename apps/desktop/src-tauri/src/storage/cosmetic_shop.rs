@@ -2,8 +2,9 @@ use std::collections::BTreeSet;
 
 use super::ledger::{Ledger, ScanError};
 use crate::domain::cosmetic_shop::{
-    cosmetic_products, cosmetic_slots, CosmeticEquipResult, CosmeticPurchaseResult,
-    CosmeticPurchaseStatus, CosmeticShopState, EquippedCosmetic, GuestCosmeticImport,
+    cosmetic_products, cosmetic_slots, legacy_equivalent, CosmeticEquipResult,
+    CosmeticPurchaseResult, CosmeticPurchaseStatus, CosmeticShopState, EquippedCosmetic,
+    GuestCosmeticImport,
 };
 use crate::domain::planet::PlanetWalletCredit;
 use chrono::Utc;
@@ -339,10 +340,8 @@ impl Ledger {
         if let Some(cached) = cached {
             let mut state: CosmeticShopState =
                 serde_json::from_str(&cached).map_err(|_| ScanError::Database)?;
-            if matches!(
-                result.status,
-                CosmeticPurchaseStatus::Purchased | CosmeticPurchaseStatus::AlreadyOwned
-            ) && !state.owned_skus.iter().any(|sku| sku == &result.sku)
+            if result.status == CosmeticPurchaseStatus::Purchased
+                && !state.owned_skus.iter().any(|sku| sku == &result.sku)
             {
                 state.owned_skus.push(result.sku.clone());
                 state.owned_skus.sort();
@@ -516,21 +515,39 @@ fn purchase_in_transaction(
     }
 
     let balance = available_balance(transaction, &account_id)?;
-    let product = cosmetic_products().into_iter().find(|product| product.sku == sku);
-    let price = product.as_ref().map_or(0, |product| product.price);
+    let Some(product) = cosmetic_products().into_iter().find(|product| product.sku == sku) else {
+        return Err(ScanError::InvalidProfile);
+    };
+    let price = product.price;
     let owned: bool = transaction.query_row(
         "SELECT EXISTS(SELECT 1 FROM cosmetic_purchase WHERE account_id=?1 AND sku=?2)",
         params![account_id, sku],
         |row| row.get(0),
     )?;
-    let Some(product) = product else {
-        return Err(ScanError::InvalidProfile);
+    let legacy_owned = match legacy_equivalent(sku) {
+        Some(old_sku) => transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM cosmetic_purchase WHERE account_id=?1 AND sku=?2)",
+            params![account_id, old_sku],
+            |row| row.get::<_, bool>(0),
+        )?,
+        None => false,
     };
-    if owned {
+    if owned || legacy_owned {
         let result = CosmeticPurchaseResult {
             purchase_id: purchase_id.into(),
             sku: sku.into(),
             status: CosmeticPurchaseStatus::AlreadyOwned,
+            price,
+            available_balance: balance,
+        };
+        store_purchase_request(transaction, &account_id, purchase_id, sku, &result)?;
+        return Ok(result);
+    }
+    if !product.purchasable {
+        let result = CosmeticPurchaseResult {
+            purchase_id: purchase_id.into(),
+            sku: sku.into(),
+            status: CosmeticPurchaseStatus::CatalogMismatch,
             price,
             available_balance: balance,
         };
@@ -586,11 +603,93 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::domain::cosmetic_shop::{
-        cosmetic_products, cosmetic_slots, CosmeticPurchaseStatus, CosmeticShopState,
-        EquippedCosmetic,
+        cosmetic_products, cosmetic_slots, legacy_equivalent, CosmeticPurchaseResult,
+        CosmeticPurchaseStatus, CosmeticShopState, EquippedCosmetic,
     };
     use crate::storage::ledger::Ledger;
     use rusqlite::params;
+
+    #[test]
+    fn local_catalog_has_four_slots_and_all_twenty_products_at_the_registered_prices() {
+        assert_eq!(
+            cosmetic_slots().iter().map(|slot| slot.slot_id.as_str()).collect::<Vec<_>>(),
+            vec!["sky", "ring", "surface", "forecourt"],
+        );
+        let products = cosmetic_products();
+        assert_eq!(products.len(), 20);
+        let sale_prices = products
+            .iter()
+            .filter(|product| product.purchasable)
+            .map(|product| (product.sku.as_str(), product.price))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(sale_prices, BTreeMap::from([
+            ("star_cluster_v2", 500_000), ("aurora_v2", 2_000_000),
+            ("thin_ring_v2", 500_000), ("double_ring_v2", 2_000_000),
+            ("flag_v2", 500_000), ("crystal_tower_v2", 2_000_000),
+            ("meteor_shower", 1_000_000), ("moonlets", 3_000_000),
+            ("flower_garden", 1_000_000), ("observatory", 5_000_000),
+            ("pond", 750_000), ("lantern", 1_500_000),
+            ("rover", 3_000_000), ("greenhouse", 5_000_000),
+        ]));
+        for (sku, price) in [
+            ("star_cluster", 100_000), ("aurora", 500_000),
+            ("thin_ring", 100_000), ("double_ring", 500_000),
+            ("flag", 100_000), ("crystal_tower", 500_000),
+        ] {
+            let product = products.iter().find(|product| product.sku == sku).unwrap();
+            assert_eq!(product.price, price, "historical price for {sku}");
+            assert!(!product.purchasable, "legacy product {sku} must be retired");
+        }
+        assert_eq!(legacy_equivalent("star_cluster_v2"), Some("star_cluster"));
+        assert_eq!(legacy_equivalent("aurora_v2"), Some("aurora"));
+        assert_eq!(legacy_equivalent("thin_ring_v2"), Some("thin_ring"));
+        assert_eq!(legacy_equivalent("double_ring_v2"), Some("double_ring"));
+        assert_eq!(legacy_equivalent("flag_v2"), Some("flag"));
+        assert_eq!(legacy_equivalent("crystal_tower_v2"), Some("crystal_tower"));
+        assert_eq!(legacy_equivalent("meteor_shower"), None);
+    }
+
+    #[test]
+    fn legacy_owned_style_cannot_be_charged_again_at_the_new_price() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES ('seed-cycle',600000,'2026-09-28T00:00:00Z')",
+            [],
+        ).unwrap();
+        let account_id = super::active_account_id(&ledger.connection).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO cosmetic_purchase(account_id,purchase_id,sku,price,purchased_at_utc)
+             VALUES (?1,'legacy-purchase','star_cluster',100000,'2026-09-28T00:00:00Z')",
+            params![account_id],
+        ).unwrap();
+
+        let first = ledger.purchase_guest_cosmetic(
+            "11111111-1111-4111-8111-111111111111",
+            "star_cluster_v2",
+        ).unwrap();
+        assert_eq!(first.status, CosmeticPurchaseStatus::AlreadyOwned);
+        assert_eq!(first.price, 500_000);
+        assert_eq!(first.available_balance, 500_000);
+        let replay = ledger.purchase_guest_cosmetic(
+            "11111111-1111-4111-8111-111111111111",
+            "star_cluster_v2",
+        ).unwrap();
+        assert_eq!(replay, first);
+        let other_device = ledger.purchase_guest_cosmetic(
+            "22222222-2222-4222-8222-222222222222",
+            "star_cluster_v2",
+        ).unwrap();
+        assert_eq!(other_device.status, CosmeticPurchaseStatus::AlreadyOwned);
+        assert_eq!(other_device.available_balance, 500_000);
+        let rows: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM cosmetic_purchase WHERE account_id=?1",
+            params![account_id],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(rows, 1, "the old purchase amount remains the only ledger charge");
+    }
 
     #[test]
     fn ledger_opens_cosmetic_purchase_and_equipment_tables() {
@@ -610,32 +709,32 @@ mod tests {
     }
 
     #[test]
-    fn guest_purchase_spends_100000_once_and_persists() {
+    fn guest_purchase_spends_new_catalog_price_once_and_persists() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ledger.sqlite3");
         let mut ledger = Ledger::open(&path, chrono_tz::UTC).unwrap();
         ledger.connection.execute(
             "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
-             VALUES ('seed-cycle',100000,'2026-09-28T00:00:00Z')",
+             VALUES ('seed-cycle',500000,'2026-09-28T00:00:00Z')",
             [],
         ).unwrap();
 
         let first = ledger.purchase_guest_cosmetic(
             "11111111-1111-4111-8111-111111111111",
-            "star_cluster",
+            "star_cluster_v2",
         ).unwrap();
         assert_eq!(first.status, CosmeticPurchaseStatus::Purchased);
-        assert_eq!(first.price, 100000);
+        assert_eq!(first.price, 500_000);
         assert_eq!(first.available_balance, 0);
 
         let replay = ledger.purchase_guest_cosmetic(
             "11111111-1111-4111-8111-111111111111",
-            "star_cluster",
+            "star_cluster_v2",
         ).unwrap();
         assert_eq!(replay, first);
         let duplicate = ledger.purchase_guest_cosmetic(
             "22222222-2222-4222-8222-222222222222",
-            "star_cluster",
+            "star_cluster_v2",
         ).unwrap();
         assert_eq!(duplicate.status, CosmeticPurchaseStatus::AlreadyOwned);
         ledger.connection.execute(
@@ -645,7 +744,7 @@ mod tests {
         ).unwrap();
         let duplicate_replay = ledger.purchase_guest_cosmetic(
             "22222222-2222-4222-8222-222222222222",
-            "star_cluster",
+            "star_cluster_v2",
         ).unwrap();
         assert_eq!(duplicate_replay, duplicate);
         drop(ledger);
@@ -653,7 +752,7 @@ mod tests {
         let reopened = Ledger::open(&path, chrono_tz::UTC).unwrap();
         let state = reopened.cosmetic_shop_state().unwrap();
         assert_eq!(state.available_balance, 100);
-        assert_eq!(state.owned_skus, vec!["star_cluster"]);
+        assert_eq!(state.owned_skus, vec!["star_cluster_v2"]);
     }
 
     #[test]
@@ -669,7 +768,7 @@ mod tests {
 
         let first = ledger.purchase_guest_cosmetic(
             "33333333-3333-4333-8333-333333333333",
-            "aurora",
+            "aurora_v2",
         );
         let purchases: i64 = ledger.connection.query_row(
             "SELECT count(*) FROM cosmetic_purchase",
@@ -679,7 +778,7 @@ mod tests {
         assert_eq!(purchases, 0);
         let first = first.unwrap();
         assert_eq!(first.status, CosmeticPurchaseStatus::InsufficientBalance);
-        assert_eq!(first.price, 500000);
+        assert_eq!(first.price, 2_000_000);
         assert_eq!(first.available_balance, 499999);
 
         ledger.connection.execute(
@@ -689,7 +788,7 @@ mod tests {
         ).unwrap();
         let replay = ledger.purchase_guest_cosmetic(
             "33333333-3333-4333-8333-333333333333",
-            "aurora",
+            "aurora_v2",
         ).unwrap();
         assert_eq!(replay.status, CosmeticPurchaseStatus::InsufficientBalance);
         assert_eq!(replay.available_balance, 499999);
@@ -708,15 +807,20 @@ mod tests {
         let mut ledger = Ledger::open(&path, chrono_tz::UTC).unwrap();
         ledger.connection.execute(
             "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
-             VALUES ('seed-cycle',100000,'2026-09-28T00:00:00Z')",
+             VALUES ('seed-cycle',1250000,'2026-09-28T00:00:00Z')",
             [],
         ).unwrap();
         ledger.ensure_planet_account("alice").unwrap();
         ledger.purchase_guest_cosmetic(
             "44444444-4444-4444-8444-444444444444",
-            "star_cluster",
+            "star_cluster_v2",
         ).unwrap();
-        ledger.equip_guest_cosmetic("sky", Some("star_cluster")).unwrap();
+        ledger.purchase_guest_cosmetic(
+            "55555555-5555-4555-8555-555555555555",
+            "pond",
+        ).unwrap();
+        ledger.equip_guest_cosmetic("sky", Some("star_cluster_v2")).unwrap();
+        ledger.equip_guest_cosmetic("forecourt", Some("pond")).unwrap();
         let equipped_cycle = ledger.planet_cycle_id().unwrap();
 
         ledger.ensure_planet_account("bob").unwrap();
@@ -725,15 +829,16 @@ mod tests {
 
         ledger.ensure_planet_account("alice").unwrap();
         let state = ledger.cosmetic_shop_state().unwrap();
-        assert_eq!(state.owned_skus, vec!["star_cluster"]);
-        assert_eq!(state.equipped.len(), 1);
-        assert_eq!(state.equipped[0].sku, "star_cluster");
+        assert_eq!(state.owned_skus, vec!["pond", "star_cluster_v2"]);
+        assert_eq!(state.equipped.len(), 2);
+        assert!(state.equipped.iter().any(|item| item.slot_id == "sky" && item.sku == "star_cluster_v2"));
+        assert!(state.equipped.iter().any(|item| item.slot_id == "forecourt" && item.sku == "pond"));
 
         ledger.reset_planet(chrono::DateTime::parse_from_rfc3339("2026-09-28T01:00:00Z").unwrap().to_utc()).unwrap();
         let state = ledger.cosmetic_shop_state().unwrap();
         assert_eq!(state.current_cycle_id, ledger.planet_cycle_id().unwrap());
         assert_ne!(state.current_cycle_id, equipped_cycle);
-        assert_eq!(state.owned_skus, vec!["star_cluster"]);
+        assert_eq!(state.owned_skus, vec!["pond", "star_cluster_v2"]);
         assert!(state.equipped.is_empty());
     }
 
@@ -765,19 +870,19 @@ mod tests {
         let mut ledger = Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
         ledger.connection.execute(
             "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
-             VALUES ('guest-credit',250000,'2026-09-28T00:00:00Z')",
+             VALUES ('guest-credit',500000,'2026-09-28T00:00:00Z')",
             [],
         ).unwrap();
         ledger.purchase_guest_cosmetic(
             "66666666-6666-4666-8666-666666666666",
-            "star_cluster",
+            "star_cluster_v2",
         ).unwrap();
 
         ledger.ensure_planet_account("alice").unwrap();
         let pending = ledger.pending_guest_cosmetic_import().unwrap().unwrap();
         assert_eq!(pending.wallet_credits.len(), 1);
         assert_eq!(pending.purchases.len(), 1);
-        assert_eq!(pending.purchases[0].sku, "star_cluster");
+        assert_eq!(pending.purchases[0].sku, "star_cluster_v2");
         let account_state = ledger.cosmetic_shop_state().unwrap();
         assert!(account_state.owned_skus.is_empty());
         assert_eq!(account_state.available_balance, 0);
@@ -842,6 +947,59 @@ mod tests {
     }
 
     #[test]
+    fn already_owned_legacy_equivalent_does_not_add_v2_to_cached_ownership() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut ledger =
+            Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
+        ledger.ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger
+            .store_confirmed_cosmetic_state(&CosmeticShopState {
+                slots: cosmetic_slots(),
+                products: cosmetic_products(),
+                current_cycle_id: cycle_id,
+                available_balance: 600_000,
+                owned_skus: vec!["star_cluster".into()],
+                equipped: vec![],
+                slot_versions: BTreeMap::new(),
+                actions_require_online: true,
+                action_unavailable_reason: None,
+                guest_import_pending: false,
+                guest_import_error: None,
+            })
+            .unwrap();
+        let purchase_id = ledger
+            .prepare_cosmetic_purchase_request("star_cluster_v2", 1)
+            .unwrap();
+
+        ledger
+            .complete_cosmetic_purchase_request(&CosmeticPurchaseResult {
+                purchase_id,
+                sku: "star_cluster_v2".into(),
+                status: CosmeticPurchaseStatus::AlreadyOwned,
+                price: 500_000,
+                available_balance: 600_000,
+            })
+            .unwrap();
+
+        let state = ledger.cosmetic_shop_state().unwrap();
+        assert_eq!(state.owned_skus, vec!["star_cluster"]);
+        assert_eq!(state.available_balance, 600_000);
+        let purchase_rows: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM cosmetic_purchase WHERE account_id=?1",
+                [ledger.cosmetic_account_id().unwrap()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            purchase_rows, 0,
+            "an AlreadyOwned response must not create a local purchase row"
+        );
+    }
+
+    #[test]
     fn guest_wallet_credits_are_not_uploaded_until_import_is_confirmed() {
         let directory = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
@@ -869,17 +1027,17 @@ mod tests {
         let path = directory.path().join("ledger.sqlite3");
         let mut ledger = Ledger::open(&path, chrono_tz::UTC).unwrap();
         ledger.ensure_planet_account("alice").unwrap();
-        let alice_id = ledger.prepare_cosmetic_purchase_request("star_cluster", 1).unwrap();
+        let alice_id = ledger.prepare_cosmetic_purchase_request("star_cluster_v2", 1).unwrap();
         drop(ledger);
 
         let mut ledger = Ledger::open(&path, chrono_tz::UTC).unwrap();
-        assert_eq!(ledger.prepare_cosmetic_purchase_request("star_cluster", 1).unwrap(), alice_id);
-        let alice_other_sku = ledger.prepare_cosmetic_purchase_request("aurora", 1).unwrap();
+        assert_eq!(ledger.prepare_cosmetic_purchase_request("star_cluster_v2", 1).unwrap(), alice_id);
+        let alice_other_sku = ledger.prepare_cosmetic_purchase_request("aurora_v2", 1).unwrap();
         assert_ne!(alice_id, alice_other_sku);
         ledger.ensure_planet_account("bob").unwrap();
-        let bob_id = ledger.prepare_cosmetic_purchase_request("star_cluster", 1).unwrap();
+        let bob_id = ledger.prepare_cosmetic_purchase_request("star_cluster_v2", 1).unwrap();
         assert_ne!(alice_id, bob_id);
         ledger.ensure_planet_account("alice").unwrap();
-        assert_eq!(ledger.prepare_cosmetic_purchase_request("star_cluster", 1).unwrap(), alice_id);
+        assert_eq!(ledger.prepare_cosmetic_purchase_request("star_cluster_v2", 1).unwrap(), alice_id);
     }
 }

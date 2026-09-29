@@ -233,12 +233,12 @@ mod tests {
         let mut ledger = fixture_ledger();
         ledger.connection.execute(
             "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
-             VALUES ('wallet-cycle',100000,'2026-09-25T00:00:00Z')",
+             VALUES ('wallet-cycle',500000,'2026-09-25T00:00:00Z')",
             [],
         ).unwrap();
         ledger.purchase_guest_cosmetic(
             "77777777-7777-4777-8777-777777777777",
-            "star_cluster",
+            "star_cluster_v2",
         ).unwrap();
 
         let world = world_snapshot(

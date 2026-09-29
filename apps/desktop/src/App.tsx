@@ -341,7 +341,7 @@ function App() {
       <div className="world-layout">
         {!detail ? <>
           <section className="world-visual" aria-label="나의 행성">
-            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} compact animate={detail} />
+            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} compact animate={detail} interactive publicOnly={false} incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
           </section>
           <section className="planet-summary" aria-label="행성 요약">
             <div className="planet-summary-heading">
@@ -374,7 +374,7 @@ function App() {
           {detailTab === "planet" ? <section id="panel-personal" className="detail-panel personal-panel" role="tabpanel" aria-labelledby="tab-personal" tabIndex={0}>
             <div className="personal-hero">
               <section className="world-visual" aria-label="나의 행성">
-                <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} animate={detail} />
+                <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} animate={detail} interactive publicOnly={false} incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
               </section>
               <div className="personal-quick-facts">
                 <h1>{profile!.nickname}의 행성</h1>
