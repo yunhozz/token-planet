@@ -2,6 +2,7 @@ import { type CSSProperties, useEffect, useId, useRef, useState } from "react";
 import { AvatarSprite } from "./AvatarSprite";
 import type { EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
 import { planWalk, restDuration, stepDuration, WALK_POINTS } from "./sceneMotion";
+import { pickDialogue, type DialogueTarget } from "./sceneDialogue";
 
 export { planWalk, WALK_POINTS } from "./sceneMotion";
 
@@ -53,7 +54,7 @@ function ObjectSprite({ object, x, y, scale }: { object: PlanetObject; x: number
   }
 }
 
-export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean }) {
+export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false, interactive = false, publicOnly = false, incomplete = false, cycleId = "" }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean; interactive?: boolean; publicOnly?: boolean; incomplete?: boolean; cycleId?: string }) {
   const name = STAGE_NAMES[stage] ?? STAGE_NAMES[4];
   const clipId = `planet-clip-${useId().replace(/:/g, "")}`;
   const sceneRef = useRef<HTMLElement | null>(null);
@@ -72,6 +73,11 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   const sceneHasEntered = useRef(false);
   const [enteringObjects, setEnteringObjects] = useState<Set<string>>(() => new Set());
   const knownObjectIds = useRef(new Set(objects.map(objectIdentity)));
+  const knownObjectCycleId = useRef(cycleId);
+  const pendingNewObjectKind = useRef<string | null>(null);
+  const previousDialogue = useRef<string | null>(null);
+  const [speechLine, setSpeechLine] = useState<string | null>(null);
+  const speechTimer = useRef<number | null>(null);
   const motionActive = animate && !compact && isIntersecting && documentVisible && !reducedMotion;
   const motionState = compact ? "paused" : reducedMotion ? "reduced" : motionActive ? "active" : "paused";
   const tiles = new Map<string, { column: number; row: number; objects: PlanetObject[] }>();
@@ -84,6 +90,13 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
     tiles.set(key, tile);
   }
   const hasCosmetic = (slotId: string, sku: string) => equippedCosmetics.some((item) => item.slot_id === slotId && item.sku === sku);
+  const avatarPoint = WALK_POINTS[avatarPosition];
+  const interactionStyle = {
+    "--avatar-hit-left": `${(avatarPoint.x + 10) / 3.6}%`,
+    "--avatar-hit-top": `${(avatarPoint.y + 12) / 3.2}%`,
+    "--avatar-bubble-left": `${(avatarPoint.x + 10) / 3.6}%`,
+    "--avatar-bubble-top": `${avatarPoint.y / 3.2}%`,
+  } as CSSProperties;
 
   useEffect(() => {
     const node = sceneRef.current;
@@ -140,19 +153,28 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   }, [motionActive, reducedMotion]);
 
   useEffect(() => {
-    const added = objects.map(objectIdentity).filter((identity) => !knownObjectIds.current.has(identity));
-    objects.forEach((object) => knownObjectIds.current.add(objectIdentity(object)));
-    if (motionActive && added.length) {
-      setEnteringObjects((current) => new Set([...current, ...added]));
+    if (knownObjectCycleId.current !== cycleId) {
+      knownObjectCycleId.current = cycleId;
+      knownObjectIds.current = new Set(objects.map(objectIdentity));
+      pendingNewObjectKind.current = null;
+      return;
     }
-  }, [objects, motionActive]);
+    const added = objects.filter((object) => !knownObjectIds.current.has(objectIdentity(object)));
+    objects.forEach((object) => knownObjectIds.current.add(objectIdentity(object)));
+    if (!publicOnly && added.length > 0) pendingNewObjectKind.current = added[added.length - 1].kind;
+    if (motionActive && added.length) {
+      setEnteringObjects((current) => new Set([...current, ...added.map(objectIdentity)]));
+    }
+  }, [objects, motionActive, cycleId, publicOnly]);
 
   useEffect(() => {
-    if (!motionActive) {
+    if (!motionActive || speechLine) {
       setAvatarWalking(false);
       setEyesClosed(false);
-      setSceneEntering(false);
-      setEnteringObjects(new Set());
+      if (!motionActive) {
+        setSceneEntering(false);
+        setEnteringObjects(new Set());
+      }
       return;
     }
     let movementTimer: number | undefined;
@@ -214,7 +236,32 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
       if (blinkTimer !== undefined) window.clearTimeout(blinkTimer);
       if (blinkCloseTimer !== undefined) window.clearTimeout(blinkCloseTimer);
     };
-  }, [motionActive]);
+  }, [motionActive, speechLine]);
+
+  useEffect(() => () => {
+    if (speechTimer.current !== null) window.clearTimeout(speechTimer.current);
+  }, []);
+
+  function speak(target: DialogueTarget) {
+    const newObjectKind = publicOnly ? null : pendingNewObjectKind.current;
+    const line = pickDialogue({
+      target,
+      stage,
+      progress,
+      incomplete,
+      newObjectKind,
+      publicOnly,
+      previous: previousDialogue.current,
+    }, Math.random);
+    previousDialogue.current = line;
+    if (newObjectKind) pendingNewObjectKind.current = null;
+    setSpeechLine(line);
+    if (speechTimer.current !== null) window.clearTimeout(speechTimer.current);
+    speechTimer.current = window.setTimeout(() => {
+      speechTimer.current = null;
+      setSpeechLine(null);
+    }, 4_000);
+  }
 
   function finishObjectEntrance(identity: string) {
     setEnteringObjects((current) => {
@@ -269,6 +316,11 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
         </g>
         <circle cx="180" cy="157" r="107" fill="none" stroke="#b8ebce" strokeWidth="2"/>
       </svg>
+      {interactive && <div className="planet-interaction-layer" style={interactionStyle}>
+        <button type="button" className="planet-hit-area" aria-label="행성에게 말 걸기" onClick={() => speak("planet")} />
+        <button type="button" className="avatar-hit-area" aria-label="아바타에게 말 걸기" onClick={() => speak("avatar")} />
+        {speechLine && <div className="planet-speech-bubble" role="status" aria-atomic="true">{speechLine}</div>}
+      </div>}
       {!compact && <figcaption className="planet-caption">{name}</figcaption>}
     </figure>
   );

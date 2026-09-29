@@ -50,7 +50,7 @@ export function WorldCommunity({ name, members }: { name: string; members: World
       {members.length === 0 ? <p className="community-empty">멤버의 행성을 동기화하고 있습니다.</p> : <>
         {selected && <section className="selected-planet-detail" aria-label={`${selected.nickname}의 행성 자세히 보기`}>
           <div className="selected-planet-heading"><strong>{selected.nickname}의 행성</strong></div>
-          <PlanetScene key={`${selectedMemberIndex}-${selected.nickname}`} stage={selected.stage} progress={selected.progress_to_next} avatar={selected.avatar} objects={selected.objects} equippedCosmetics={selected.equipped_cosmetics ?? []} animate />
+          <PlanetScene key={`${selectedMemberIndex}-${selected.nickname}`} stage={selected.stage} progress={selected.progress_to_next} avatar={selected.avatar} objects={selected.objects} equippedCosmetics={selected.equipped_cosmetics ?? []} animate interactive publicOnly />
           <div className="selected-planet-stats"><span>현재 행성</span><strong><FormattedNumber value={selected.current_planet_tokens} /> 토큰</strong><span>누적 사용량</span><strong><FormattedNumber value={selected.lifetime_tokens} /> 토큰</strong><span>문명 발전</span><strong><FormattedNumber value={selected.growth_credit} maximumFractionDigits={12} /> 크레딧</strong></div>
         </section>}
         <div className="planet-gallery">

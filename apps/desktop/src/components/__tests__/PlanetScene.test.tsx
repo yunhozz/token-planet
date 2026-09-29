@@ -1,4 +1,5 @@
-import { act, fireEvent, render, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlanetScene, planWalk, WALK_POINTS } from "../PlanetScene";
 import { restDuration, stepDuration } from "../sceneMotion";
@@ -190,4 +191,131 @@ it("uses a complete static scene when reduced motion is requested", async () => 
   vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
   const { container } = render(<PlanetScene stage={0} progress={0} animate />);
   await waitFor(() => expect(container.querySelector(".planet-figure")).toHaveAttribute("data-motion", "reduced"));
+});
+
+describe("planet speech interaction", () => {
+  it("exposes separate focusable planet and avatar targets with one status bubble", () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { container } = render(<PlanetScene stage={1} progress={0} interactive />);
+    const planetButton = screen.getByRole("button", { name: "행성에게 말 걸기" });
+    const avatarButton = screen.getByRole("button", { name: "아바타에게 말 걸기" });
+
+    expect(planetButton).toHaveAttribute("type", "button");
+    expect(avatarButton).toHaveAttribute("type", "button");
+    expect(planetButton).toHaveProperty("tabIndex", 0);
+    expect(avatarButton).toHaveProperty("tabIndex", 0);
+
+    fireEvent.click(planetButton);
+    expect(screen.getByRole("status")).toHaveTextContent("작은 정착지가 생겼어.");
+    expect(container.querySelectorAll(".planet-speech-bubble")).toHaveLength(1);
+
+    fireEvent.click(avatarButton);
+    expect(screen.getByRole("status")).toHaveTextContent("오늘은 어디를 둘러볼까?");
+    expect(container.querySelectorAll(".planet-speech-bubble")).toHaveLength(1);
+  });
+
+  it("supports Enter and Space activation on both interaction targets", async () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const user = userEvent.setup();
+    render(<PlanetScene stage={1} progress={0} interactive />);
+    const planetButton = screen.getByRole("button", { name: "행성에게 말 걸기" });
+    const avatarButton = screen.getByRole("button", { name: "아바타에게 말 걸기" });
+
+    await user.tab();
+    expect(planetButton).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("status")).toHaveTextContent("작은 정착지가 생겼어.");
+    await user.tab();
+    expect(avatarButton).toHaveFocus();
+    await user.keyboard(" ");
+    expect(screen.getByRole("status")).toHaveTextContent("오늘은 어디를 둘러볼까?");
+  });
+
+  it("restarts the four-second close timer on each interaction", () => {
+    vi.useFakeTimers();
+    render(<PlanetScene stage={1} progress={0} interactive />);
+    const planetButton = screen.getByRole("button", { name: "행성에게 말 걸기" });
+    fireEvent.click(planetButton);
+    act(() => vi.advanceTimersByTime(3_000));
+    fireEvent.click(planetButton);
+    act(() => vi.advanceTimersByTime(3_999));
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    act(() => vi.advanceTimersByTime(1));
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  });
+
+  it("allows speech while the document is hidden without starting a walk", () => {
+    vi.useFakeTimers();
+    vi.spyOn(document, "hidden", "get").mockReturnValue(true);
+    const { container } = render(<PlanetScene stage={0} progress={0} interactive animate />);
+    const avatar = container.querySelector("[data-planet-avatar]")!;
+    const initialTransform = avatar.getAttribute("transform");
+
+    fireEvent.click(screen.getByRole("button", { name: "아바타에게 말 걸기" }));
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(container.querySelector(".planet-figure")).toHaveAttribute("data-motion", "paused");
+    act(() => vi.advanceTimersByTime(15_000));
+    expect(avatar).toHaveAttribute("transform", initialTransform);
+  });
+
+  it("allows speech with reduced motion without starting a walk", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+    const { container } = render(<PlanetScene stage={0} progress={0} interactive animate />);
+    const avatar = container.querySelector("[data-planet-avatar]")!;
+    const initialTransform = avatar.getAttribute("transform");
+
+    fireEvent.click(screen.getByRole("button", { name: "행성에게 말 걸기" }));
+    expect(screen.getByRole("status")).toBeInTheDocument();
+    expect(container.querySelector(".planet-figure")).toHaveAttribute("data-motion", "reduced");
+    act(() => vi.advanceTimersByTime(15_000));
+    expect(avatar).toHaveAttribute("transform", initialTransform);
+  });
+
+  it("pauses a walk during speech and resumes from its retained path position", () => {
+    vi.useFakeTimers();
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const { container } = render(<PlanetScene stage={0} progress={0} interactive animate />);
+    const avatar = container.querySelector("[data-planet-avatar]")!;
+    const initialTransform = avatar.getAttribute("transform");
+
+    act(() => vi.advanceTimersByTime(1_500));
+    const walkingTransform = avatar.getAttribute("transform");
+    expect(walkingTransform).not.toBe(initialTransform);
+    expect(avatar).toHaveClass("planet-avatar--walking");
+
+    fireEvent.click(screen.getByRole("button", { name: "아바타에게 말 걸기" }));
+    expect(avatar.getAttribute("transform")).toBe(walkingTransform);
+    expect(avatar).not.toHaveClass("planet-avatar--walking");
+    act(() => vi.advanceTimersByTime(4_000));
+    expect(avatar.getAttribute("transform")).toBe(walkingTransform);
+    act(() => vi.advanceTimersByTime(1_499));
+    expect(avatar.getAttribute("transform")).toBe(walkingTransform);
+    act(() => vi.advanceTimersByTime(1));
+    expect(avatar.getAttribute("transform")).not.toBe(walkingTransform);
+    expect(avatar).toHaveClass("planet-avatar--walking");
+  });
+
+  it("announces only objects added after the current cycle is known", () => {
+    vi.spyOn(Math, "random").mockReturnValue(0);
+    const firstObject = { stage: 0, ordinal: 1, kind: "rock", x: 10, y: 30, seed: 1 } as const;
+    const newObject = { stage: 0, ordinal: 2, kind: "tree", x: 20, y: 30, seed: 2 } as const;
+    const { rerender } = render(<PlanetScene stage={0} progress={0} interactive cycleId="cycle-1" objects={[firstObject]} />);
+    fireEvent.click(screen.getByRole("button", { name: "행성에게 말 걸기" }));
+    expect(screen.getByRole("status")).toHaveTextContent("이곳에서 첫발을 떼자.");
+
+    rerender(<PlanetScene stage={0} progress={0} interactive cycleId="cycle-1" objects={[firstObject, newObject]} />);
+    fireEvent.click(screen.getByRole("button", { name: "아바타에게 말 걸기" }));
+    expect(screen.getByRole("status")).toHaveTextContent("새로운 나무가 생겼어!");
+
+    rerender(<PlanetScene stage={0} progress={0} interactive cycleId="cycle-2" objects={[firstObject, newObject]} />);
+    fireEvent.click(screen.getByRole("button", { name: "행성에게 말 걸기" }));
+    expect(screen.getByRole("status")).toHaveTextContent("이곳에서 첫발을 떼자.");
+  });
+
+  it("does not render interaction controls for compact gallery scenes", () => {
+    render(<PlanetScene stage={0} progress={0} compact />);
+    expect(screen.queryByRole("button", { name: "행성에게 말 걸기" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "아바타에게 말 걸기" })).not.toBeInTheDocument();
+  });
 });

@@ -93,6 +93,25 @@ describe("shared world controls", () => {
     expect(screen.queryByText(/지갑 잔액|구매 기록|보관함/)).not.toBeInTheDocument();
   });
 
+  it("lets the expanded public planet speak while gallery cards remain member selectors", () => {
+    const publicObject = { stage: 1, ordinal: 1, kind: "tree", x: 10, y: 30, seed: 1 } as const;
+    render(<WorldCommunity name="Together" members={[
+      { ...member("Nova"), stage: 1, progress_to_next: 0.9, incomplete: true, objects: [publicObject] },
+      member("Mira", 2),
+    ]} />);
+
+    expect(screen.getAllByRole("button", { name: "행성에게 말 걸기" })).toHaveLength(1);
+    expect(screen.getAllByRole("button", { name: "아바타에게 말 걸기" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "행성에게 말 걸기" }));
+    expect(screen.getByRole("status")).toHaveTextContent("다음 시대");
+    expect(screen.getByRole("status")).not.toHaveTextContent(/기록|나무/);
+
+    fireEvent.click(screen.getByRole("button", { name: "Mira의 행성 크게 보기" }));
+    expect(screen.getByRole("region", { name: "Mira의 행성 자세히 보기" })).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: "행성에게 말 걸기" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Mira의 행성 크게 보기" })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("shows the current code and the member ranking disclosure", () => {
     render(<InvitePanel memberCount={2} isOwner memberCode="AB12CD34EF" onRotate={vi.fn()} />);
     expect(screen.getByText("AB12CD34EF")).toBeInTheDocument();
