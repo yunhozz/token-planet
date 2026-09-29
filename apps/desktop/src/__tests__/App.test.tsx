@@ -6,7 +6,8 @@ import type { CosmeticShopState, WorldSnapshot } from "../types/usage";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn());
-vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+const isTauriMock = vi.hoisted(() => vi.fn(() => false));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock, isTauri: isTauriMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 const listeners = new Map<string, (event: unknown) => void>();
 
@@ -63,6 +64,7 @@ it("starts anonymous sharing without email sign-in", async () => {
 beforeEach(() => {
   invokeMock.mockReset();
   listenMock.mockReset();
+  isTauriMock.mockReturnValue(false);
   listeners.clear();
   listenMock.mockImplementation(async (event: string, handler: (event: unknown) => void) => {
     listeners.set(event, handler);
@@ -149,14 +151,15 @@ it("does not show the previous account shop when the next account lookup fails",
   expect(await screen.findByText("서버에서 상점 상태를 불러오지 못했습니다")).toBeInTheDocument();
 });
 
-it("shows the planet summary first and reopens details on the personal tab", async () => {
+it("returns_to_popup_then_reopens_personal_detail", async () => {
   const { container } = render(<App />);
   await screen.findByText("Orbit의 행성");
+  screen.getByRole("main", { name: "행성 팝오버" });
   const summary = screen.getByRole("region", { name: "행성 요약" });
   expect(summary).toHaveTextContent("현재 시대");
   expect(summary).toHaveTextContent("이번 행성 토큰");
   expect(summary.querySelector('[role="progressbar"][aria-label="다음 시대 진행도"]')).not.toBeNull();
-  const scene = container.querySelector(".world-visual")!;
+  const scene = container.querySelector<HTMLElement>(".world-visual")!;
   const detailButton = screen.getByRole("button", { name: "행성·그룹 자세히 보기" });
   const usage = screen.getByRole("region", { name: "전체 사용량 (과거 포함)" });
   expect(scene.compareDocumentPosition(summary) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
@@ -172,8 +175,102 @@ it("shows the planet summary first and reopens details on the personal tab", asy
   expect(group).toHaveFocus();
   expect(group).toHaveAttribute("aria-selected", "true");
   fireEvent.click(screen.getByRole("button", { name: "행성으로 돌아가기" }));
+  expect(screen.getByRole("main", { name: "행성 팝오버" })).toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "행성·그룹 자세히 보기" }));
   expect(await screen.findByRole("tab", { name: "내 행성" })).toHaveAttribute("aria-selected", "true");
+});
+
+it("shows_popover_summary_in_order", async () => {
+  const { container } = render(<App />);
+  await screen.findByText("Orbit의 행성");
+  const scene = container.querySelector<HTMLElement>(".world-visual")!;
+  const token = screen.getByText("이번 행성 토큰");
+  const progress = screen.getByRole("progressbar", { name: "다음 시대 진행도" });
+  const detail = screen.getByRole("button", { name: "행성·그룹 자세히 보기" });
+  const sources = screen.getByRole("region", { name: "수집 상태" });
+  const sync = screen.getByRole("status");
+  expect(screen.getByRole("main", { name: "행성 팝오버" })).toContainElement(scene);
+  expect(scene.compareDocumentPosition(token) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(token.compareDocumentPosition(progress) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(progress.compareDocumentPosition(detail) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(detail.compareDocumentPosition(sources) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(sources.compareDocumentPosition(sync) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it("retains_view_when_native_transition_fails", async () => {
+  isTauriMock.mockReturnValue(true);
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage") return structuredClone(localSnapshot);
+    if (command === "set_detail_view") throw "window size unavailable";
+    if (command === "get_shop_state") return shopState(0);
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("화면을 전환하지 못했습니다");
+  expect(screen.getByRole("main", { name: "행성 팝오버" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "행성·그룹 자세히 보기" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
+  isTauriMock.mockReturnValue(false);
+});
+
+it("escape_hides_only_popup", async () => {
+  isTauriMock.mockReturnValue(true);
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.keyDown(document, { key: "Escape" });
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("hide_popover"));
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  invokeMock.mockClear();
+  fireEvent.keyDown(document, { key: "Escape" });
+  expect(invokeMock).not.toHaveBeenCalledWith("hide_popover");
+  isTauriMock.mockReturnValue(false);
+});
+
+it("opens_popover_after_profile_setup", async () => {
+  const unprofiled = structuredClone(localSnapshot);
+  unprofiled.planet.profile = null;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage") return structuredClone(unprofiled);
+    if (command === "set_planet_profile") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return shopState(0);
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+  const nickname = await screen.findByLabelText("행성에서 사용할 닉네임");
+  expect(screen.queryByRole("main", { name: "행성 팝오버" })).not.toBeInTheDocument();
+  fireEvent.change(nickname, { target: { value: "Orbit" } });
+  fireEvent.click(screen.getByRole("button", { name: "행성 시작하기" }));
+  expect(await screen.findByRole("main", { name: "행성 팝오버" })).toBeInTheDocument();
+  expect(screen.getByText("Orbit의 행성")).toBeInTheDocument();
+});
+
+it("keeps_unknown_usage_distinct_from_zero", async () => {
+  const unknown = structuredClone(localSnapshot);
+  unknown.usage.confirmed_subtotal = null;
+  unknown.usage.codex.total_tokens = null;
+  unknown.usage.claude_code.total_tokens = null;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage") return unknown;
+    if (command === "get_shop_state") return shopState(0);
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("아직 확인된 사용량 없음");
+  expect(screen.getByRole("main", { name: "행성 팝오버" })).toBeInTheDocument();
+  expect(screen.getByRole("region", { name: "수집 상태" })).toHaveTextContent("—");
+  expect(screen.getByRole("region", { name: "수집 상태" })).not.toHaveTextContent("0 토큰");
 });
 
 it("clears a cosmetic preview when leaving the personal detail tab", async () => {

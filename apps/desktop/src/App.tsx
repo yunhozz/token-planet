@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invoke, isTauri } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { InvitePanel } from "./components/InvitePanel";
 import { GrowthJournal } from "./components/GrowthJournal";
@@ -38,6 +38,8 @@ function App() {
   const [detailTab, setDetailTab] = useState<"planet" | "group">("planet");
   const detailTabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [error, setError] = useState(false);
+  const [transitionError, setTransitionError] = useState("");
+  const [transitionTarget, setTransitionTarget] = useState<boolean | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [shared, setShared] = useState<SharingState | null>(null);
   const [memberCode, setMemberCode] = useState<string | null>(null);
@@ -92,6 +94,17 @@ function App() {
     }).catch(() => () => {});
     return () => { active = false; void unlisten.then((stop) => stop()); void unlistenCompact.then((stop) => stop()); void unlistenSync.then((stop) => stop()); };
   }, []);
+
+  useEffect(() => {
+    function hidePopoverOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape" || detail || !isTauri()) return;
+      void invoke("hide_popover").catch(() => {
+        setTransitionError("팝오버를 닫지 못했습니다. 다시 시도하세요.");
+      });
+    }
+    window.addEventListener("keydown", hidePopoverOnEscape);
+    return () => window.removeEventListener("keydown", hidePopoverOnEscape);
+  }, [detail]);
 
   useEffect(() => {
     if (shared?.phase !== "shared") {
@@ -230,12 +243,18 @@ function App() {
     return updated;
   }
 
-  async function changeView() {
-    const next = !detail;
-    try { await invoke("set_detail_view", { detail: next }); } catch { /* Browser previews have no native window. */ }
-    setDetail(next);
-    if (next) setDetailTab("planet");
-    if (!next) { setJournalOpen(false); setCosmeticPreview(null); }
+  async function changeView(next = !detail) {
+    setTransitionError("");
+    setTransitionTarget(null);
+    try {
+      if (isTauri()) await invoke("set_detail_view", { detail: next });
+      setDetail(next);
+      if (next) setDetailTab("planet");
+      if (!next) { setJournalOpen(false); setCosmeticPreview(null); }
+    } catch {
+      setTransitionError("화면을 전환하지 못했습니다. 다시 시도하세요.");
+      setTransitionTarget(next);
+    }
   }
 
   function selectDetailTab(tab: "planet" | "group") {
@@ -314,7 +333,7 @@ function App() {
   if (!snapshot) return <main className="setup-screen"><div className="setup-mark" aria-hidden="true"><span /></div><p className="pixel-kicker">Token Planet</p><h1>행성 기록을 불러오고 있습니다</h1>{error && <p className="error-note" role="alert">기기 안의 사용량 원장을 열지 못했습니다.</p>}</main>;
 
   return (
-    <main className={`app-shell ${detail ? "app-shell--detail" : ""}`}>
+    <main className={`app-shell ${detail ? "app-shell--detail" : "app-shell--popover"}`} aria-label={detail ? undefined : "행성 팝오버"}>
       <header className="topbar">
         <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>Token Planet</span></div>
         <button className="icon-button" type="button" onClick={refresh} disabled={refreshing} aria-label="사용량 새로고침" title="사용량 새로고침">↻</button>
@@ -340,7 +359,7 @@ function App() {
             <button className="detail-open-button" type="button" onClick={() => void changeView()}>행성·그룹 자세히 보기</button>
           </section>
           <UsageSummary snapshot={view} />
-          <div className="source-list" aria-label="수집 상태">
+          <div className="source-list" role="region" aria-label="수집 상태">
             <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} />
             <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} />
           </div>
@@ -444,6 +463,7 @@ function App() {
           </section>}
         </>}
         <div className="app-feedback">
+          {transitionError && <p className="error-note" role="alert"><span>{transitionError}</span>{transitionTarget !== null && <> <button className="error-retry" type="button" onClick={() => void changeView(transitionTarget)}>다시 시도</button></>}</p>}
           {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
           {planetError && <p className="error-note" role="alert">{planetError}</p>}
           {sharingError && <p className="error-note" role="alert">{sharingError}</p>}

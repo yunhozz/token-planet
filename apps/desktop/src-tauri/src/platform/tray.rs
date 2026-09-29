@@ -1,13 +1,21 @@
+use std::sync::atomic::Ordering;
+
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
-    App, AppHandle, Emitter, LogicalSize, Manager,
+    App, AppHandle, Emitter, Manager, Rect,
 };
 
 use crate::growth::WorldSnapshot;
+use crate::{initial_mode, tray_target, AppState, WindowMode};
 
 pub const OPEN_ID: &str = "open-world";
 pub const QUIT_ID: &str = "quit-world";
+
+pub fn icon_rect(app: &AppHandle) -> Option<Rect> {
+    app.tray_by_id("token-world")
+        .and_then(|tray| tray.rect().ok().flatten())
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MenuAction {
@@ -23,30 +31,44 @@ pub fn menu_action(id: &str) -> Option<MenuAction> {
     }
 }
 
-pub fn next_window_visibility(currently_visible: bool) -> bool {
-    !currently_visible
+fn mode(app: &AppHandle) -> WindowMode {
+    app.try_state::<AppState>()
+        .and_then(|state| state.window_mode.lock().ok().map(|mode| *mode))
+        .unwrap_or_else(|| initial_mode(false))
 }
 
-fn show_window(app: &AppHandle) {
-    if let Some(window) = app.get_webview_window("main") {
-        let _ = window.set_size(LogicalSize::new(390.0, 700.0));
-        let _ = window.center();
-        let _ = app.emit("show-compact", ());
-        let _ = window.unminimize();
-        let _ = window.show();
-        let _ = window.set_focus();
+fn set_tray_press_pending(app: &AppHandle, pending: bool) {
+    if let Some(state) = app.try_state::<AppState>() {
+        state.tray_press_pending.store(pending, Ordering::SeqCst);
     }
 }
 
-fn toggle_window(app: &AppHandle) {
+fn show_window(app: &AppHandle, target: WindowMode, icon_rect: Option<Rect>) {
+    if crate::transition_window_mode(app, target, icon_rect).is_ok()
+        && target == WindowMode::Popup
+    {
+        let _ = app.emit("show-compact", ());
+    }
+}
+
+fn toggle_window(app: &AppHandle, icon_rect: Option<Rect>) {
     if let Some(window) = app.get_webview_window("main") {
         let visible = window.is_visible().unwrap_or(false);
-        if next_window_visibility(visible) {
-            show_window(app);
+        if let Some(target) = tray_target(mode(app), visible) {
+            show_window(app, target, icon_rect);
         } else {
             let _ = window.hide();
         }
     }
+}
+
+fn force_open_window(app: &AppHandle) {
+    let target = if mode(app) == WindowMode::Setup {
+        WindowMode::Setup
+    } else {
+        WindowMode::Popup
+    };
+    show_window(app, target, icon_rect(app));
 }
 
 pub fn install(app: &mut App) -> tauri::Result<()> {
@@ -62,18 +84,28 @@ pub fn install(app: &mut App) -> tauri::Result<()> {
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match menu_action(event.id.as_ref()) {
-            Some(MenuAction::Open) => show_window(app),
+            Some(MenuAction::Open) => force_open_window(app),
             Some(MenuAction::Quit) => app.exit(0),
             None => {}
         })
         .on_tray_icon_event(|tray, event| {
-            if let TrayIconEvent::Click {
-                button: MouseButton::Left,
-                button_state: MouseButtonState::Up,
-                ..
-            } = event
-            {
-                toggle_window(tray.app_handle());
+            let app = tray.app_handle();
+            match event {
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Down,
+                    ..
+                } => set_tray_press_pending(app, true),
+                TrayIconEvent::Click {
+                    button: MouseButton::Left,
+                    button_state: MouseButtonState::Up,
+                    rect,
+                    ..
+                } => {
+                    toggle_window(app, Some(rect));
+                    set_tray_press_pending(app, false);
+                }
+                _ => {}
             }
         })
         .build(app)?;
@@ -125,7 +157,8 @@ fn label(coverage: crate::domain::usage::UsageCoverage) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::{menu_action, next_window_visibility, MenuAction, OPEN_ID, QUIT_ID};
+    use super::{menu_action, MenuAction, OPEN_ID, QUIT_ID};
+    use crate::{tray_target, WindowMode};
 
     #[test]
     fn native_menu_ids_map_to_open_and_quit() {
@@ -135,8 +168,9 @@ mod tests {
     }
 
     #[test]
-    fn tray_click_toggles_compact_window_and_menu_open_always_shows_it() {
-        assert!(!next_window_visibility(true));
-        assert!(next_window_visibility(false));
+    fn tray_click_toggles_popup_and_switches_from_detail() {
+        assert_eq!(tray_target(WindowMode::Popup, true), None);
+        assert_eq!(tray_target(WindowMode::Popup, false), Some(WindowMode::Popup));
+        assert_eq!(tray_target(WindowMode::Detail, true), Some(WindowMode::Popup));
     }
 }
