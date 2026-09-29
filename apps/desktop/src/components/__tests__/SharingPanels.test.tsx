@@ -34,24 +34,26 @@ it("falls back to the first available member when the selected member disappears
 });
 
 describe("sharing setup", () => {
-  it("keeps solo use available while offering email code sign-in", () => {
-    render(<SharingSetup phase="signed_out" onRequestCode={vi.fn()} onVerifyCode={vi.fn()} onCreateWorld={vi.fn()} onJoinWorld={vi.fn()} />);
+  it("offers device-bound anonymous sharing without collecting email", () => {
+    render(<SharingSetup phase="signed_out" initialNickname="Orbit" onStartAnonymousSession={vi.fn()} onCreateWorld={vi.fn()} onJoinWorld={vi.fn()} />);
     expect(screen.getByText(/나만의 세계/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "인증코드 받기" })).toBeInTheDocument();
-    expect(screen.getByLabelText("이메일")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "공유 시작하기" })).toBeInTheDocument();
+    expect(screen.queryByLabelText("이메일")).not.toBeInTheDocument();
   });
 
-  it("offers one world creation or invite joining after sign-in", () => {
-    render(<SharingSetup phase="signed_in" onRequestCode={vi.fn()} onVerifyCode={vi.fn()} onCreateWorld={vi.fn()} onJoinWorld={vi.fn()} />);
+  it("prefills the nickname and offers a personal code join", () => {
+    render(<SharingSetup phase="signed_in" initialNickname="Orbit" onStartAnonymousSession={vi.fn()} onCreateWorld={vi.fn()} onJoinWorld={vi.fn()} />);
     expect(screen.getByRole("button", { name: "세계 만들기" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "초대 코드로 참여" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "코드로 참여" })).toBeInTheDocument();
+    expect(screen.getByLabelText("공동 행성에서 사용할 닉네임")).toHaveValue("Orbit");
+    expect(screen.getByLabelText("소유자가 알려준 10자리 코드")).toHaveAttribute("maxlength", "10");
   });
 });
 
 describe("shared world controls", () => {
   it("passes only group stage and progress to the planet scene", () => {
     const state: SharingState = {
-      phase: "shared", email: "member@example.test", sync_status: "synced", pending: 0, last_synced_at: null,
+      phase: "shared", user_id: "member", sync_status: "synced", pending: 0, last_synced_at: null,
       world: { id: "world", name: "Together", timezone: "Asia/Seoul", is_owner: false,
         member_count: 2 },
       planet_members: [],
@@ -61,11 +63,11 @@ describe("shared world controls", () => {
   });
 
   it("shows group count and lets the owner create an invitation", () => {
-    const onCreate = vi.fn();
-    render(<InvitePanel memberCount={2} isOwner invite={null} invites={[]} onCreate={onCreate} onRevoke={vi.fn()} />);
+    const onRotate = vi.fn();
+    render(<InvitePanel memberCount={2} isOwner memberCode="AB12CD34EF" onRotate={onRotate} />);
     expect(screen.getByText(/2명/)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "초대 코드 만들기" }));
-    expect(onCreate).toHaveBeenCalledOnce();
+    fireEvent.click(screen.getByRole("button", { name: "내 개인 코드 다시 발급" }));
+    expect(onRotate).toHaveBeenCalledOnce();
   });
 
   it("renders equipped cosmetics on member cards and the expanded planet only", () => {
@@ -92,8 +94,8 @@ describe("shared world controls", () => {
   });
 
   it("shows the current code and the member ranking disclosure", () => {
-    render(<InvitePanel memberCount={2} isOwner invite={{ invite_id: "i", code: "private-code", expires_at: "2026-10-02T00:00:00Z" }} invites={[]} onCreate={vi.fn()} onRevoke={vi.fn()} />);
-    expect(screen.getByText("private-code")).toBeInTheDocument();
+    render(<InvitePanel memberCount={2} isOwner memberCode="AB12CD34EF" onRotate={vi.fn()} />);
+    expect(screen.getByText("AB12CD34EF")).toBeInTheDocument();
     expect(screen.getByText(/정확한 값과 순위/)).toBeInTheDocument();
   });
 

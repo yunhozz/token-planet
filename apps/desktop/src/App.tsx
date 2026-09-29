@@ -12,7 +12,7 @@ import { SyncStatus } from "./components/SyncStatus";
 import { UsageSummary } from "./components/UsageSummary";
 import { WorldCommunity } from "./components/WorldCommunity";
 import { CosmeticShop } from "./components/CosmeticShop";
-import { sharing, type InviteInfo, type InviteLink, type SharingState, type WorldMember } from "./lib/sharing";
+import { sharing, type SharingState, type WorldMember } from "./lib/sharing";
 import type { Agent, CosmeticEquipAction, CosmeticPurchaseAction, CosmeticShopState, EquippedCosmetic, GrowthJournal as GrowthJournalData, PlanetAvatar, WorldSnapshot } from "./types/usage";
 import "./App.css";
 
@@ -40,8 +40,7 @@ function App() {
   const [error, setError] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [shared, setShared] = useState<SharingState | null>(null);
-  const [invite, setInvite] = useState<InviteLink | null>(null);
-  const [invites, setInvites] = useState<InviteInfo[]>([]);
+  const [memberCode, setMemberCode] = useState<string | null>(null);
   const [members, setMembers] = useState<WorldMember[]>([]);
   const [newOwnerId, setNewOwnerId] = useState("");
   const [sharingBusy, setSharingBusy] = useState(false);
@@ -54,7 +53,7 @@ function App() {
   const [journalOwner, setJournalOwner] = useState("");
   const [journalBusy, setJournalBusy] = useState(false);
   const [journalError, setJournalError] = useState("");
-  const cosmeticShopContext = JSON.stringify([shared?.email ?? null, snapshot?.planet.current_cycle_id ?? null]);
+  const cosmeticShopContext = JSON.stringify([shared?.user_id ?? null, snapshot?.planet.current_cycle_id ?? null]);
   const cosmeticShopContextRef = useRef(cosmeticShopContext);
   cosmeticShopContextRef.current = cosmeticShopContext;
   const [cosmeticShopEntry, setCosmeticShopEntry] = useState<{ context: string; state: CosmeticShopState } | null>(null);
@@ -95,15 +94,28 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (shared?.phase !== "shared" || !shared.world?.is_owner) return;
+    if (shared?.phase !== "shared") {
+      setMemberCode(null);
+      setMembers([]);
+      setNewOwnerId("");
+      return;
+    }
     let active = true;
-    sharing.listInvites().then((value) => { if (active) setInvites(value); }).catch(() => {});
-    sharing.listMembers().then((value) => {
-      if (active) {
-        setMembers(value);
-        setNewOwnerId((current) => value.some((member) => member.user_id === current && member.role === "member") ? current : "");
-      }
-    }).catch(() => {});
+    setMemberCode(null);
+    sharing.getMyMemberCode().then((value) => { if (active) setMemberCode(value); }).catch((cause) => {
+      if (active) setSharingError(typeof cause === "string" ? cause : "내 개인 코드를 불러오지 못했습니다.");
+    });
+    if (shared.world?.is_owner) {
+      sharing.listMembers().then((value) => {
+        if (active) {
+          setMembers(value);
+          setNewOwnerId((current) => value.some((member) => member.user_id === current && member.role === "member") ? current : "");
+        }
+      }).catch(() => {});
+    } else {
+      setMembers([]);
+      setNewOwnerId("");
+    }
     return () => { active = false; };
   }, [shared]);
 
@@ -131,34 +143,12 @@ function App() {
     }
   }
 
-  async function requestCode(email: string) {
-    setSharingBusy(true);
-    setSharingError("");
-    try { await sharing.requestCode(email); }
-    catch (cause) {
-      setSharingError(typeof cause === "string" ? cause : "인증코드를 보내지 못했습니다.");
-      throw cause;
-    } finally { setSharingBusy(false); }
-  }
-
-  async function createInvite() {
+  async function rotateMemberCode() {
     setSharingBusy(true);
     setSharingError("");
     try {
-      setInvite(await sharing.createInvite());
-      setInvites(await sharing.listInvites());
-    } catch (cause) { setSharingError(typeof cause === "string" ? cause : "초대 코드를 만들지 못했습니다."); }
-    finally { setSharingBusy(false); }
-  }
-
-  async function revokeInvite(inviteId: string) {
-    setSharingBusy(true);
-    setSharingError("");
-    try {
-      await sharing.revokeInvite(inviteId);
-      setInvites(await sharing.listInvites());
-      if (invite?.invite_id === inviteId) setInvite(null);
-    } catch (cause) { setSharingError(typeof cause === "string" ? cause : "초대를 취소하지 못했습니다."); }
+      setMemberCode(await sharing.rotateMyMemberCode());
+    } catch (cause) { setSharingError(typeof cause === "string" ? cause : "초대 코드를 다시 발급하지 못했습니다."); }
     finally { setSharingBusy(false); }
   }
 
@@ -274,7 +264,7 @@ function App() {
     try {
       const value = await invoke<GrowthJournalData>("get_growth_journal");
       setJournal(value);
-      setJournalOwner(shared?.email ?? "local");
+      setJournalOwner(shared?.user_id ?? "local");
     } catch (cause) {
       setJournalError(typeof cause === "string" ? cause : "성장 일지를 불러오지 못했습니다.");
     } finally {
@@ -288,7 +278,7 @@ function App() {
     try {
       const value = await invoke<GrowthJournalData>("delete_growth_journal");
       setJournal(value);
-      setJournalOwner(shared?.email ?? "local");
+      setJournalOwner(shared?.user_id ?? "local");
     } catch (cause) {
       setJournalError(typeof cause === "string" ? cause : "개인 일지를 삭제하지 못했습니다.");
     } finally {
@@ -314,7 +304,7 @@ function App() {
   }, [planet.can_reset, planet.reset_available_at_utc]);
   useEffect(() => {
     if (journalOpen) void loadGrowthJournal();
-  }, [journalOpen, shared?.email]);
+  }, [journalOpen, shared?.user_id]);
   if (snapshot && !profile) {
     return <>
       <PlanetProfileSetup busy={planetBusy} onSave={saveProfile} />
@@ -417,7 +407,7 @@ function App() {
               </button>
               {journalOpen && <>
                 {journalBusy && !journal && <p className="growth-journal-empty">성장 일지를 불러오는 중입니다.</p>}
-                {journal && journalOwner === (shared?.email ?? "local") && <GrowthJournal
+                {journal && journalOwner === (shared?.user_id ?? "local") && <GrowthJournal
                   journal={journal}
                   busy={journalBusy}
                   error={journalError}
@@ -434,9 +424,9 @@ function App() {
           </section> : <section id="panel-group" className="detail-panel group-panel" role="tabpanel" aria-labelledby="tab-group" tabIndex={0}>
             <div className="sharing-stack">
               {shared?.phase === "shared" && shared.world && <WorldCommunity name={shared.world.name} members={shared.planet_members ?? []} />}
-              {(shared?.phase === "signed_out" || shared?.phase === "signed_in") && <SharingSetup phase={shared.phase} busy={sharingBusy} onRequestCode={requestCode} onVerifyCode={(email, code) => changeSharing(() => sharing.verifyCode(email, code))} onCreateWorld={(name) => changeSharing(() => sharing.createWorld(name))} onJoinWorld={(code) => changeSharing(() => sharing.joinWorld(code))} />}
+              {(shared?.phase === "signed_out" || shared?.phase === "signed_in") && <SharingSetup phase={shared.phase} initialNickname={profile?.nickname ?? ""} busy={sharingBusy} onStartAnonymousSession={() => changeSharing(sharing.startAnonymousSession)} onCreateWorld={(name, nickname) => changeSharing(() => sharing.createWorld(name, nickname))} onJoinWorld={(code, nickname) => changeSharing(() => sharing.joinWorld(code, nickname))} />}
               {shared?.phase === "shared" && shared.world && <>
-                <InvitePanel memberCount={shared.world.member_count} isOwner={shared.world.is_owner} invite={invite} invites={invites} onCreate={createInvite} onRevoke={revokeInvite} />
+                <InvitePanel memberCount={shared.world.member_count} isOwner={shared.world.is_owner} memberCode={memberCode} busy={sharingBusy} onRotate={rotateMemberCode} />
                 <section className="sharing-panel sharing-manage" aria-label="세계 관리">
                   <h2>세계 관리</h2>
                   {shared.world.is_owner && shared.world.member_count > 1 && <div className="owner-transfer"><label htmlFor="new-owner">소유권을 넘길 참여자</label><select id="new-owner" value={newOwnerId} onChange={(event) => setNewOwnerId(event.target.value)}><option value="">참여자 선택</option>{members.filter((member) => member.role === "member").map((member) => <option key={member.user_id} value={member.user_id}>참여자 {member.user_id.slice(-8)}</option>)}</select><button type="button" disabled={!newOwnerId || sharingBusy} onClick={() => void changeSharing(() => sharing.transferOwner(newOwnerId))}>소유권 이전</button></div>}
@@ -444,7 +434,6 @@ function App() {
                   <button type="button" disabled={sharingBusy} onClick={() => { if (window.confirm("이 세계에서 나갈까요? 공유한 내 집계도 삭제됩니다.")) void changeSharing(sharing.leave); }}>세계에서 나가기</button>
                 </section>
               </>}
-              {shared && shared.phase !== "unavailable" && shared.phase !== "signed_out" && <button className="signout-button" type="button" onClick={() => void changeSharing(sharing.signOut)}>로그아웃</button>}
               {shared?.phase === "unavailable" && <p className="detail-note">공동 세계 서버 설정을 확인하세요. 나의 행성은 이 기기에서 계속 자랍니다.</p>}
               <details className="privacy-disclosure">
                 <summary>그룹에는 행성 모습과 집계값만 공유됩니다</summary>

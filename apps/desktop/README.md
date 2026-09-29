@@ -13,13 +13,13 @@ npm run tauri -- dev
 
 From the repository root, prefix npm commands with `npm --prefix apps/desktop`. Build a macOS application bundle on a Mac with `npm run tauri -- build --bundles app`. A native Windows machine with the Tauri prerequisites is required to build and check the Windows tray app.
 
-### Local Supabase and Mailpit
+### Local Supabase
 
-On each macOS machine, install and start [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/), then install the Node/npm and Rust versions noted above and the [Tauri macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos). Clone this repository; its `supabase/config.toml`, migrations, and OTP template are already tracked, so do not run `supabase init` or copy keys from another machine.
+On each macOS machine, install and start [Docker Desktop](https://docs.docker.com/desktop/setup/install/mac-install/), then install the Node/npm and Rust versions noted above and the [Tauri macOS prerequisites](https://v2.tauri.app/start/prerequisites/#macos). Clone this repository; its `supabase/config.toml` and migrations are already tracked, so do not run `supabase init` or copy keys from another machine.
 
 From the repository root, install desktop dependencies and start the local Supabase services used by desktop Auth:
 
-If a DB-only `token-planet` local stack is already running, stop it first; rerunning `start` will not add Auth or Mailpit to that stack. This preserves its database backup and volume. Do not use `--no-backup`:
+If a DB-only `token-planet` local stack is already running, stop it first; rerunning `start` will not add Auth to that stack. This preserves its database backup and volume. Do not use `--no-backup`:
 
 ```sh
 npx --yes supabase@2.118.0 stop --project-id token-planet
@@ -27,15 +27,15 @@ npx --yes supabase@2.118.0 stop --project-id token-planet
 
 ```sh
 npm --prefix apps/desktop ci
-npx --yes supabase@2.118.0 start --exclude realtime,storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
+npx --yes supabase@2.118.0 start --exclude realtime,storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor,mailpit
 npm --prefix apps/desktop run dev:local
 ```
 
 `dev:local` reads `API_URL` and `PUBLISHABLE_KEY` from the local CLI status, requires an HTTP loopback URL and a non-empty publishable key, then overrides only `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` for `tauri dev`. This keeps a hosted URL inherited from a shell or launchd from being used by the local launch. The CLI status also contains secret keys; the launcher does not display or save its output or those keys.
 
-Open the local Mailpit inbox at `http://127.0.0.1:54324` (`local_smtp.port` in `supabase/config.toml`). The local CLI reports the same inbox URL as `INBUCKET_URL` in `supabase status -o json`. Local OTP messages appear there and are not delivered externally.
+Shared-world entry creates a device-bound Supabase anonymous user. The app keeps its session in the operating system credential store. The member's nickname may match another member's; the Supabase user ID distinguishes them. Every member receives a unique 10-character personal code, but only the current world owner's code can admit a friend. The owner shares that code, and the friend enters it with a nickname when joining. Members can rotate their codes to invalidate the old value. If this Mac loses the session, the same member identity and its shared-world access cannot be recovered.
 
-Each Mac has its own local database, Auth users, and Mailpit inbox. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_WORLD_SUPABASE_*` values or Resend credentials need to be copied between machines. Two Macs using separate local stacks cannot exchange invitations or join the same shared world; that requires both apps to use one reachable Supabase project. To stop the local stack without deleting its data, run `npx --yes supabase@2.118.0 stop --project-id token-planet` from the repository root.
+Each Mac has its own local database and Auth users. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_WORLD_SUPABASE_*` values need to be copied between machines. Two Macs using separate local stacks cannot exchange personal invitation codes or join the same shared world; that requires both apps to use one reachable Supabase project. To stop the local stack without deleting its data, run `npx --yes supabase@2.118.0 stop --project-id token-planet` from the repository root.
 
 ### Hosted Supabase development
 
@@ -51,7 +51,7 @@ Set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` in `.e
 npm --prefix apps/desktop run dev:hosted
 ```
 
-The launcher requires a non-empty publishable key and an HTTPS URL, then overrides only those two settings for `tauri dev`. The publishable key is a public client key; never put a Supabase secret or service-role key in this file. Local development with `dev:local` uses the local Supabase CLI and does not need `.env.local`. Running `npm run tauri -- dev` without hosted settings still allows solo use. The hosted project and database migrations are ready, but hosted email OTP remains deferred until custom SMTP and a verified sender domain are available.
+The launcher requires a non-empty publishable key and an HTTPS URL, then overrides only those two settings for `tauri dev`. The publishable key is a public client key; never put a Supabase secret or service-role key in this file. Local development with `dev:local` uses the local Supabase CLI and does not need `.env.local`. Running `npm run tauri -- dev` without hosted settings still allows solo use. For hosted sharing, apply the latest migrations and enable Anonymous Sign-Ins in Supabase Authentication → Sign In / Providers; no SMTP or sender domain is needed.
 
 ## Local sources and storage
 
@@ -74,9 +74,9 @@ The local SQLite ledger lives in Tauri's OS-managed application-local-data direc
 - In the detailed view, **사용 안 함** excludes a source and its prior records from the selected-source total and planet growth without deleting the local ledger. **다시 포함** restores it.
 - A member-day's confirmed enabled-source totals are combined before applying `log2(1 + tokens / 100,000)`. The solo planet changes at cumulative credits 5, 20, 50, and 100, with visual progress between milestones. The day boundary uses the world creator's IANA timezone fixed when the world is created.
 
-When sharing is enabled, Rust rebuilds daily aggregates in the creator's timezone and queues changed snapshots with increasing revisions. The first upload and subsequent successful scans run about every 60 seconds. Connection failures retain the local queue and retry after 5, 10, 20, 40, then 60 seconds. The app also retains the queue across restarts. Pausing stops uploads on this installation while preserving local collection and pending aggregates. Deleting synced usage removes the account's server aggregates, pauses the account across installations, and excludes all records through the current creator-timezone day from future uploads. Other signed-in installations adopt the server cutoff on their next sync. Later days can be shared after explicitly resuming. Leaving removes membership and shared aggregates, clears this installation's queue, and retains a minimal server cutoff for that account and world so rejoining cannot restore old history from another device. Signing out removes the session and cached world view but retains local revision metadata, so the same account can safely resume without duplicating already shared rows; another account starts with a separate queue. Signing out does not delete already shared server aggregates.
+When sharing is enabled, Rust rebuilds daily aggregates in the creator's timezone and queues changed snapshots with increasing revisions. The first upload and subsequent successful scans run about every 60 seconds. Connection failures retain the local queue and retry after 5, 10, 20, 40, then 60 seconds. The app also retains the queue across restarts. Pausing stops uploads on this installation while preserving local collection and pending aggregates. Deleting synced usage removes this device identity's server aggregates, pauses sharing, and excludes all records through the current creator-timezone day from future uploads. Later days can be shared after explicitly resuming. Leaving removes membership and shared aggregates, clears this installation's queue, and retains a minimal server cutoff for that member and world so rejoining cannot restore old history from this device. There is no account-switch or sign-out flow: losing the stored anonymous session loses this member identity and its shared-world access.
 
-Planet profiles, cycles, objects, wallets, and synced metrics are isolated per account. The first login adopts an unclaimed local-only planet. Switching to another account restores that account's saved planet or starts a new one; usage records retain the account that first collected them, including after source rescans. While signed out, local progress continues for the last selected account. Upgrades from the older single-planet storage preserve previously shared data in a local `legacy` archive because its owner cannot be reliably inferred; the signed-in account restores its canonical server planet instead. This prevents old data from being uploaded to a different account, but unsynced legacy progress is retained only in that archive.
+Planet profiles, cycles, objects, wallets, and synced metrics are isolated by the anonymous Supabase user ID for shared use. On first sharing, the device identity adopts an unclaimed local-only planet. Usage records retain the identity that first collected them, including after source rescans. Upgrades from the older single-planet storage preserve previously shared data in a local `legacy` archive because its owner cannot be reliably inferred; the current member restores its canonical server planet instead. This prevents old data from being uploaded under a new identity, but unsynced legacy progress is retained only in that archive.
 
 ## Privacy and current release status
 

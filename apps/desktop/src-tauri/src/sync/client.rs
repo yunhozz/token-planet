@@ -55,24 +55,6 @@ fn guest_import_rpc_body(import: &GuestCosmeticImport) -> serde_json::Value {
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
 #[serde(deny_unknown_fields)]
-pub struct InviteLink {
-    pub invite_id: String,
-    pub code: String,
-    pub expires_at: String,
-}
-
-#[derive(Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct InviteInfo {
-    pub invite_id: String,
-    pub created_at: String,
-    pub expires_at: String,
-    pub revoked_at: Option<String>,
-    pub used_at: Option<String>,
-}
-
-#[derive(Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
 pub struct WorldShell {
     pub id: String,
     pub name: String,
@@ -276,22 +258,7 @@ impl SupabaseSyncClient {
         .await
     }
 
-    pub async fn create_invite(
-        &self,
-        access_token: &str,
-        world_id: &str,
-    ) -> Result<InviteLink, SyncError> {
-        let rows: Vec<InviteLink> = self
-            .post_rpc(
-                access_token,
-                "create_world_invite",
-                &serde_json::json!({ "p_world_id": world_id }),
-            )
-            .await?;
-        one_row(rows)
-    }
-
-    pub async fn accept_invite(
+    pub async fn join_world_by_member_code(
         &self,
         access_token: &str,
         code: &str,
@@ -299,22 +266,27 @@ impl SupabaseSyncClient {
         let rows: Vec<WorldSummary> = self
             .post_rpc(
                 access_token,
-                "accept_world_invite",
+                "join_world_by_member_code",
                 &serde_json::json!({ "p_code": code }),
             )
             .await?;
         one_row(rows)
     }
 
-    pub async fn revoke_invite(
-        &self,
-        access_token: &str,
-        invite_id: &str,
-    ) -> Result<bool, SyncError> {
+    pub async fn my_member_code(&self, access_token: &str) -> Result<String, SyncError> {
         self.post_rpc(
             access_token,
-            "revoke_world_invite",
-            &serde_json::json!({ "p_invite_id": invite_id }),
+            "get_my_member_code",
+            &serde_json::json!({}),
+        )
+        .await
+    }
+
+    pub async fn rotate_my_member_code(&self, access_token: &str) -> Result<String, SyncError> {
+        self.post_rpc(
+            access_token,
+            "rotate_my_member_code",
+            &serde_json::json!({}),
         )
         .await
     }
@@ -369,19 +341,6 @@ impl SupabaseSyncClient {
         self.current_world(access_token)
             .await?
             .ok_or(SyncError::InvalidResponse)
-    }
-
-    pub async fn list_invites(
-        &self,
-        access_token: &str,
-        world_id: &str,
-    ) -> Result<Vec<InviteInfo>, SyncError> {
-        self.post_rpc(
-            access_token,
-            "list_world_invites",
-            &serde_json::json!({ "p_world_id": world_id }),
-        )
-        .await
     }
 
     pub async fn list_members(

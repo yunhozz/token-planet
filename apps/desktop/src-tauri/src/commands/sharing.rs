@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
-use crate::domain::planet::WorldPlanet;
+use crate::domain::planet::{PlanetAvatar, WorldPlanet};
 use crate::sync::auth::{
     AuthConfig, AuthError, SessionStore, StoredSession, SupabaseAuthClient, SESSION_GATE,
 };
-use crate::sync::client::{InviteInfo, InviteLink, SupabaseSyncClient, SyncError, WorldMember};
+use crate::sync::client::{SupabaseSyncClient, SyncError, WorldMember};
 use crate::AppState;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -26,7 +26,7 @@ struct CachedWorldView {
 #[derive(Serialize)]
 pub struct SharingState {
     phase: &'static str,
-    email: Option<String>,
+    user_id: Option<String>,
     world: Option<SharedWorld>,
     sync_status: &'static str,
     pending: u64,
@@ -34,7 +34,7 @@ pub struct SharingState {
     planet_members: Vec<WorldPlanet>,
 }
 
-fn local_state(state: &AppState, phase: &'static str, email: Option<String>) -> SharingState {
+fn local_state(state: &AppState, phase: &'static str, user_id: Option<String>) -> SharingState {
     let (paused, pending) = state
         .ledger
         .lock()
@@ -48,7 +48,7 @@ fn local_state(state: &AppState, phase: &'static str, email: Option<String>) -> 
         .unwrap_or_default();
     SharingState {
         phase,
-        email,
+        user_id,
         world: None,
         sync_status: if phase == "signed_in" {
             if paused {
@@ -70,7 +70,6 @@ fn local_state(state: &AppState, phase: &'static str, email: Option<String>) -> 
 fn offline_state(
     state: &AppState,
     user_id: &str,
-    email: Option<String>,
 ) -> Result<SharingState, String> {
     let mut ledger = state.ledger.lock().map_err(|_| "로컬 공동 세계 오류")?;
     if let Some((world_id, cached_user_id, timezone)) = ledger
@@ -109,7 +108,7 @@ fn offline_state(
         );
     Ok(SharingState {
         phase: "shared",
-        email,
+        user_id: Some(user_id.to_owned()),
         world: Some(world),
         sync_status: if paused { "paused" } else { "failed" },
         pending,
@@ -163,22 +162,22 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
                 .load()
                 .map_err(|_| "로그인 정보를 읽을 수 없습니다")?
                 .ok_or("로그인 정보가 없습니다")?;
-            return offline_state(&state, &saved.user.id, saved.user.email);
+            return offline_state(&state, &saved.user.id);
         }
         Err(_) => return Err("로그인 세션을 확인할 수 없습니다".into()),
     };
     let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
-    let email = session.user.email.clone();
+    let user_id = session.user.id.clone();
     let Some(shell) = (match client.current_world(&session.access_token).await {
         Ok(shell) => shell,
-        Err(SyncError::Transport) => return offline_state(&state, &session.user.id, email),
+        Err(SyncError::Transport) => return offline_state(&state, &session.user.id),
         Err(_) => return Err("공동 세계를 불러올 수 없습니다".into()),
     }) else {
-        return Ok(local_state(&state, "signed_in", email));
+        return Ok(local_state(&state, "signed_in", Some(user_id)));
     };
     let planet_members = match client.world_planets(&session.access_token, &shell.id).await {
         Ok(members) => members,
-        Err(SyncError::Transport) => return offline_state(&state, &session.user.id, email),
+        Err(SyncError::Transport) => return offline_state(&state, &session.user.id),
         Err(_) => return Err("그룹 행성 상태를 불러올 수 없습니다".into()),
     };
     let timezone = shell.timezone.parse().map_err(|_| "세계 시간대 오류")?;
@@ -222,7 +221,7 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
     };
     Ok(SharingState {
         phase: "shared",
-        email,
+        user_id: Some(user_id),
         world: Some(world),
         sync_status: if paused {
             "paused"
@@ -245,41 +244,53 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
 }
 
 #[tauri::command]
-pub async fn request_email_code(email: String) -> Result<(), String> {
-    if !email.contains('@') || email.len() > 254 {
-        return Err("이메일 주소를 확인하세요".into());
-    }
-    SupabaseAuthClient::new(configured()?)
-        .request_email_code(&email)
-        .await
-        .map_err(|_| "인증코드를 보낼 수 없습니다".into())
-}
-
-#[tauri::command]
-pub async fn verify_email_code(
-    email: String,
-    code: String,
-    state: State<'_, AppState>,
-) -> Result<SharingState, String> {
-    let _sync_gate = state.sync_gate.lock().await;
+pub async fn start_anonymous_session(state: State<'_, AppState>) -> Result<SharingState, String> {
+    let sync_gate = state.sync_gate.lock().await;
     let _session_gate = SESSION_GATE.lock().await;
     let config = configured()?;
-    let session = SupabaseAuthClient::new(config.clone())
-        .verify_email_code(&email, &code)
-        .await
-        .map_err(|_| "인증코드를 확인할 수 없습니다")?;
-    SessionStore::new(&config)
-        .map_err(|_| "보안 저장소를 열 수 없습니다")?
-        .save(&session)
-        .map_err(|_| "로그인 정보를 저장할 수 없습니다")?;
+    let store = SessionStore::new(&config).map_err(|_| "보안 저장소를 열 수 없습니다")?;
+    let session = match store.load().map_err(|_| "로그인 정보를 읽을 수 없습니다")? {
+        Some(session) => session,
+        None => {
+            let session = SupabaseAuthClient::new(config)
+                .sign_in_anonymously()
+                .await
+                .map_err(|_| "공유 계정을 만들 수 없습니다. 연결과 익명 로그인을 확인하세요")?;
+            store
+                .save(&session)
+                .map_err(|_| "공유 계정을 이 기기에 저장할 수 없습니다")?;
+            session
+        }
+    };
+    state.select_planet_account(&session.user.id)?;
     drop(_session_gate);
-    drop(_sync_gate);
+    drop(sync_gate);
     get_sharing_state(state).await
+}
+
+fn save_sharing_nickname(state: &AppState, nickname: &str) -> Result<(), String> {
+    let nickname = nickname.trim();
+    if nickname.is_empty() || nickname.chars().count() > 24 {
+        return Err("닉네임은 1~24자로 입력하세요".into());
+    }
+    let mut ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| "행성 닉네임을 저장할 수 없습니다")?;
+    let avatar = ledger
+        .planet_profile()
+        .map_err(|_| "행성 프로필을 읽을 수 없습니다")?
+        .map(|profile| profile.avatar)
+        .unwrap_or(PlanetAvatar::Masculine);
+    ledger
+        .set_planet_profile(nickname, avatar)
+        .map_err(|_| "행성 닉네임을 저장할 수 없습니다".into())
 }
 
 #[tauri::command]
 pub async fn create_shared_world(
     name: String,
+    nickname: String,
     state: State<'_, AppState>,
 ) -> Result<SharingState, String> {
     let name = name.trim();
@@ -293,6 +304,7 @@ pub async fn create_shared_world(
         .timezone
         .to_string();
     let (client, session) = signed_in().await?;
+    save_sharing_nickname(&state, &nickname)?;
     client
         .create_world(&session.access_token, &session.user.id, name, &timezone)
         .await
@@ -301,33 +313,36 @@ pub async fn create_shared_world(
 }
 
 #[tauri::command]
-pub async fn join_world(code: String, state: State<'_, AppState>) -> Result<SharingState, String> {
+pub async fn join_world(
+    code: String,
+    nickname: String,
+    state: State<'_, AppState>,
+) -> Result<SharingState, String> {
     let (client, session) = signed_in().await?;
+    save_sharing_nickname(&state, &nickname)?;
     client
-        .accept_invite(&session.access_token, code.trim())
+        .join_world_by_member_code(&session.access_token, code.trim())
         .await
-        .map_err(|_| "초대 코드를 사용할 수 없습니다. 유효기간과 정원을 확인하세요")?;
+        .map_err(|_| "코드를 확인할 수 없거나 참여할 수 없습니다. 소유자에게 코드를 다시 확인하세요")?;
     get_sharing_state(state).await
 }
 
 #[tauri::command]
-pub async fn create_invite() -> Result<InviteLink, String> {
+pub async fn get_my_member_code() -> Result<String, String> {
     let (client, session) = signed_in().await?;
-    let world_id = world_id(&client, &session).await?;
     client
-        .create_invite(&session.access_token, &world_id)
+        .my_member_code(&session.access_token)
         .await
-        .map_err(|_| "초대 코드를 만들 수 없습니다".into())
+        .map_err(|_| "내 초대 코드를 불러올 수 없습니다".into())
 }
 
 #[tauri::command]
-pub async fn list_invites() -> Result<Vec<InviteInfo>, String> {
+pub async fn rotate_my_member_code() -> Result<String, String> {
     let (client, session) = signed_in().await?;
-    let world_id = world_id(&client, &session).await?;
     client
-        .list_invites(&session.access_token, &world_id)
+        .rotate_my_member_code(&session.access_token)
         .await
-        .map_err(|_| "초대 목록을 불러올 수 없습니다".into())
+        .map_err(|_| "초대 코드를 다시 발급할 수 없습니다".into())
 }
 
 #[tauri::command]
@@ -338,15 +353,6 @@ pub async fn list_world_members() -> Result<Vec<WorldMember>, String> {
         .list_members(&session.access_token, &world_id)
         .await
         .map_err(|_| "참여자 목록을 불러올 수 없습니다".into())
-}
-
-#[tauri::command]
-pub async fn revoke_invite(invite_id: String) -> Result<bool, String> {
-    let (client, session) = signed_in().await?;
-    client
-        .revoke_invite(&session.access_token, &invite_id)
-        .await
-        .map_err(|_| "초대를 취소할 수 없습니다".into())
 }
 
 #[tauri::command]
@@ -462,28 +468,4 @@ pub async fn delete_synced_usage(state: State<'_, AppState>) -> Result<SharingSt
     }
     drop(_gate);
     get_sharing_state(state).await
-}
-
-#[tauri::command]
-pub async fn sign_out(state: State<'_, AppState>) -> Result<SharingState, String> {
-    let _gate = state.sync_gate.lock().await;
-    let _session_gate = SESSION_GATE.lock().await;
-    let config = configured()?;
-    let store = SessionStore::new(&config).map_err(|_| "보안 저장소를 열 수 없습니다")?;
-    if let Some(session) = store.load().map_err(|_| "로그인 정보를 읽을 수 없습니다")?
-    {
-        let _ = SupabaseAuthClient::new(config)
-            .logout_local(&session.access_token)
-            .await;
-    }
-    store
-        .delete()
-        .map_err(|_| "로그인 정보를 지울 수 없습니다")?;
-    state
-        .ledger
-        .lock()
-        .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?
-        .clear_cached_world_view()
-        .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
-    Ok(local_state(&state, "signed_out", None))
 }

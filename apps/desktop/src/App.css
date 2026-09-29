@@ -106,16 +106,15 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .sharing-panel p, .privacy-note { margin: 0 0 11px; color: var(--muted); font-size: 14px; line-height: 1.55; }
 .sharing-panel form + form { margin-top: 13px; }
 .sharing-panel label, .field-label { display: block; margin: 0 0 5px; color: var(--paper); font-size: 14px; }
+.sharing-panel > .pixel-input { width: 100%; margin-bottom: 13px; }
 .sharing-inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 6px; }
 .sharing-inline input, .owner-transfer select, .pixel-input { min-width: 0; flex: 1; height: 44px; padding: 7px 9px; border: 1px solid #667785; border-radius: 0; color: var(--paper); background: var(--panel-deep); font-size: 14px; }
 .sharing-inline button, .sharing-action, .owner-transfer button, .primary-action { flex: none; min-height: 44px; padding: 6px 10px; border: 2px solid #89b896; color: #182637; background: var(--mint); font-size: 14px; font-weight: 800; }
 .sharing-inline button:hover:not(:disabled), .sharing-action:hover:not(:disabled), .owner-transfer button:hover:not(:disabled), .primary-action:hover:not(:disabled) { background: #c3ecc0; }
 .sharing-panel button:disabled { opacity: .55; }
-.invite-current { display: grid; gap: 7px; margin-top: 11px; padding: 9px; border: 1px dashed #879486; }
-.invite-current span, .invite-row { color: var(--muted); font-size: 14px; }
+.invite-current { display: grid; gap: 7px; margin-top: 11px; padding: 9px; border: 1px dashed #879486; color: var(--muted); font-size: 14px; }
 .invite-current code { overflow-wrap: anywhere; color: var(--gold); font-size: 14px; }
-.invite-current button, .invite-row button, .sharing-manage > button, .signout-button { padding: 5px 0; border: 0; color: var(--water); background: transparent; font-size: 14px; text-align: left; }
-.invite-row { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid #39465a; }
+.invite-current button, .sharing-manage > button { padding: 5px 0; border: 0; color: var(--water); background: transparent; font-size: 14px; text-align: left; }
 .sharing-manage { display: grid; gap: 8px; }
 .sharing-manage h2 { margin-bottom: 0; }
 .sharing-manage > button:last-child { color: #ffb3a3; }
@@ -123,7 +122,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .owner-transfer label { margin: 0; }
 .owner-transfer select { width: 100%; }
 .owner-transfer button { justify-self: start; }
-.signout-button { margin: 0 0 12px; }
 .privacy-note { margin: 0; }
 
 .planet-action-panel { margin: 8px 0; padding: 11px; border: 1px solid #526173; background: #1d2638; }

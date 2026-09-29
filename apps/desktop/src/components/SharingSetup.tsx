@@ -2,50 +2,49 @@ import { useState, type FormEvent } from "react";
 
 type Props = {
   phase: "signed_out" | "signed_in";
+  initialNickname: string;
   busy?: boolean;
-  onRequestCode: (email: string) => void | Promise<void>;
-  onVerifyCode: (email: string, code: string) => void | Promise<void>;
-  onCreateWorld: (name: string) => void | Promise<void>;
-  onJoinWorld: (code: string) => void | Promise<void>;
+  onStartAnonymousSession: () => void | Promise<void>;
+  onCreateWorld: (name: string, nickname: string) => void | Promise<void>;
+  onJoinWorld: (code: string, nickname: string) => void | Promise<void>;
 };
 
-export function SharingSetup({ phase, busy, onRequestCode, onVerifyCode, onCreateWorld, onJoinWorld }: Props) {
-  const [email, setEmail] = useState("");
-  const [code, setCode] = useState("");
-  const [codeRequested, setCodeRequested] = useState(false);
+export function SharingSetup({ phase, initialNickname, busy, onStartAnonymousSession, onCreateWorld, onJoinWorld }: Props) {
+  const [nickname, setNickname] = useState(initialNickname);
   const [worldName, setWorldName] = useState("");
-  const [inviteCode, setInviteCode] = useState("");
-
-  function request(event: FormEvent) {
-    event.preventDefault();
-    void Promise.resolve(onRequestCode(email.trim())).then(() => setCodeRequested(true)).catch(() => {});
-  }
+  const [memberCode, setMemberCode] = useState("");
 
   if (phase === "signed_out") {
     return <section className="sharing-panel" aria-label="공동 세계 시작">
       <h2>나만의 세계에서 함께 만드는 세계로</h2>
-      <p>로그인 전에도 사용량과 행성은 이 기기에서 계속 자랍니다. 공유를 시작하면 일별 합계와 닉네임, 아바타, 행성의 파생 상태만 전송합니다.</p>
-      <form onSubmit={request}>
-        <label htmlFor="sharing-email">이메일</label>
-        <div className="sharing-inline"><input id="sharing-email" type="email" value={email} onChange={(event) => setEmail(event.target.value)} required autoComplete="email" /><button type="submit" disabled={busy}>인증코드 받기</button></div>
-      </form>
-      {codeRequested && <form onSubmit={(event) => { event.preventDefault(); void onVerifyCode(email.trim(), code.trim()); }}>
-        <label htmlFor="sharing-code">이메일 인증코드</label>
-        <div className="sharing-inline"><input id="sharing-code" value={code} onChange={(event) => setCode(event.target.value)} required inputMode="numeric" autoComplete="one-time-code" /><button type="submit" disabled={busy}>코드 확인</button></div>
-      </form>}
+      <p>공유를 시작하면 이 기기에 익명 계정을 만들고 보안 저장소에 보관합니다. 계정은 이 기기에 묶이며, 앱 데이터를 잃으면 복구할 수 없습니다. 다른 기기에서는 별도의 사용자가 됩니다.</p>
+      <button className="sharing-action" type="button" onClick={() => void onStartAnonymousSession()} disabled={busy}>
+        {busy ? "공유 계정을 만드는 중…" : "공유 시작하기"}
+      </button>
     </section>;
   }
 
+  const trimmedNickname = nickname.trim();
   return <section className="sharing-panel" aria-label="공동 세계 선택">
     <h2>공동 세계를 시작하세요</h2>
-    <p>새 세계를 만들거나 친구가 보낸 초대 코드로 참여할 수 있습니다. 계정당 한 세계에 참여합니다.</p>
-    <form onSubmit={(event) => { event.preventDefault(); void onCreateWorld(worldName.trim()); }}>
+    <p>이 기기의 사용자 이름입니다. 같은 닉네임을 여러 사람이 사용할 수 있습니다. 계정당 한 공동 세계에 참여합니다.</p>
+    <label htmlFor="sharing-nickname">공동 행성에서 사용할 닉네임</label>
+    <input
+      id="sharing-nickname"
+      className="pixel-input"
+      value={nickname}
+      onChange={(event) => setNickname(event.target.value)}
+      maxLength={24}
+      autoComplete="nickname"
+      required
+    />
+    <form onSubmit={(event: FormEvent) => { event.preventDefault(); void onCreateWorld(worldName.trim(), trimmedNickname); }}>
       <label htmlFor="world-name">세계 이름</label>
-      <div className="sharing-inline"><input id="world-name" value={worldName} onChange={(event) => setWorldName(event.target.value)} required maxLength={80} placeholder="우리의 작은 궤도" /><button type="submit" disabled={busy}>세계 만들기</button></div>
+      <div className="sharing-inline"><input id="world-name" value={worldName} onChange={(event) => setWorldName(event.target.value)} required maxLength={80} placeholder="우리의 작은 궤도" /><button type="submit" disabled={busy || !trimmedNickname}>세계 만들기</button></div>
     </form>
-    <form onSubmit={(event) => { event.preventDefault(); void onJoinWorld(inviteCode.trim()); }}>
-      <label htmlFor="invite-code">받은 초대 코드</label>
-      <div className="sharing-inline"><input id="invite-code" value={inviteCode} onChange={(event) => setInviteCode(event.target.value)} required /><button type="submit" disabled={busy}>초대 코드로 참여</button></div>
+    <form onSubmit={(event: FormEvent) => { event.preventDefault(); void onJoinWorld(memberCode.trim(), trimmedNickname); }}>
+      <label htmlFor="member-code">소유자가 알려준 10자리 코드</label>
+      <div className="sharing-inline"><input id="member-code" value={memberCode} onChange={(event) => setMemberCode(event.target.value)} required minLength={10} maxLength={10} autoCapitalize="characters" /><button type="submit" disabled={busy || !trimmedNickname || memberCode.trim().length !== 10}>코드로 참여</button></div>
     </form>
   </section>;
 }

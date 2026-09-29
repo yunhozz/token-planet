@@ -223,19 +223,16 @@ pub fn run() {
             commands::growth_journal::get_growth_journal,
             commands::growth_journal::delete_growth_journal,
             commands::sharing::get_sharing_state,
-            commands::sharing::request_email_code,
-            commands::sharing::verify_email_code,
+            commands::sharing::start_anonymous_session,
             commands::sharing::create_shared_world,
             commands::sharing::join_world,
-            commands::sharing::create_invite,
-            commands::sharing::list_invites,
+            commands::sharing::get_my_member_code,
+            commands::sharing::rotate_my_member_code,
             commands::sharing::list_world_members,
-            commands::sharing::revoke_invite,
             commands::sharing::pause_sharing,
             commands::sharing::transfer_world_owner,
             commands::sharing::leave_world,
-            commands::sharing::delete_synced_usage,
-            commands::sharing::sign_out
+            commands::sharing::delete_synced_usage
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]

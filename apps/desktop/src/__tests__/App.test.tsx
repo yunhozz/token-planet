@@ -11,7 +11,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 const listeners = new Map<string, (event: unknown) => void>();
 
 const ownerState: SharingState = {
-  phase: "shared", email: "owner@example.test", sync_status: "synced", pending: 0, last_synced_at: null,
+  phase: "shared", user_id: "owner", sync_status: "synced", pending: 0, last_synced_at: null,
   world: { id: "world-1", name: "Together", timezone: "Asia/Seoul", is_owner: true,
     member_count: 2 },
   planet_members: [],
@@ -38,32 +38,26 @@ function shopState(balance: number): CosmeticShopState {
   };
 }
 
-it.each([false, true])("shows the new account's profile setup after sign-in (group lookup fails: %s)", async (groupLookupFails) => {
-  let verified = false;
+it("starts anonymous sharing without email sign-in", async () => {
+  let started = false;
   invokeMock.mockImplementation(async (command: string) => {
-    if (command === "get_sharing_state" || command === "sign_out") return {
-      ...ownerState, phase: "signed_out", world: null, sync_status: "local",
+    if (command === "get_sharing_state") return {
+      ...ownerState, phase: started ? "signed_in" : "signed_out", world: null, sync_status: started ? "synced" : "local",
     };
-    if (command === "verify_email_code") {
-      verified = true;
-      if (groupLookupFails) throw "공동 세계를 불러올 수 없습니다";
-      return { ...ownerState, phase: "signed_in", world: null, sync_status: "local" };
+    if (command === "start_anonymous_session") {
+      started = true;
+      return { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
     }
-    if (command === "current_usage") return verified
-      ? { ...structuredClone(localSnapshot), planet: { ...localSnapshot.planet, profile: null, lifetime_tokens: 0 } }
-      : structuredClone(localSnapshot);
+    if (command === "current_usage") return structuredClone(localSnapshot);
     return null;
   });
   render(<App />);
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   fireEvent.click(await screen.findByRole("tab", { name: "그룹" }));
-  fireEvent.change(await screen.findByLabelText("이메일"), { target: { value: "bob@example.test" } });
-  fireEvent.click(screen.getByRole("button", { name: "인증코드 받기" }));
-  fireEvent.change(await screen.findByLabelText("이메일 인증코드"), { target: { value: "123456" } });
-  fireEvent.click(screen.getByRole("button", { name: "코드 확인" }));
-  await screen.findByRole("heading", { name: "행성의 첫 주민을 골라주세요" });
-  expect(screen.queryByText("Orbit의 행성")).not.toBeInTheDocument();
+  expect(screen.queryByLabelText("이메일")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "공유 시작하기" }));
+  expect(await screen.findByLabelText("공동 행성에서 사용할 닉네임")).toHaveValue("Orbit");
 });
 
 beforeEach(() => {
@@ -78,7 +72,7 @@ beforeEach(() => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "list_world_members") return [{ user_id: "owner", role: "owner" }, { user_id: "member", role: "member" }];
-    if (command === "list_invites") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
 });
@@ -92,7 +86,7 @@ it("refreshes owner candidates even when the member count stays the same", async
       roster += 1;
       return [{ user_id: "owner", role: "owner" }, { user_id: roster === 1 ? "member-b" : "member-c", role: "member" }];
     }
-    if (command === "list_invites") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
   render(<App />);
@@ -114,7 +108,7 @@ it("refreshes the confirmed shop state after sync finishes", async () => {
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_shop_state") return shopState(synced ? 100_000 : 0);
     if (command === "list_world_members") return [];
-    if (command === "list_invites") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
   render(<App />);
@@ -135,11 +129,11 @@ it("does not show the previous account shop when the next account lookup fails",
     if (command === "get_sharing_state") return structuredClone(currentAccount);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_shop_state") {
-      if (currentAccount.email === "next@example.test") throw "서버에서 상점 상태를 불러오지 못했습니다";
+      if (currentAccount.user_id === "next-account") throw "서버에서 상점 상태를 불러오지 못했습니다";
       return shopState(600_000);
     }
     if (command === "list_world_members") return [];
-    if (command === "list_invites") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
   render(<App />);
@@ -148,7 +142,7 @@ it("does not show the previous account shop when the next account lookup fails",
   fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
   await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("600,000 토큰"));
 
-  currentAccount = { ...ownerState, email: "next@example.test", phase: "signed_in", world: null };
+  currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null };
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
 
   await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")).toBeNull());
@@ -193,7 +187,8 @@ it("clears a cosmetic preview when leaving the personal detail tab", async () =>
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_shop_state") return structuredClone(previewShop);
-    if (command === "list_world_members" || command === "list_invites") return [];
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
   render(<App />);
@@ -217,7 +212,8 @@ it("keeps the three token totals tied to their original fields", async () => {
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "current_usage") return distinct;
     if (command === "get_sharing_state") return structuredClone(ownerState);
-    if (command === "list_world_members" || command === "list_invites") return [];
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
   render(<App />);

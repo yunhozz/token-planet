@@ -174,7 +174,7 @@ refresh_token_reuse_interval = 10
 # Allow/disallow new user signups to your project.
 enable_signup = true
 # Allow/disallow anonymous sign-ins to your project.
-enable_anonymous_sign_ins = false
+enable_anonymous_sign_ins = true
 # Allow/disallow testing manual linking of accounts
 enable_manual_linking = false
 # Passwords shorter than this value will be rejected as weak. Minimum 6, recommended 8 or more.
@@ -217,7 +217,7 @@ web3 = 30
 
 [auth.email]
 # Allow/disallow new user signups via email to your project.
-enable_signup = true
+enable_signup = false
 # If enabled, a user will be required to confirm any email change on both the old, and new email
 # addresses. If disabled, only the new email is required to confirm.
 double_confirm_changes = true
@@ -241,16 +241,6 @@ otp_expiry = 3600
 # pass = "env(SENDGRID_API_KEY)"
 # admin_email = "admin@email.com"
 # sender_name = "Admin"
-
-# Uncomment to customize email template
-# Token World enters this code inside the desktop app.
-[auth.email.template.confirmation]
-subject = "Token World 인증코드"
-content_path = "./supabase/templates/otp.html"
-
-[auth.email.template.magic_link]
-subject = "Token World 인증코드"
-content_path = "./supabase/templates/otp.html"
 
 # [auth.email.template.invite]
 # subject = "You have been invited"

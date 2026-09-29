@@ -41,6 +41,28 @@ pub struct StoredSession {
     pub user: AuthUser,
 }
 
+#[derive(Deserialize)]
+struct AuthSessionResponse {
+    access_token: String,
+    refresh_token: String,
+    expires_in: i64,
+    expires_at: Option<i64>,
+    user: AuthUser,
+}
+
+impl AuthSessionResponse {
+    fn into_stored(self) -> StoredSession {
+        StoredSession {
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
+            expires_at: self
+                .expires_at
+                .unwrap_or_else(|| chrono::Utc::now().timestamp() + self.expires_in),
+            user: self.user,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub enum AuthError {
     CredentialStore,
@@ -89,12 +111,6 @@ impl SessionStore {
             .map_err(|_| AuthError::CredentialStore)
     }
 
-    pub fn delete(&self) -> Result<(), AuthError> {
-        match self.entry.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(_) => Err(AuthError::CredentialStore),
-        }
-    }
 }
 
 pub struct SupabaseAuthClient {
@@ -110,31 +126,12 @@ impl SupabaseAuthClient {
         }
     }
 
-    pub async fn request_email_code(&self, email: &str) -> Result<(), AuthError> {
+    pub async fn sign_in_anonymously(&self) -> Result<StoredSession, AuthError> {
         let response = self
             .http
-            .post(format!("{}/auth/v1/otp", self.config.base_url))
+            .post(format!("{}/auth/v1/signup", self.config.base_url))
             .header("apikey", &self.config.publishable_key)
-            .json(&serde_json::json!({ "email": email, "create_user": true }))
-            .send()
-            .await
-            .map_err(|_| AuthError::Transport)?;
-        if !response.status().is_success() {
-            return Err(AuthError::Rejected(response.status().as_u16()));
-        }
-        Ok(())
-    }
-
-    pub async fn verify_email_code(
-        &self,
-        email: &str,
-        code: &str,
-    ) -> Result<StoredSession, AuthError> {
-        let response = self
-            .http
-            .post(format!("{}/auth/v1/verify", self.config.base_url))
-            .header("apikey", &self.config.publishable_key)
-            .json(&serde_json::json!({ "email": email, "token": code, "type": "email" }))
+            .json(&serde_json::json!({ "data": {} }))
             .send()
             .await
             .map_err(|_| AuthError::Transport)?;
@@ -142,8 +139,9 @@ impl SupabaseAuthClient {
             return Err(AuthError::Rejected(response.status().as_u16()));
         }
         response
-            .json()
+            .json::<AuthSessionResponse>()
             .await
+            .map(AuthSessionResponse::into_stored)
             .map_err(|_| AuthError::InvalidResponse)
     }
 
@@ -182,23 +180,6 @@ impl SupabaseAuthClient {
         Ok(refreshed)
     }
 
-    pub async fn logout_local(&self, access_token: &str) -> Result<(), AuthError> {
-        let response = self
-            .http
-            .post(format!(
-                "{}/auth/v1/logout?scope=local",
-                self.config.base_url
-            ))
-            .header("apikey", &self.config.publishable_key)
-            .bearer_auth(access_token)
-            .send()
-            .await
-            .map_err(|_| AuthError::Transport)?;
-        if !response.status().is_success() {
-            return Err(AuthError::Rejected(response.status().as_u16()));
-        }
-        Ok(())
-    }
 }
 
 #[cfg(test)]

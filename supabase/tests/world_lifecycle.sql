@@ -1,11 +1,10 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(20);
+select plan(16);
 
 select ok(to_regprocedure('public.delete_synced_usage(uuid)') is not null, 'usage deletion API exists');
 select ok(to_regprocedure('public.leave_world(uuid)') is not null, 'leave API exists');
 select ok(to_regprocedure('public.transfer_world_owner(uuid,uuid)') is not null, 'ownership transfer API exists');
-select ok(to_regprocedure('public.list_world_invites(uuid)') is not null, 'invite list API exists');
 select ok(to_regprocedure('public.list_world_members(uuid)') is not null, 'owner transfer member list API exists');
 
 insert into auth.users(id) values
@@ -35,9 +34,6 @@ select throws_ok(
 select throws_ok(
   $$select * from public.list_world_members('70000000-0000-0000-0000-000000000001')$$,
   '42501', null, 'member cannot read transfer candidates');
-select throws_ok(
-  $$select * from public.list_world_invites('70000000-0000-0000-0000-000000000001')$$,
-  '42501', null, 'member cannot list owner invitations');
 select is(public.delete_synced_usage('70000000-0000-0000-0000-000000000001'), 1::integer,
   'member deletes only their own aggregate');
 reset role;
@@ -45,13 +41,6 @@ select is((select sum(total_tokens)::numeric from public.daily_usage_snapshots w
   100000::numeric, 'deleted member aggregate leaves owner aggregate intact');
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000401', true);
-select lives_ok(
-  $$select * from public.create_world_invite('70000000-0000-0000-0000-000000000001')$$,
-  'owner can create an invitation for listing');
-select ok(not exists (
-  select 1 from public.list_world_invites('70000000-0000-0000-0000-000000000001') i
-  where to_jsonb(i) ?| array['code', 'code_hash', 'user_id', 'total_tokens']
-), 'invitation list exposes metadata only');
 select is((select count(*)::integer from public.list_world_members('70000000-0000-0000-0000-000000000001')),
   2, 'owner can see transfer candidates without usage');
 select ok(public.transfer_world_owner('70000000-0000-0000-0000-000000000001',
