@@ -657,6 +657,115 @@ it("does not apply a pending purchase after the account changes", async () => {
   expect(screen.getByRole("button", { name: "별무리 구매" })).toBeInTheDocument();
 });
 
+it.each(["purchase", "equip"] as const)("shows a failed %s in the shop after returning to it", async (actionKind) => {
+  const pendingAction = deferred<unknown>();
+  const actionError = "요청 결과를 확인할 수 없습니다.";
+  let shopReads = 0;
+  let returnedToShop = false;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") {
+      shopReads += 1;
+      return catalogShopState(returnedToShop ? 175_000 : 200_000, actionKind === "equip" ? ["star_cluster"] : []);
+    }
+    if (command === (actionKind === "purchase" ? "purchase_cosmetic" : "equip_cosmetic")) return pendingAction.promise;
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
+  if (actionKind === "purchase") {
+    fireEvent.click(screen.getByRole("button", { name: "별무리 구매" }));
+    fireEvent.click(await screen.findByRole("button", { name: "구매 확인" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("purchase_cosmetic", { sku: "star_cluster" }));
+  } else {
+    fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
+    fireEvent.click(await screen.findByRole("button", { name: "별무리 장착" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("equip_cosmetic", {
+      slotId: "sky", sku: "star_cluster", cycleId: "cycle-1", expectedVersion: 0,
+    }));
+  }
+
+  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  await act(async () => {
+    pendingAction.reject(actionError);
+    await Promise.resolve();
+  });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+  const readsBeforeReentry = shopReads;
+  returnedToShop = true;
+  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent(actionError);
+  expect(screen.getByRole("button", { name: "상점 다시 확인" })).toBeEnabled();
+  await waitFor(() => expect(shopReads).toBeGreaterThan(readsBeforeReentry));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("175,000 토큰"));
+  expect(await screen.findByRole("alert")).toHaveTextContent(actionError);
+
+  const readsBeforeRetry = shopReads;
+  fireEvent.click(screen.getByRole("button", { name: "상점 다시 확인" }));
+  await waitFor(() => expect(shopReads).toBeGreaterThan(readsBeforeRetry));
+  expect(screen.queryByText(actionError)).not.toBeInTheDocument();
+});
+
+it.each(["purchase", "equip"] as const)("discards a pending %s failure after the account changes", async (actionKind) => {
+  const pendingAction = deferred<unknown>();
+  const actionError = "이전 계정 요청 실패";
+  let currentAccount = structuredClone(ownerState);
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return currentAccount.user_id === "owner"
+      ? catalogShopState(200_000, actionKind === "equip" ? ["star_cluster"] : [])
+      : catalogShopState(700_000);
+    if (command === (actionKind === "purchase" ? "purchase_cosmetic" : "equip_cosmetic")) return pendingAction.promise;
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
+  if (actionKind === "purchase") {
+    fireEvent.click(screen.getByRole("button", { name: "별무리 구매" }));
+    fireEvent.click(await screen.findByRole("button", { name: "구매 확인" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("purchase_cosmetic", { sku: "star_cluster" }));
+  } else {
+    fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
+    fireEvent.click(await screen.findByRole("button", { name: "별무리 장착" }));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("equip_cosmetic", {
+      slotId: "sky", sku: "star_cluster", cycleId: "cycle-1", expectedVersion: 0,
+    }));
+  }
+
+  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  currentAccount = { ...currentAccount, user_id: "next-account", phase: "signed_in", world: null };
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state").length).toBeGreaterThan(1));
+
+  await act(async () => {
+    pendingAction.reject(actionError);
+    await Promise.resolve();
+  });
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("700,000 토큰"));
+  expect(screen.queryByText(actionError)).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
 it("shows confirmed equipment on the planet after returning from the shop", async () => {
   const ownedShop = catalogShopState(500_000, ["star_cluster"]);
   const equippedShop = {

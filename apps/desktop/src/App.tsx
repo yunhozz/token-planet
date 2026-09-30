@@ -125,6 +125,8 @@ function App() {
   const cosmeticShop = cosmeticShopEntry?.context === cosmeticShopContext ? cosmeticShopEntry.state : null;
   const [cosmeticPreview, setCosmeticPreview] = useState<EquippedCosmetic[] | null>(null);
   const [cosmeticShopError, setCosmeticShopError] = useState("");
+  const [cosmeticActionError, setCosmeticActionError] = useState<{ context: string; message: string } | null>(null);
+  const cosmeticActionErrorMessage = cosmeticActionError?.context === cosmeticShopContext ? cosmeticActionError.message : "";
   const [cosmeticShopLoadingContext, setCosmeticShopLoadingContext] = useState<string | null>(null);
   const featureActionsBlocked = sharedLoading || sharedContextLockedRef.current;
 
@@ -163,6 +165,7 @@ function App() {
     setCosmeticPreview(null);
     setPlanetExplorationEntry(null);
     setCosmeticShopError("");
+    setCosmeticActionError(null);
     invalidateCosmeticShopReads(cosmeticShopContextRef.current);
     journalRequestId.current += 1;
     setJournal(null);
@@ -368,6 +371,7 @@ function App() {
     setCosmeticShopEntry(null);
     setCosmeticPreview(null);
     setCosmeticShopError("");
+    setCosmeticActionError((current) => current?.context === context ? current : null);
     void loadCosmeticShop(context).catch((cause) => {
       if (active && cosmeticShopContextRef.current === context && !isCosmeticShopReadSuperseded(cause)) {
         setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
@@ -377,7 +381,7 @@ function App() {
   }, [cosmeticShopContext, sharedLoading]);
 
   useEffect(() => {
-    if (featureScreen !== "cosmetic-shop" || sharedContextLockedRef.current || cosmeticShop) return;
+    if (featureScreen !== "cosmetic-shop" || sharedLoading || sharedContextLockedRef.current) return;
     const context = cosmeticShopContext;
     let active = true;
     void loadCosmeticShop(context).catch((cause) => {
@@ -386,7 +390,7 @@ function App() {
       }
     });
     return () => { active = false; };
-  }, [featureScreen, cosmeticShopContext, cosmeticShop]);
+  }, [featureScreen, cosmeticShopContext, sharedLoading]);
 
 
   async function changeSharing(action: () => Promise<SharingState>) {
@@ -505,13 +509,31 @@ function App() {
       invoke<WorldSnapshot | null>("choose_source_folder", { agent }));
   }
 
+  function clearCosmeticActionError(context: string) {
+    setCosmeticActionError((current) => current?.context === context ? null : current);
+  }
+
+  function recordCosmeticActionError(context: string, epoch: number, screenEpoch: number, cause: unknown, fallback: string) {
+    if (sharedContextLockedRef.current || epoch !== worldTransitionEpoch.current
+      || context !== cosmeticShopContextRef.current || screenEpoch === featureScreenEpoch.current) return;
+    setCosmeticActionError({ context, message: typeof cause === "string" ? cause : fallback });
+  }
+
   async function purchaseCosmetic(sku: string): Promise<CosmeticPurchaseAction> {
     const context = cosmeticShopContext;
     const epoch = worldTransitionEpoch.current;
+    const screenEpoch = featureScreenEpoch.current;
     if (sharedContextLockedRef.current || context !== cosmeticShopContextRef.current) {
       throw "계정 또는 행성 상태를 확인하는 동안에는 구매할 수 없습니다.";
     }
-    const action = await invoke<CosmeticPurchaseAction>("purchase_cosmetic", { sku });
+    clearCosmeticActionError(context);
+    let action: CosmeticPurchaseAction;
+    try {
+      action = await invoke<CosmeticPurchaseAction>("purchase_cosmetic", { sku });
+    } catch (cause) {
+      recordCosmeticActionError(context, epoch, screenEpoch, cause, "구매 결과를 확인할 수 없습니다. 상점 상태를 다시 확인하세요.");
+      throw cause;
+    }
     if (sharedContextLockedRef.current || epoch !== worldTransitionEpoch.current || context !== cosmeticShopContextRef.current) {
       throw "계정 또는 행성 상태가 바뀌었습니다. 상점 상태를 다시 확인하세요.";
     }
@@ -530,10 +552,18 @@ function App() {
   ): Promise<CosmeticEquipAction> {
     const context = cosmeticShopContext;
     const epoch = worldTransitionEpoch.current;
+    const screenEpoch = featureScreenEpoch.current;
     if (sharedContextLockedRef.current || context !== cosmeticShopContextRef.current) {
       throw "계정 또는 행성 상태를 확인하는 동안에는 장착을 변경할 수 없습니다.";
     }
-    const action = await invoke<CosmeticEquipAction>("equip_cosmetic", { slotId, sku, cycleId, expectedVersion });
+    clearCosmeticActionError(context);
+    let action: CosmeticEquipAction;
+    try {
+      action = await invoke<CosmeticEquipAction>("equip_cosmetic", { slotId, sku, cycleId, expectedVersion });
+    } catch (cause) {
+      recordCosmeticActionError(context, epoch, screenEpoch, cause, "장착을 변경하지 못했습니다. 상점 상태를 다시 확인하세요.");
+      throw cause;
+    }
     if (sharedContextLockedRef.current || epoch !== worldTransitionEpoch.current || context !== cosmeticShopContextRef.current) {
       throw "계정 또는 행성 상태가 바뀌었습니다. 상점 상태를 다시 확인하세요.";
     }
@@ -793,6 +823,7 @@ function App() {
             {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
             {sharingError && <p className="error-note" role="alert">{sharingError} <button className="error-retry" type="button" onClick={() => void refresh()} disabled={refreshing}>다시 확인</button></p>}
             {cosmeticShopError && <p className="error-note" role="alert"><span>{cosmeticShopError}</span> <button className="error-retry" type="button" onClick={() => void retryLoadCosmeticShop()}>다시 불러오기</button></p>}
+            {cosmeticActionErrorMessage && <p className="error-note" role="alert"><span>{cosmeticActionErrorMessage} 상점 상태를 다시 확인해 주세요.</span> <button className="error-retry" type="button" onClick={() => { clearCosmeticActionError(cosmeticShopContext); void retryLoadCosmeticShop(); }}>상점 다시 확인</button></p>}
           </div>
         </div>
       </main>
