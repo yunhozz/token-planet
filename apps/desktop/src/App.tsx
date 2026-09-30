@@ -65,6 +65,7 @@ function App() {
     : "planet";
   const [featureScreen, setFeatureScreen] = useState<FeatureScreen>(initialFeatureScreen);
   const featureScreenRef = useRef(featureScreen);
+  const featureScreenEpoch = useRef(0);
   featureScreenRef.current = featureScreen;
   const [snapshot, setSnapshot] = useState<WorldSnapshot | null>(null);
   const [detail, setDetail] = useState(initialFeatureScreen !== "planet");
@@ -160,6 +161,7 @@ function App() {
     setSharedLoading(true);
     setCosmeticShopEntry(null);
     setCosmeticPreview(null);
+    setPlanetExplorationEntry(null);
     setCosmeticShopError("");
     invalidateCosmeticShopReads(cosmeticShopContextRef.current);
     journalRequestId.current += 1;
@@ -264,6 +266,8 @@ function App() {
       if (active) {
         setDetail(false);
         setDetailTab("planet");
+        featureScreenRef.current = "planet";
+        featureScreenEpoch.current += 1;
         setFeatureScreen("planet");
         setCosmeticPreview(null);
       }
@@ -558,14 +562,23 @@ function App() {
     return loadCosmeticShop(context);
   }
 
-  function updateCosmeticPreview(preview: EquippedCosmetic[] | null) {
-    if (sharedContextLockedRef.current) return;
+  function updateCosmeticPreview(
+    preview: EquippedCosmetic[] | null,
+    context: string,
+    epoch: number,
+    screenEpoch: number,
+  ) {
+    if (sharedContextLockedRef.current || featureScreenRef.current !== "cosmetic-shop"
+      || worldTransitionEpoch.current !== epoch || cosmeticShopContextRef.current !== context
+      || featureScreenEpoch.current !== screenEpoch) return;
     setCosmeticPreview(preview);
   }
 
   function launchFeatureScreen(feature: Exclude<FeatureScreen, "planet">) {
     if (sharedContextLockedRef.current) return;
     featureReturnFocusRef.current = feature;
+    featureScreenRef.current = feature;
+    featureScreenEpoch.current += 1;
     setFeatureScreen(feature);
   }
 
@@ -573,6 +586,8 @@ function App() {
     setCosmeticPreview(null);
     setDetail(true);
     setDetailTab("planet");
+    featureScreenRef.current = "planet";
+    featureScreenEpoch.current += 1;
     setFeatureScreen("planet");
   }
 
@@ -658,17 +673,28 @@ function App() {
     camera: fitLandscape(sceneBounds),
     selectedObjectId: null,
   }), [sceneBounds]);
-  const planetExploration = planetExplorationEntry?.context === explorationContext
+  const planetExploration = !sharedContextLockedRef.current && planetExplorationEntry?.context === explorationContext
     ? planetExplorationEntry.value
     : initialExploration;
   useEffect(() => {
+    if (sharedContextLockedRef.current) {
+      setPlanetExplorationEntry(null);
+      return;
+    }
     setPlanetExplorationEntry((current) => current?.context === explorationContext
       ? current
       : { context: explorationContext, value: initialExploration });
-  }, [explorationContext, initialExploration]);
+  }, [explorationContext, initialExploration, sharedLoading]);
+  const capturedExplorationContext = explorationContext;
+  const capturedExplorationEpoch = worldTransitionEpoch.current;
   const updatePlanetExploration = (value: PlanetExplorationState) => {
-    setPlanetExplorationEntry({ context: explorationContext, value });
+    if (sharedContextLockedRef.current || capturedExplorationEpoch !== worldTransitionEpoch.current
+      || capturedExplorationContext !== worldContextRef.current) return;
+    setPlanetExplorationEntry({ context: capturedExplorationContext, value });
   };
+  const capturedPreviewContext = cosmeticShopContext;
+  const capturedPreviewEpoch = worldTransitionEpoch.current;
+  const capturedPreviewScreenEpoch = featureScreenEpoch.current;
   const canReset = planet.can_reset || Boolean(planet.reset_available_at_utc && resetCheckAt >= Date.parse(planet.reset_available_at_utc));
   const nextObjectProgress = objectProgress(planet.growth_credit, planet.stage);
   const confirmedCosmetics = cosmeticShop?.current_cycle_id === planet.current_cycle_id
@@ -683,7 +709,9 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [planet.can_reset, planet.reset_available_at_utc]);
   useEffect(() => {
-    if (featureScreen === "growth-journal" && !sharedContextLockedRef.current) void loadGrowthJournal();
+    if (featureScreen !== "growth-journal") return;
+    if (!sharedContextLockedRef.current) void loadGrowthJournal();
+    return () => { journalRequestId.current += 1; };
   }, [featureScreen, journalContext, sharedLoading]);
   useEffect(() => {
     if (initialFeatureScreen !== "planet" && isTauri()) {
@@ -747,7 +775,9 @@ function App() {
               state={cosmeticShop}
               onPurchase={purchaseCosmetic}
               onEquip={equipCosmetic}
-              onPreviewChange={updateCosmeticPreview}
+              onPreviewChange={(preview) => updateCosmeticPreview(
+                preview, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch,
+              )}
               onRefresh={refreshCosmeticShop}
               actionsDisabled={featureActionsBlocked}
               showCollapseButton={false}
@@ -921,8 +951,6 @@ function App() {
           {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
           {planetError && <p className="error-note" role="alert">{planetError}</p>}
           {sharingError && <p className="error-note" role="alert">{sharingError}</p>}
-          {cosmeticShopError && <p className="error-note" role="alert"><span>{cosmeticShopError}</span> <button className="error-retry" type="button" onClick={() => void retryLoadCosmeticShop()}>다시 불러오기</button></p>}
-          {journalError && <p className="error-note" role="alert">{journalError} <button className="error-retry" type="button" onClick={() => void loadGrowthJournal()}>다시 불러오기</button></p>}
         </div>
         <footer className="bottom-actions"><SyncStatus status={shared?.sync_status ?? "local"} pending={shared?.pending ?? 0} lastSyncedAt={shared?.last_synced_at} onPause={() => changeSharing(() => sharing.pause(true))} onResume={() => { if (window.confirm("동기화를 재개하면 내 행성 상태를 서버에 다시 동기화합니다. 공동 세계에 참여 중이면 행성 모습, 이번 행성 토큰, 누적 토큰과 성장 점수가 멤버에게 공개됩니다.")) void changeSharing(() => sharing.pause(false)); }} /></footer>
       </div>
