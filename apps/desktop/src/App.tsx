@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
+import { emit, listen } from "@tauri-apps/api/event";
 import { InvitePanel } from "./components/InvitePanel";
 import { GrowthJournal } from "./components/GrowthJournal";
 import { FormattedNumber } from "./components/FormattedNumber";
@@ -14,6 +14,7 @@ import { UsageSummary } from "./components/UsageSummary";
 import { WorldCommunity } from "./components/WorldCommunity";
 import { CosmeticShop } from "./components/CosmeticShop";
 import { sharing, type SharingState, type WorldMember } from "./lib/sharing";
+import { openFeatureWindow, type FeatureWindow } from "./lib/featureWindows";
 import type { Agent, CosmeticEquipAction, CosmeticPurchaseAction, CosmeticShopState, EquippedCosmetic, GrowthJournal as GrowthJournalData, PlanetAvatar, WorldSnapshot } from "./types/usage";
 import "./App.css";
 
@@ -44,7 +45,21 @@ function isCosmeticShopReadSuperseded(cause: unknown) {
   return cause instanceof Error && cause.message === COSMETIC_SHOP_READ_SUPERSEDED;
 }
 
+function broadcastDesktopEvent(name: string, source?: FeatureWindow | "main") {
+  return isTauri() ? emit(name, source ?? null).catch(() => {}) : Promise.resolve();
+}
+
+function worldContext(shared: SharingState | null, snapshot: WorldSnapshot | null) {
+  return JSON.stringify([shared?.phase ?? null, shared?.user_id ?? null,
+    shared?.world?.id ?? null, shared?.world?.is_owner ?? false,
+    snapshot?.planet.current_cycle_id ?? null]);
+}
+
 function App() {
+  const requestedWindow = new URLSearchParams(window.location.search).get("window");
+  const featureWindow: FeatureWindow | null = requestedWindow === "cosmetic-shop" || requestedWindow === "growth-journal"
+    ? requestedWindow
+    : null;
   const [snapshot, setSnapshot] = useState<WorldSnapshot | null>(null);
   const [detail, setDetail] = useState(false);
   const [detailTab, setDetailTab] = useState<"planet" | "group">("planet");
@@ -55,6 +70,10 @@ function App() {
   const [refreshing, setRefreshing] = useState(false);
   const [shared, setShared] = useState<SharingState | null>(null);
   const [sharedLoading, setSharedLoading] = useState(true);
+  const sharedContextLockedRef = useRef(true);
+  const worldContextRef = useRef(worldContext(null, null));
+  const worldTransitionEpoch = useRef(0);
+  const sharingActionErrorRef = useRef(false);
   const sharedRequestId = useRef(0);
   const sharedPhase = shared?.phase ?? null;
   const sharedUserId = shared?.user_id ?? null;
@@ -80,11 +99,16 @@ function App() {
   const [sourceError, setSourceError] = useState<{ agent: Agent; message: string } | null>(null);
   const [memberRefreshRevision, setMemberRefreshRevision] = useState(0);
   const [resetCheckAt, setResetCheckAt] = useState(0);
-  const [journalOpen, setJournalOpen] = useState(false);
   const [journal, setJournal] = useState<GrowthJournalData | null>(null);
   const [journalOwner, setJournalOwner] = useState("");
   const [journalBusy, setJournalBusy] = useState(false);
   const [journalError, setJournalError] = useState("");
+  const journalContext = shared?.user_id ?? "local";
+  const journalContextRef = useRef(journalContext);
+  journalContextRef.current = journalContext;
+  const journalRequestId = useRef(0);
+  const [featureWindowError, setFeatureWindowError] = useState("");
+  const [featureWindowRetry, setFeatureWindowRetry] = useState<FeatureWindow | null>(null);
   const cosmeticShopContext = JSON.stringify([shared?.user_id ?? null, snapshot?.planet.current_cycle_id ?? null]);
   const cosmeticShopContextRef = useRef(cosmeticShopContext);
   cosmeticShopContextRef.current = cosmeticShopContext;
@@ -94,6 +118,7 @@ function App() {
   const [cosmeticPreview, setCosmeticPreview] = useState<EquippedCosmetic[] | null>(null);
   const [cosmeticShopError, setCosmeticShopError] = useState("");
   const [cosmeticShopLoadingContext, setCosmeticShopLoadingContext] = useState<string | null>(null);
+  const featureActionsBlocked = sharedLoading || sharedContextLockedRef.current;
 
   function cosmeticShopLoad(context: string) {
     let load = cosmeticShopLoads.current.get(context);
@@ -106,7 +131,7 @@ function App() {
 
   function storeCosmeticShop(context: string, shop: CosmeticShopState, generation?: number) {
     const load = cosmeticShopLoad(context);
-    if (cosmeticShopContextRef.current === context && (generation === undefined || load.generation === generation)) {
+    if (!sharedContextLockedRef.current && cosmeticShopContextRef.current === context && (generation === undefined || load.generation === generation)) {
       setCosmeticShopEntry({ context, state: shop });
     }
   }
@@ -121,7 +146,36 @@ function App() {
     return load.generation;
   }
 
+  function lockWorldContext() {
+    worldTransitionEpoch.current += 1;
+    sharedContextLockedRef.current = true;
+    sharedRequestId.current += 1;
+    setSharedLoading(true);
+    setCosmeticShopEntry(null);
+    setCosmeticPreview(null);
+    setCosmeticShopError("");
+    invalidateCosmeticShopReads(cosmeticShopContextRef.current);
+    journalRequestId.current += 1;
+    setJournal(null);
+    setJournalOwner("");
+    setJournalError("");
+  }
+
+  function acceptWorldContext(nextShared: SharingState, nextSnapshot: WorldSnapshot | null, epoch: number, context: string) {
+    if (epoch !== worldTransitionEpoch.current || context !== worldContextRef.current) return false;
+    const nextUserId = nextShared.user_id ?? null;
+    worldContextRef.current = worldContext(nextShared, nextSnapshot);
+    sharedContextLockedRef.current = false;
+    journalContextRef.current = nextUserId ?? "local";
+    cosmeticShopContextRef.current = JSON.stringify([nextUserId, nextSnapshot?.planet.current_cycle_id ?? null]);
+    setShared(nextShared);
+    setSnapshot(nextSnapshot);
+    setSharedLoading(false);
+    return true;
+  }
+
   function loadCosmeticShop(context: string): Promise<CosmeticShopState> {
+    if (sharedContextLockedRef.current) return Promise.reject(new Error(COSMETIC_SHOP_READ_SUPERSEDED));
     const load = cosmeticShopLoad(context);
     if (cosmeticShopContextRef.current === context) {
       setCosmeticShopLoadingContext(context);
@@ -133,7 +187,7 @@ function App() {
     let pending: Promise<CosmeticShopState>;
     pending = invoke<CosmeticShopState>("get_shop_state")
       .then((value) => {
-        if (load.generation !== generation || cosmeticShopContextRef.current !== context) {
+        if (sharedContextLockedRef.current || load.generation !== generation || cosmeticShopContextRef.current !== context) {
           throw new Error(COSMETIC_SHOP_READ_SUPERSEDED);
         }
         storeCosmeticShop(context, value, generation);
@@ -154,25 +208,43 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    const refreshSharedContext = async () => {
+    const refreshSharedContext = async (invalidate = true) => {
+      if (invalidate) lockWorldContext();
+      const epoch = worldTransitionEpoch.current;
+      const context = worldContextRef.current;
       const requestId = ++sharedRequestId.current;
-      setSharedLoading(true);
+      let nextShared: SharingState | null = null;
+      let nextSnapshot: WorldSnapshot | null = null;
+      let sharedLoaded = false;
+      let snapshotLoaded = false;
       try {
-        try {
-          const value = await sharing.state();
-          if (active && requestId === sharedRequestId.current) {
-            setShared(value);
-            setSharingError("");
-          }
-        } catch {
-          if (active && requestId === sharedRequestId.current) setSharingError("공동 세계 연결을 확인하세요.");
-        }
-        const value = await invoke<WorldSnapshot | null>("current_usage");
-        if (active && requestId === sharedRequestId.current) setSnapshot(value);
+        nextShared = await sharing.state();
+        sharedLoaded = true;
+      } catch {
+        if (active && requestId === sharedRequestId.current) setSharingError("공동 세계 연결을 확인하세요.");
+      }
+      try {
+        nextSnapshot = await invoke<WorldSnapshot | null>("current_usage");
+        snapshotLoaded = true;
       } catch {
         if (active && requestId === sharedRequestId.current) setError(true);
-      } finally {
-        if (active && requestId === sharedRequestId.current) setSharedLoading(false);
+      }
+      if (!active || requestId !== sharedRequestId.current
+        || epoch !== worldTransitionEpoch.current || context !== worldContextRef.current) return;
+      if (sharedLoaded && snapshotLoaded && nextShared) {
+        const contextChanged = worldContext(nextShared, nextSnapshot) !== context;
+        if (contextChanged && !sharedContextLockedRef.current) {
+          lockWorldContext();
+        }
+        if (!acceptWorldContext(nextShared, nextSnapshot, worldTransitionEpoch.current, context)) return;
+        if (sharingActionErrorRef.current) sharingActionErrorRef.current = false;
+        else setSharingError("");
+        setError(false);
+        if (!invalidate) void loadCosmeticShop(cosmeticShopContextRef.current).catch(() => {});
+        if (!invalidate && contextChanged && featureWindow === "growth-journal") void loadGrowthJournal();
+      } else if (invalidate || sharedContextLockedRef.current) {
+        sharedContextLockedRef.current = true;
+        setSharedLoading(true);
       }
     };
     const unlisten = listen<WorldSnapshot>("usage-updated", (event) => {
@@ -188,10 +260,25 @@ function App() {
         setCosmeticPreview(null);
       }
     }).catch(() => () => {});
-    const unlistenSync = listen("sync-status-updated", () => {
-      void refreshSharedContext();
+    const unlistenWorldState = listen("world-state-updated", () => {
+      if (active) void refreshSharedContext(sharedContextLockedRef.current);
+    }).catch(() => () => {});
+    const unlistenWorldContextChanging = listen<string | null>("world-context-changing", (event) => {
+      if (active && event.payload !== (featureWindow ?? "main")) lockWorldContext();
+    }).catch(() => () => {});
+    const unlistenCosmeticShop = listen("cosmetic-shop-updated", () => {
+      if (!active || sharedContextLockedRef.current) return;
+      setCosmeticPreview(null);
       const context = cosmeticShopContextRef.current;
-      if (active) void loadCosmeticShop(context).catch(() => {});
+      invalidateCosmeticShopReads(context);
+      void loadCosmeticShop(context).catch((cause) => {
+        if (active && cosmeticShopContextRef.current === context && !isCosmeticShopReadSuperseded(cause)) {
+          setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
+        }
+      });
+    }).catch(() => () => {});
+    const unlistenSync = listen("sync-status-updated", () => {
+      if (active && !sharedContextLockedRef.current) void refreshSharedContext(false);
     }).catch(() => () => {});
     void Promise.all([unlisten, unlistenScanFailed]).then(() => {
       if (active) void refreshSharedContext();
@@ -202,20 +289,23 @@ function App() {
       void unlisten.then((stop) => stop());
       void unlistenScanFailed.then((stop) => stop());
       void unlistenCompact.then((stop) => stop());
+      void unlistenWorldState.then((stop) => stop());
+      void unlistenWorldContextChanging.then((stop) => stop());
+      void unlistenCosmeticShop.then((stop) => stop());
       void unlistenSync.then((stop) => stop());
     };
   }, []);
 
   useEffect(() => {
     function hidePopoverOnEscape(event: KeyboardEvent) {
-      if (event.key !== "Escape" || detail || !isTauri()) return;
+      if (event.key !== "Escape" || detail || featureWindow !== null || !isTauri()) return;
       void invoke("hide_popover").catch(() => {
         setTransitionError("팝오버를 닫지 못했습니다. 다시 시도하세요.");
       });
     }
     window.addEventListener("keydown", hidePopoverOnEscape);
     return () => window.removeEventListener("keydown", hidePopoverOnEscape);
-  }, [detail]);
+  }, [detail, featureWindow]);
 
   useEffect(() => {
     const context = JSON.stringify([sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner]);
@@ -260,6 +350,7 @@ function App() {
   }, [sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner, sharedMemberCount, memberRefreshRevision]);
 
   useEffect(() => {
+    if (sharedContextLockedRef.current) return;
     const context = cosmeticShopContext;
     let active = true;
     setCosmeticShopEntry(null);
@@ -271,19 +362,33 @@ function App() {
       }
     });
     return () => { active = false; };
-  }, [cosmeticShopContext]);
+  }, [cosmeticShopContext, sharedLoading]);
 
   async function changeSharing(action: () => Promise<SharingState>) {
+    lockWorldContext();
     setSharingBusy(true);
-    setSharedLoading(true);
     setSharingError("");
-    try { setShared(await action()); }
-    catch (cause) { setSharingError(typeof cause === "string" ? cause : "공동 세계 요청을 완료하지 못했습니다."); }
+    await broadcastDesktopEvent("world-context-changing", featureWindow ?? "main");
+    const epoch = worldTransitionEpoch.current;
+    const context = worldContextRef.current;
+    try {
+      const nextShared = await action();
+      if (epoch === worldTransitionEpoch.current && context === worldContextRef.current) setShared(nextShared);
+    }
+    catch (cause) {
+      if (epoch === worldTransitionEpoch.current && context === worldContextRef.current) {
+        sharingActionErrorRef.current = true;
+        setSharingError(typeof cause === "string" ? cause : "공동 세계 요청을 완료하지 못했습니다.");
+      }
+    }
     finally {
-      try { setSnapshot(await invoke<WorldSnapshot | null>("current_usage")); }
-      catch { setError(true); }
+      try {
+        const nextSnapshot = await invoke<WorldSnapshot | null>("current_usage");
+        if (epoch === worldTransitionEpoch.current && context === worldContextRef.current) setSnapshot(nextSnapshot);
+      }
+      catch { if (epoch === worldTransitionEpoch.current && context === worldContextRef.current) setError(true); }
       setSharingBusy(false);
-      setSharedLoading(false);
+      void broadcastDesktopEvent("world-state-updated");
     }
   }
 
@@ -300,23 +405,34 @@ function App() {
   async function refresh() {
     if (sourceBusyRef.current !== null || refreshing || planetBusy) return;
     setRefreshing(true);
-    setSharedLoading(true);
+    lockWorldContext();
+    await broadcastDesktopEvent("world-context-changing", featureWindow ?? "main");
+    const epoch = worldTransitionEpoch.current;
+    const context = worldContextRef.current;
     try {
-      setSnapshot(await invoke<WorldSnapshot>("refresh_usage"));
-      try {
-        setShared(await sharing.state());
-        setMemberRefreshRevision((revision) => revision + 1);
-      } catch { setSharingError("공동 세계 연결을 확인하세요."); }
+      const nextSnapshot = await invoke<WorldSnapshot>("refresh_usage");
+      const nextShared = await sharing.state();
+      if (!acceptWorldContext(nextShared, nextSnapshot, epoch, context)) return;
+      setMemberRefreshRevision((revision) => revision + 1);
+      broadcastDesktopEvent("world-state-updated");
       setError(false);
-    } catch { setError(true); }
-    finally { setRefreshing(false); setSharedLoading(false); }
+    } catch {
+      if (epoch !== worldTransitionEpoch.current || context !== worldContextRef.current) return;
+      sharedContextLockedRef.current = true;
+      setSharedLoading(true);
+      setSharingError("계정 또는 행성 상태를 확인하지 못했습니다. 다시 시도하세요.");
+      setError(true);
+    } finally { setRefreshing(false); }
   }
 
   async function saveProfile(nickname: string, avatar: PlanetAvatar) {
     if (sourceBusyRef.current !== null || refreshing || planetBusy) return;
     setPlanetBusy(true);
     setPlanetError("");
-    try { setSnapshot(await invoke<WorldSnapshot>("set_planet_profile", { nickname, avatar })); }
+    try {
+      setSnapshot(await invoke<WorldSnapshot>("set_planet_profile", { nickname, avatar }));
+      broadcastDesktopEvent("world-state-updated");
+    }
     catch (cause) { setPlanetError(typeof cause === "string" ? cause : "행성 프로필을 저장하지 못했습니다."); }
     finally { setPlanetBusy(false); }
   }
@@ -326,7 +442,10 @@ function App() {
     if (!window.confirm("현재 행성을 초기화할까요? 확인된 이번 행성 토큰은 지갑에 적립되고, 자연 생태계부터 다시 시작합니다.")) return;
     setPlanetBusy(true);
     setPlanetError("");
-    try { setSnapshot(await invoke<WorldSnapshot>("reset_planet")); }
+    try {
+      setSnapshot(await invoke<WorldSnapshot>("reset_planet"));
+      broadcastDesktopEvent("world-state-updated");
+    }
     catch (cause) { setPlanetError(typeof cause === "string" ? cause : "행성을 초기화하지 못했습니다."); }
     finally { setPlanetBusy(false); }
   }
@@ -338,7 +457,11 @@ function App() {
     setSourceError(null);
     try {
       const updated = await action();
-      if (updated) { setSnapshot(updated); setError(false); }
+      if (updated) {
+        setSnapshot(updated);
+        setError(false);
+        broadcastDesktopEvent("world-state-updated");
+      }
     } catch (cause) {
       setSourceError({ agent, message: typeof cause === "string" ? cause : fallback });
     } finally {
@@ -359,10 +482,18 @@ function App() {
 
   async function purchaseCosmetic(sku: string): Promise<CosmeticPurchaseAction> {
     const context = cosmeticShopContext;
+    const epoch = worldTransitionEpoch.current;
+    if (sharedContextLockedRef.current || context !== cosmeticShopContextRef.current) {
+      throw "계정 또는 행성 상태를 확인하는 동안에는 구매할 수 없습니다.";
+    }
     const action = await invoke<CosmeticPurchaseAction>("purchase_cosmetic", { sku });
+    if (sharedContextLockedRef.current || epoch !== worldTransitionEpoch.current || context !== cosmeticShopContextRef.current) {
+      throw "계정 또는 행성 상태가 바뀌었습니다. 상점 상태를 다시 확인하세요.";
+    }
     const generation = invalidateCosmeticShopReads(context);
     storeCosmeticShop(context, action.state, generation);
     if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
+    broadcastDesktopEvent("cosmetic-shop-updated");
     return action;
   }
 
@@ -373,14 +504,23 @@ function App() {
     expectedVersion: number,
   ): Promise<CosmeticEquipAction> {
     const context = cosmeticShopContext;
+    const epoch = worldTransitionEpoch.current;
+    if (sharedContextLockedRef.current || context !== cosmeticShopContextRef.current) {
+      throw "계정 또는 행성 상태를 확인하는 동안에는 장착을 변경할 수 없습니다.";
+    }
     const action = await invoke<CosmeticEquipAction>("equip_cosmetic", { slotId, sku, cycleId, expectedVersion });
+    if (sharedContextLockedRef.current || epoch !== worldTransitionEpoch.current || context !== cosmeticShopContextRef.current) {
+      throw "계정 또는 행성 상태가 바뀌었습니다. 상점 상태를 다시 확인하세요.";
+    }
     const generation = invalidateCosmeticShopReads(context);
     storeCosmeticShop(context, action.state, generation);
     if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
+    broadcastDesktopEvent("cosmetic-shop-updated");
     return action;
   }
 
   async function retryLoadCosmeticShop() {
+    if (sharedContextLockedRef.current) return;
     const context = cosmeticShopContext;
     setCosmeticShopError("");
     try { await loadCosmeticShop(context); }
@@ -392,8 +532,26 @@ function App() {
   }
 
   async function refreshCosmeticShop() {
+    if (sharedContextLockedRef.current) throw new Error(COSMETIC_SHOP_READ_SUPERSEDED);
     const context = cosmeticShopContext;
     return loadCosmeticShop(context);
+  }
+
+  function updateCosmeticPreview(preview: EquippedCosmetic[] | null) {
+    if (sharedContextLockedRef.current) return;
+    setCosmeticPreview(preview);
+  }
+
+  async function launchFeatureWindow(feature: FeatureWindow) {
+    if (sharedContextLockedRef.current) return;
+    setFeatureWindowError("");
+    setFeatureWindowRetry(null);
+    try {
+      await openFeatureWindow(feature);
+    } catch {
+      setFeatureWindowError("새 창을 열지 못했습니다. 다시 시도하세요.");
+      setFeatureWindowRetry(feature);
+    }
   }
 
   async function changeView(next = !detail) {
@@ -403,7 +561,6 @@ function App() {
       if (isTauri()) await invoke("set_detail_view", { detail: next });
       setDetail(next);
       if (next) setDetailTab("planet");
-      if (!next) { setJournalOpen(false); setCosmeticPreview(null); }
     } catch {
       setTransitionError("화면을 전환하지 못했습니다. 다시 시도하세요.");
       setTransitionTarget(next);
@@ -430,31 +587,43 @@ function App() {
   }
 
   async function loadGrowthJournal() {
+    if (sharedContextLockedRef.current) return;
+    const context = journalContextRef.current;
+    const requestId = ++journalRequestId.current;
     setJournalBusy(true);
     setJournalError("");
     setJournal(null);
     try {
       const value = await invoke<GrowthJournalData>("get_growth_journal");
+      if (sharedContextLockedRef.current || requestId !== journalRequestId.current || journalContextRef.current !== context) return;
       setJournal(value);
-      setJournalOwner(shared?.user_id ?? "local");
+      setJournalOwner(context);
     } catch (cause) {
-      setJournalError(typeof cause === "string" ? cause : "성장 일지를 불러오지 못했습니다.");
+      if (!sharedContextLockedRef.current && requestId === journalRequestId.current && journalContextRef.current === context) {
+        setJournalError(typeof cause === "string" ? cause : "성장 일지를 불러오지 못했습니다.");
+      }
     } finally {
-      setJournalBusy(false);
+      if (!sharedContextLockedRef.current && requestId === journalRequestId.current && journalContextRef.current === context) setJournalBusy(false);
     }
   }
 
   async function deleteGrowthJournal() {
+    if (sharedContextLockedRef.current) return;
+    const context = journalContext;
+    const requestId = ++journalRequestId.current;
     setJournalBusy(true);
     setJournalError("");
     try {
       const value = await invoke<GrowthJournalData>("delete_growth_journal");
+      if (sharedContextLockedRef.current || requestId !== journalRequestId.current || journalContextRef.current !== context) return;
       setJournal(value);
-      setJournalOwner(shared?.user_id ?? "local");
+      setJournalOwner(context);
     } catch (cause) {
-      setJournalError(typeof cause === "string" ? cause : "개인 일지를 삭제하지 못했습니다.");
+      if (!sharedContextLockedRef.current && requestId === journalRequestId.current && journalContextRef.current === context) {
+        setJournalError(typeof cause === "string" ? cause : "개인 일지를 삭제하지 못했습니다.");
+      }
     } finally {
-      setJournalBusy(false);
+      if (!sharedContextLockedRef.current && requestId === journalRequestId.current && journalContextRef.current === context) setJournalBusy(false);
     }
   }
 
@@ -475,8 +644,8 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [planet.can_reset, planet.reset_available_at_utc]);
   useEffect(() => {
-    if (journalOpen) void loadGrowthJournal();
-  }, [journalOpen, shared?.user_id]);
+    if (featureWindow === "growth-journal" && !sharedContextLockedRef.current) void loadGrowthJournal();
+  }, [featureWindow, journalContext, sharedLoading]);
   if (snapshot && !profile) {
     return <>
       <PlanetProfileSetup busy={planetBusy || sourceBusy !== null || refreshing} onSave={saveProfile} />
@@ -497,6 +666,75 @@ function App() {
       </>}
     </main>
   );
+
+  if (featureWindow === "cosmetic-shop") {
+    return (
+      <main className="app-shell app-shell--feature-window">
+        <header className="topbar">
+          <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>행성 꾸미기</span></div>
+          <button className="icon-button" type="button" onClick={refresh} disabled={refreshing || sourceBusy !== null || planetBusy} aria-busy={refreshing || undefined} aria-label={refreshing ? "사용량을 갱신하는 중" : "사용량 새로고침"} title="사용량 새로고침">↻</button>
+        </header>
+        <div className="feature-window-content shop-window-content">
+          <section className="shop-planet-preview" aria-label="행성 미리보기">
+            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} animate incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
+            <div className="shop-planet-preview-copy">
+              <h1>{profile!.nickname}의 행성</h1>
+              <p>장식 미리보기를 눌러 행성 모습을 확인하세요.</p>
+              <strong>{STAGE_NAMES[planet.stage] ?? STAGE_NAMES[4]}</strong>
+            </div>
+          </section>
+          <section className="shop-window-store" aria-label="행성 꾸미기 상점">
+            {cosmeticShop && <CosmeticShop
+              key={cosmeticShopContext}
+              state={cosmeticShop}
+              onPurchase={purchaseCosmetic}
+              onEquip={equipCosmetic}
+              onPreviewChange={updateCosmeticPreview}
+              onRefresh={refreshCosmeticShop}
+              actionsDisabled={featureActionsBlocked}
+              showCollapseButton={false}
+              initiallyOpen
+            />}
+            {featureActionsBlocked
+              ? <LoadingStatus className="cosmetic-load-state" label="계정과 행성 상태를 확인하고 있습니다." />
+              : cosmeticShopLoadingContext === cosmeticShopContext
+              ? <LoadingStatus className="cosmetic-load-state" label={cosmeticShop ? "상점 상태를 갱신하고 있습니다." : "상점을 불러오고 있습니다."} />
+              : !cosmeticShop && !cosmeticShopError && <LoadingStatus className="cosmetic-load-state" label="상점을 불러오고 있습니다." />}
+          </section>
+          <div className="app-feedback">
+            {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
+            {sharingError && <p className="error-note" role="alert">{sharingError} <button className="error-retry" type="button" onClick={() => void refresh()} disabled={refreshing}>다시 확인</button></p>}
+            {cosmeticShopError && <p className="error-note" role="alert"><span>{cosmeticShopError}</span> <button className="error-retry" type="button" onClick={() => void retryLoadCosmeticShop()}>다시 불러오기</button></p>}
+          </div>
+        </div>
+      </main>
+    );
+  }
+
+  if (featureWindow === "growth-journal") {
+    return (
+      <main className="app-shell app-shell--feature-window">
+        <header className="topbar">
+          <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>Token Planet</span></div>
+          <button className="icon-button" type="button" onClick={() => sharedContextLockedRef.current ? void refresh() : void loadGrowthJournal()} disabled={refreshing || (journalBusy && !featureActionsBlocked)} aria-busy={refreshing || journalBusy || undefined} aria-label={featureActionsBlocked ? "계정 상태 다시 확인" : "성장 일지 새로고침"} title={featureActionsBlocked ? "계정 상태 다시 확인" : "성장 일지 새로고침"}>↻</button>
+        </header>
+        <div className="feature-window-content growth-journal-window-content">
+          {featureActionsBlocked && <LoadingStatus label="계정과 행성 상태를 확인하고 있습니다." />}
+          {journalBusy && <LoadingStatus label={journal ? "기록 동기화를 기다리며 성장 일지를 갱신하고 있습니다." : "기록 동기화를 기다리며 성장 일지를 불러오고 있습니다."} />}
+          {journal && journalOwner === journalContext && <GrowthJournal
+            journal={journal}
+            busy={journalBusy || featureActionsBlocked}
+            error={journalError}
+            canDelete={!featureActionsBlocked && (shared?.phase === "signed_in" || shared?.phase === "shared")}
+            onReload={() => void loadGrowthJournal()}
+            onDelete={() => void deleteGrowthJournal()}
+          />}
+          {!journal && !journalBusy && journalError && <p className="error-note" role="alert">{journalError} <button className="error-retry" type="button" onClick={() => void loadGrowthJournal()} disabled={featureActionsBlocked}>다시 불러오기</button></p>}
+          {sharingError && <p className="error-note" role="alert">{sharingError} <button className="error-retry" type="button" onClick={() => void refresh()} disabled={refreshing}>다시 확인</button></p>}
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className={`app-shell ${detail ? "app-shell--detail" : "app-shell--popover"}`} aria-label={detail ? undefined : "행성 팝오버"}>
@@ -570,39 +808,14 @@ function App() {
                 </div>
               </section>
               <UsageSummary snapshot={view} />
-              {cosmeticShop && <CosmeticShop
-                  state={cosmeticShop}
-                  onPurchase={purchaseCosmetic}
-                  onEquip={equipCosmetic}
-                  onPreviewChange={setCosmeticPreview}
-                  onRefresh={refreshCosmeticShop}
-                />}
-              {cosmeticShopLoadingContext === cosmeticShopContext
-                ? <LoadingStatus className="cosmetic-load-state" label={cosmeticShop ? "상점 상태를 갱신하고 있습니다." : "상점을 불러오고 있습니다."} />
-                : !cosmeticShop && !cosmeticShopError && <LoadingStatus className="cosmetic-load-state" label="상점을 불러오고 있습니다." />}
+              <div className="planet-feature-actions" aria-label="행성 도구">
+                <button type="button" disabled={featureActionsBlocked} onClick={() => void launchFeatureWindow("cosmetic-shop")}>행성 꾸미기</button>
+                <button type="button" disabled={featureActionsBlocked} onClick={() => void launchFeatureWindow("growth-journal")}>성장 일지 보기</button>
+              </div>
               <div className="source-list" aria-label="수집 상태">
                 <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "codex"} error={sourceError?.agent === "codex" ? sourceError.message : undefined} />
                 <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "claude_code"} error={sourceError?.agent === "claude_code" ? sourceError.message : undefined} />
               </div>
-              <button
-                className="growth-journal-entry-button"
-                type="button"
-                aria-expanded={journalOpen}
-                onClick={() => setJournalOpen((open) => !open)}
-              >
-                {journalOpen ? "성장 일지 접기" : "성장 일지 보기"}
-              </button>
-              {journalOpen && <>
-                {journalBusy && <LoadingStatus label={journal ? "기록 동기화를 기다리며 성장 일지를 갱신하고 있습니다." : "기록 동기화를 기다리며 성장 일지를 불러오고 있습니다."} />}
-                {journal && journalOwner === (shared?.user_id ?? "local") && <GrowthJournal
-                  journal={journal}
-                  busy={journalBusy}
-                  error={journalError}
-                  canDelete={shared?.phase === "signed_in" || shared?.phase === "shared"}
-                  onReload={() => void loadGrowthJournal()}
-                  onDelete={() => void deleteGrowthJournal()}
-                />}
-              </>}
               <div className="reset-row">
                 <span className="reset-note">확인된 이번 행성 토큰은 지갑에 적립되며, 행성을 자연 생태계부터 다시 시작합니다.{!canReset && planet.reset_available_at_utc && <><br />다음 초기화 가능: {new Date(planet.reset_available_at_utc).toLocaleString("ko-KR")}</>}</span>
                 <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!canReset || planetBusy || sourceBusy !== null || refreshing}>{planetBusy ? "처리 중" : "행성 초기화"}</button>
@@ -641,6 +854,7 @@ function App() {
           {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
           {planetError && <p className="error-note" role="alert">{planetError}</p>}
           {sharingError && <p className="error-note" role="alert">{sharingError}</p>}
+          {featureWindowError && <p className="error-note" role="alert"><span>{featureWindowError}</span>{featureWindowRetry && <> <button className="error-retry" type="button" onClick={() => void launchFeatureWindow(featureWindowRetry)}>다시 시도</button></>}</p>}
           {cosmeticShopError && <p className="error-note" role="alert"><span>{cosmeticShopError}</span> <button className="error-retry" type="button" onClick={() => void retryLoadCosmeticShop()}>다시 불러오기</button></p>}
           {journalError && <p className="error-note" role="alert">{journalError} <button className="error-retry" type="button" onClick={() => void loadGrowthJournal()}>다시 불러오기</button></p>}
         </div>

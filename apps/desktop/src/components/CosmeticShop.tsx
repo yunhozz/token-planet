@@ -15,6 +15,9 @@ type CosmeticShopProps = {
   onEquip: (slotId: string, sku: string | null, cycleId: string, expectedVersion: number) => Promise<CosmeticEquipAction>;
   onPreviewChange: (equipped: EquippedCosmetic[] | null) => void;
   onRefresh: () => Promise<CosmeticShopState>;
+  initiallyOpen?: boolean;
+  actionsDisabled?: boolean;
+  showCollapseButton?: boolean;
   supportedSlots?: string[];
   supportedSkus?: string[];
 };
@@ -54,10 +57,13 @@ export function CosmeticShop({
   onEquip,
   onPreviewChange,
   onRefresh,
+  initiallyOpen = false,
+  actionsDisabled = false,
+  showCollapseButton = true,
   supportedSlots = SUPPORTED_SLOTS,
   supportedSkus = SUPPORTED_SKUS,
 }: CosmeticShopProps) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(initiallyOpen);
   const [tab, setTab] = useState<"shop" | "inventory">("shop");
   const [confirmSku, setConfirmSku] = useState<string | null>(null);
   const [busySku, setBusySku] = useState<string | null>(null);
@@ -82,6 +88,11 @@ export function CosmeticShop({
   const availableBalance = state.available_balance;
   const slotUnavailableReason = state.action_unavailable_reason
     ?? (state.guest_import_pending ? state.guest_import_error : null);
+  const equipmentSignature = JSON.stringify([
+    state.current_cycle_id,
+    state.equipped.map(({ slot_id, sku, version }) => [slot_id, sku, version]),
+    state.slot_versions,
+  ]);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -95,7 +106,13 @@ export function CosmeticShop({
     }
   }, [confirmSku]);
 
+  useEffect(() => {
+    setPreviewBySlot({});
+    onPreviewChange(null);
+  }, [equipmentSignature]);
+
   function preview(product: CosmeticProduct) {
+    if (actionsDisabled) return;
     const item = {
       slot_id: product.slot_id,
       sku: product.sku,
@@ -115,6 +132,7 @@ export function CosmeticShop({
   }
 
   async function confirmPurchase(product: CosmeticProduct) {
+    if (actionsDisabled) return;
     setBusySku(product.sku);
     setConfirmSku(null);
     setNotice("");
@@ -129,6 +147,7 @@ export function CosmeticShop({
   }
 
   async function equip(slotId: string, sku: string | null) {
+    if (actionsDisabled) return;
     setBusySlot(slotId);
     setNotice("");
     try {
@@ -146,6 +165,7 @@ export function CosmeticShop({
   }
 
   async function refreshShop() {
+    if (actionsDisabled) return;
     setRefreshing(true);
     try {
       await onRefresh();
@@ -160,7 +180,7 @@ export function CosmeticShop({
   }
 
   if (!open) {
-    return <button className="cosmetic-entry" type="button" onClick={() => { setOpen(true); void refreshShop(); }}>행성 꾸미기</button>;
+    return <button className="cosmetic-entry" type="button" disabled={actionsDisabled} onClick={() => { setOpen(true); void refreshShop(); }}>행성 꾸미기</button>;
   }
 
   return (
@@ -170,7 +190,7 @@ export function CosmeticShop({
           <p className="cosmetic-shop-kicker">외형 장식</p>
           <h2>행성 꾸미기</h2>
         </div>
-        <button className="cosmetic-close" type="button" onClick={() => { clearPreview(); setOpen(false); }} aria-label="상점 닫기">닫기</button>
+        {showCollapseButton && <button className="cosmetic-close" type="button" onClick={() => { clearPreview(); setOpen(false); }} aria-label="상점 닫기">닫기</button>}
       </div>
 
       <div className="cosmetic-balance">
@@ -197,7 +217,7 @@ export function CosmeticShop({
                 {visibleProducts.map((product) => {
                   const equipped = state.equipped.some((item) => item.slot_id === slot.slot_id && item.sku === product.sku);
                   const canBuy = product.purchasable && !owned.has(product.sku)
-                    && availableBalance >= product.price && !slotUnavailableReason && !busySku;
+                    && availableBalance >= product.price && !slotUnavailableReason && !busySku && !actionsDisabled;
                   return (
                     <li className="cosmetic-item" key={product.sku}>
                       <div className="cosmetic-item-copy">
@@ -205,7 +225,7 @@ export function CosmeticShop({
                         <span><FormattedNumber value={product.price} /> 토큰</span>
                       </div>
                       <div className="cosmetic-item-actions">
-                        <button className="cosmetic-secondary" type="button" onClick={() => preview(product)} aria-label={`${product.display_name} 미리보기`}>미리보기</button>
+                        <button className="cosmetic-secondary" type="button" disabled={actionsDisabled} onClick={() => preview(product)} aria-label={`${product.display_name} 미리보기`}>미리보기</button>
                         {tab === "shop" ? (
                           owned.has(product.sku)
                             ? <span className="cosmetic-owned">보유 중</span>
@@ -221,7 +241,7 @@ export function CosmeticShop({
                           <button
                             className={equipped ? "cosmetic-secondary" : "cosmetic-primary"}
                             type="button"
-                            disabled={Boolean(slotUnavailableReason) || busySlot === slot.slot_id}
+                            disabled={actionsDisabled || Boolean(slotUnavailableReason) || busySlot === slot.slot_id}
                             onClick={() => void equip(slot.slot_id, equipped ? null : product.sku)}
                             aria-label={`${product.display_name} ${equipped ? "해제" : "장착"}`}
                           >{equipped ? "해제" : busySlot === slot.slot_id ? "확인 중" : "장착"}</button>
@@ -247,10 +267,10 @@ export function CosmeticShop({
       <div className="cosmetic-footer">
         {slotUnavailableReason && <>
           <p className="cosmetic-unavailable" role="status">{slotUnavailableReason}</p>
-          <button className="cosmetic-reset-preview" type="button" disabled={refreshing} onClick={() => void refreshShop()}>{refreshing ? "확인 중" : "상점 다시 확인"}</button>
+          <button className="cosmetic-reset-preview" type="button" disabled={actionsDisabled || refreshing} onClick={() => void refreshShop()}>{refreshing ? "확인 중" : "상점 다시 확인"}</button>
         </>}
         {notice && <p className="cosmetic-notice" role="status">{notice}</p>}
-        {Object.keys(previewBySlot).length > 0 && <button className="cosmetic-reset-preview" type="button" onClick={clearPreview}>현재 장착으로 되돌리기</button>}
+        {Object.keys(previewBySlot).length > 0 && <button className="cosmetic-reset-preview" type="button" disabled={actionsDisabled} onClick={clearPreview}>현재 장착으로 되돌리기</button>}
       </div>
 
       {confirmSku && (() => {
@@ -271,7 +291,7 @@ export function CosmeticShop({
               <p>구매 후 잔액 <FormattedNumber value={afterPurchase} /> 토큰</p>
               <div className="cosmetic-confirm-actions">
                 <button type="button" className="cosmetic-secondary" onClick={() => setConfirmSku(null)}>취소</button>
-                <button type="button" className="cosmetic-primary" disabled={Boolean(slotUnavailableReason) || availableBalance < product.price} onClick={() => void confirmPurchase(product)}>구매 확인</button>
+                <button type="button" className="cosmetic-primary" disabled={actionsDisabled || Boolean(slotUnavailableReason) || availableBalance < product.price} onClick={() => void confirmPurchase(product)}>구매 확인</button>
               </div>
             </dialog>
         );
