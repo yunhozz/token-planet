@@ -203,6 +203,8 @@ impl Ledger {
                 cache_read_tokens INTEGER, cache_write_tokens INTEGER,
                 total_tokens INTEGER, coverage TEXT NOT NULL, parser_version INTEGER NOT NULL
             );
+            CREATE INDEX IF NOT EXISTS usage_record_source_agent_kind
+                ON usage_record(source_id, agent, kind);
             CREATE TABLE IF NOT EXISTS daily_agent_total (
                 agent TEXT NOT NULL, bucket_date TEXT NOT NULL,
                 total_tokens INTEGER, coverage TEXT NOT NULL,

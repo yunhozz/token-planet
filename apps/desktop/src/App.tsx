@@ -4,6 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { InvitePanel } from "./components/InvitePanel";
 import { GrowthJournal } from "./components/GrowthJournal";
 import { FormattedNumber } from "./components/FormattedNumber";
+import { LoadingStatus } from "./components/LoadingStatus";
 import { PlanetProfileSetup } from "./components/PlanetProfileSetup";
 import { objectName, objectProgress, PlanetScene, STAGE_NAMES } from "./components/PlanetScene";
 import { SharingSetup } from "./components/SharingSetup";
@@ -42,13 +43,31 @@ function App() {
   const [transitionTarget, setTransitionTarget] = useState<boolean | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [shared, setShared] = useState<SharingState | null>(null);
-  const [memberCode, setMemberCode] = useState<string | null>(null);
-  const [members, setMembers] = useState<WorldMember[]>([]);
-  const [newOwnerId, setNewOwnerId] = useState("");
+  const [sharedLoading, setSharedLoading] = useState(true);
+  const sharedRequestId = useRef(0);
+  const sharedPhase = shared?.phase ?? null;
+  const sharedUserId = shared?.user_id ?? null;
+  const sharedWorldId = shared?.world?.id ?? null;
+  const sharedIsOwner = shared?.world?.is_owner ?? false;
+  const sharedMemberCount = shared?.world?.member_count ?? null;
+  const memberContext = JSON.stringify([sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner]);
+  const memberListContext = JSON.stringify([memberContext, sharedMemberCount]);
+  const [memberCodeEntry, setMemberCodeEntry] = useState<{ context: string; value: string } | null>(null);
+  const [memberCodeLoadedContext, setMemberCodeLoadedContext] = useState<string | null>(null);
+  const [membersEntry, setMembersEntry] = useState<{ context: string; value: WorldMember[] } | null>(null);
+  const [newOwnerEntry, setNewOwnerEntry] = useState<{ context: string; value: string } | null>(null);
+  const memberCode = memberCodeEntry?.context === memberContext ? memberCodeEntry.value : null;
+  const members = membersEntry?.context === memberListContext ? membersEntry.value : [];
+  const newOwnerId = newOwnerEntry?.context === memberContext ? newOwnerEntry.value : "";
+  const setNewOwnerId = (value: string) => setNewOwnerEntry({ context: memberContext, value });
   const [sharingBusy, setSharingBusy] = useState(false);
   const [sharingError, setSharingError] = useState("");
   const [planetBusy, setPlanetBusy] = useState(false);
   const [planetError, setPlanetError] = useState("");
+  const [sourceBusy, setSourceBusy] = useState<Agent | null>(null);
+  const sourceBusyRef = useRef<Agent | null>(null);
+  const [sourceError, setSourceError] = useState<{ agent: Agent; message: string } | null>(null);
+  const [memberRefreshRevision, setMemberRefreshRevision] = useState(0);
   const [resetCheckAt, setResetCheckAt] = useState(0);
   const [journalOpen, setJournalOpen] = useState(false);
   const [journal, setJournal] = useState<GrowthJournalData | null>(null);
@@ -69,11 +88,28 @@ function App() {
 
   useEffect(() => {
     let active = true;
-    sharing.state().then((value) => { if (active) setShared(value); })
-      .catch(() => { if (active) setSharingError("공동 세계 연결을 확인하세요."); })
-      .then(() => invoke<WorldSnapshot | null>("current_usage"))
-      .then((value) => { if (active) setSnapshot(value); })
-      .catch(() => { if (active) setError(true); });
+    const refreshSharedContext = async () => {
+      const requestId = ++sharedRequestId.current;
+      setSharedLoading(true);
+      try {
+        try {
+          const value = await sharing.state();
+          if (active && requestId === sharedRequestId.current) {
+            setShared(value);
+            setSharingError("");
+          }
+        } catch {
+          if (active && requestId === sharedRequestId.current) setSharingError("공동 세계 연결을 확인하세요.");
+        }
+        const value = await invoke<WorldSnapshot | null>("current_usage");
+        if (active && requestId === sharedRequestId.current) setSnapshot(value);
+      } catch {
+        if (active && requestId === sharedRequestId.current) setError(true);
+      } finally {
+        if (active && requestId === sharedRequestId.current) setSharedLoading(false);
+      }
+    };
+    void refreshSharedContext();
     const unlisten = listen<WorldSnapshot>("usage-updated", (event) => {
       if (active) { setSnapshot(event.payload); setError(false); }
     }).catch(() => () => {});
@@ -85,14 +121,19 @@ function App() {
       }
     }).catch(() => () => {});
     const unlistenSync = listen("sync-status-updated", () => {
-      void sharing.state().then((value) => { if (active) setShared(value); }).catch(() => {});
-      void invoke<WorldSnapshot | null>("current_usage").then((value) => { if (active && value) setSnapshot(value); }).catch(() => {});
+      void refreshSharedContext();
       const context = cosmeticShopContextRef.current;
       void invoke<CosmeticShopState>("get_shop_state")
         .then((value) => { if (active) storeCosmeticShop(context, value); })
         .catch(() => {});
     }).catch(() => () => {});
-    return () => { active = false; void unlisten.then((stop) => stop()); void unlistenCompact.then((stop) => stop()); void unlistenSync.then((stop) => stop()); };
+    return () => {
+      active = false;
+      sharedRequestId.current += 1;
+      void unlisten.then((stop) => stop());
+      void unlistenCompact.then((stop) => stop());
+      void unlistenSync.then((stop) => stop());
+    };
   }, []);
 
   useEffect(() => {
@@ -107,30 +148,46 @@ function App() {
   }, [detail]);
 
   useEffect(() => {
-    if (shared?.phase !== "shared") {
-      setMemberCode(null);
-      setMembers([]);
-      setNewOwnerId("");
+    const context = JSON.stringify([sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner]);
+    const listContext = JSON.stringify([context, sharedMemberCount]);
+    setMemberCodeEntry((current) => current?.context === context ? current : null);
+    setMembersEntry(null);
+    setNewOwnerEntry({ context, value: "" });
+    if (sharedPhase !== "shared") {
       return;
     }
     let active = true;
-    setMemberCode(null);
-    sharing.getMyMemberCode().then((value) => { if (active) setMemberCode(value); }).catch((cause) => {
-      if (active) setSharingError(typeof cause === "string" ? cause : "내 개인 코드를 불러오지 못했습니다.");
+    sharing.getMyMemberCode().then((value) => {
+      if (active) {
+        setMemberCodeEntry({ context, value });
+        setMemberCodeLoadedContext(context);
+      }
+    }).catch((cause) => {
+      if (active) {
+        setMemberCodeLoadedContext(context);
+        setSharingError(typeof cause === "string" ? cause : "내 개인 코드를 불러오지 못했습니다.");
+      }
     });
-    if (shared.world?.is_owner) {
+    if (sharedIsOwner) {
       sharing.listMembers().then((value) => {
         if (active) {
-          setMembers(value);
-          setNewOwnerId((current) => value.some((member) => member.user_id === current && member.role === "member") ? current : "");
+          setMembersEntry({ context: listContext, value });
+          setNewOwnerEntry((current) => {
+            const currentId = current?.context === context ? current.value : "";
+            return { context, value: value.some((member) => member.user_id === currentId && member.role === "member") ? currentId : "" };
+          });
         }
-      }).catch(() => {});
+      }).catch(() => {
+        if (active) {
+          setMembersEntry({ context: listContext, value: [] });
+          setSharingError("참여자 목록을 불러오지 못했습니다.");
+        }
+      });
     } else {
-      setMembers([]);
-      setNewOwnerId("");
+      setMembersEntry({ context: listContext, value: [] });
     }
     return () => { active = false; };
-  }, [shared]);
+  }, [sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner, sharedMemberCount, memberRefreshRevision]);
 
   useEffect(() => {
     const context = cosmeticShopContext;
@@ -146,6 +203,7 @@ function App() {
 
   async function changeSharing(action: () => Promise<SharingState>) {
     setSharingBusy(true);
+    setSharedLoading(true);
     setSharingError("");
     try { setShared(await action()); }
     catch (cause) { setSharingError(typeof cause === "string" ? cause : "공동 세계 요청을 완료하지 못했습니다."); }
@@ -153,29 +211,37 @@ function App() {
       try { setSnapshot(await invoke<WorldSnapshot | null>("current_usage")); }
       catch { setError(true); }
       setSharingBusy(false);
+      setSharedLoading(false);
     }
   }
 
   async function rotateMemberCode() {
+    const context = memberContext;
     setSharingBusy(true);
     setSharingError("");
     try {
-      setMemberCode(await sharing.rotateMyMemberCode());
+      setMemberCodeEntry({ context, value: await sharing.rotateMyMemberCode() });
     } catch (cause) { setSharingError(typeof cause === "string" ? cause : "초대 코드를 다시 발급하지 못했습니다."); }
     finally { setSharingBusy(false); }
   }
 
   async function refresh() {
+    if (sourceBusyRef.current !== null || refreshing || planetBusy) return;
     setRefreshing(true);
+    setSharedLoading(true);
     try {
       setSnapshot(await invoke<WorldSnapshot>("refresh_usage"));
-      try { setShared(await sharing.state()); } catch { setSharingError("공동 세계 연결을 확인하세요."); }
+      try {
+        setShared(await sharing.state());
+        setMemberRefreshRevision((revision) => revision + 1);
+      } catch { setSharingError("공동 세계 연결을 확인하세요."); }
       setError(false);
     } catch { setError(true); }
-    finally { setRefreshing(false); }
+    finally { setRefreshing(false); setSharedLoading(false); }
   }
 
   async function saveProfile(nickname: string, avatar: PlanetAvatar) {
+    if (sourceBusyRef.current !== null || refreshing || planetBusy) return;
     setPlanetBusy(true);
     setPlanetError("");
     try { setSnapshot(await invoke<WorldSnapshot>("set_planet_profile", { nickname, avatar })); }
@@ -184,6 +250,7 @@ function App() {
   }
 
   async function resetPlanet() {
+    if (sourceBusyRef.current !== null || refreshing || planetBusy) return;
     if (!window.confirm("현재 행성을 초기화할까요? 확인된 이번 행성 토큰은 지갑에 적립되고, 자연 생태계부터 다시 시작합니다.")) return;
     setPlanetBusy(true);
     setPlanetError("");
@@ -192,16 +259,30 @@ function App() {
     finally { setPlanetBusy(false); }
   }
 
+  async function runSourceAction(agent: Agent, fallback: string, action: () => Promise<WorldSnapshot | null>) {
+    if (sourceBusyRef.current !== null || refreshing || planetBusy) return;
+    sourceBusyRef.current = agent;
+    setSourceBusy(agent);
+    setSourceError(null);
+    try {
+      const updated = await action();
+      if (updated) { setSnapshot(updated); setError(false); }
+    } catch (cause) {
+      setSourceError({ agent, message: typeof cause === "string" ? cause : fallback });
+    } finally {
+      sourceBusyRef.current = null;
+      setSourceBusy(null);
+    }
+  }
+
   async function toggleSource(agent: Agent, enabled: boolean) {
-    try { setSnapshot(await invoke<WorldSnapshot>("set_source_enabled", { agent, enabled })); setError(false); }
-    catch { setError(true); }
+    await runSourceAction(agent, "기록 사용 설정을 변경하지 못했습니다.", () =>
+      invoke<WorldSnapshot>("set_source_enabled", { agent, enabled }));
   }
 
   async function selectFolder(agent: Agent) {
-    try {
-      const updated = await invoke<WorldSnapshot | null>("choose_source_folder", { agent });
-      if (updated) { setSnapshot(updated); setError(false); }
-    } catch { setError(true); }
+    await runSourceAction(agent, "기록 폴더를 변경하지 못했습니다.", () =>
+      invoke<WorldSnapshot | null>("choose_source_folder", { agent }));
   }
 
   async function purchaseCosmetic(sku: string): Promise<CosmeticPurchaseAction> {
@@ -326,18 +407,19 @@ function App() {
   }, [journalOpen, shared?.user_id]);
   if (snapshot && !profile) {
     return <>
-      <PlanetProfileSetup busy={planetBusy} onSave={saveProfile} />
+      <PlanetProfileSetup busy={planetBusy || sourceBusy !== null || refreshing} onSave={saveProfile} />
       {planetError && <p className="error-note setup-error" role="alert">{planetError}</p>}
     </>;
   }
-  if (!snapshot) return <main className="setup-screen"><div className="setup-mark" aria-hidden="true"><span /></div><p className="pixel-kicker">Token Planet</p><h1>행성 기록을 불러오고 있습니다</h1>{error && <p className="error-note" role="alert">기기 안의 사용량 원장을 열지 못했습니다.</p>}</main>;
+  if (!snapshot) return <main className="setup-screen"><div className="setup-mark" aria-hidden="true"><span /></div><p className="pixel-kicker">Token Planet</p><h1>행성 기록을 불러오고 있습니다</h1><LoadingStatus label="기기 안의 사용량 원장을 읽고 있습니다." />{error && <p className="error-note" role="alert">기기 안의 사용량 원장을 열지 못했습니다.</p>}</main>;
 
   return (
     <main className={`app-shell ${detail ? "app-shell--detail" : "app-shell--popover"}`} aria-label={detail ? undefined : "행성 팝오버"}>
       <header className="topbar">
         <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>Token Planet</span></div>
-        <button className="icon-button" type="button" onClick={refresh} disabled={refreshing} aria-label="사용량 새로고침" title="사용량 새로고침">↻</button>
+        <button className="icon-button" type="button" onClick={refresh} disabled={refreshing || sourceBusy !== null || planetBusy} aria-busy={refreshing || undefined} aria-label={refreshing ? "사용량을 갱신하는 중" : "사용량 새로고침"} title="사용량 새로고침">↻</button>
       </header>
+      {refreshing && <LoadingStatus className="loading-status--refresh" label="사용량 기록을 갱신하고 있습니다." />}
       <div className="world-layout">
         {!detail ? <>
           <section className="world-visual" aria-label="나의 행성">
@@ -411,10 +493,10 @@ function App() {
                   onPreviewChange={setCosmeticPreview}
                   onRefresh={refreshCosmeticShop}
                 />
-                : !cosmeticShopError && <div className="cosmetic-load-state" role="status"><p>상점을 불러오고 있습니다.</p></div>}
+                : !cosmeticShopError && <LoadingStatus className="cosmetic-load-state" label="상점을 불러오고 있습니다." />}
               <div className="source-list" aria-label="수집 상태">
-                <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} onToggle={toggleSource} onSelectFolder={selectFolder} />
-                <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} onToggle={toggleSource} onSelectFolder={selectFolder} />
+                <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "codex"} error={sourceError?.agent === "codex" ? sourceError.message : undefined} />
+                <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "claude_code"} error={sourceError?.agent === "claude_code" ? sourceError.message : undefined} />
               </div>
               <button
                 className="growth-journal-entry-button"
@@ -425,7 +507,7 @@ function App() {
                 {journalOpen ? "성장 일지 접기" : "성장 일지 보기"}
               </button>
               {journalOpen && <>
-                {journalBusy && !journal && <p className="growth-journal-empty">성장 일지를 불러오는 중입니다.</p>}
+                {journalBusy && <LoadingStatus label={journal ? "성장 일지를 갱신하고 있습니다." : "성장 일지를 불러오고 있습니다."} />}
                 {journal && journalOwner === (shared?.user_id ?? "local") && <GrowthJournal
                   journal={journal}
                   busy={journalBusy}
@@ -437,23 +519,29 @@ function App() {
               </>}
               <div className="reset-row">
                 <span className="reset-note">확인된 이번 행성 토큰은 지갑에 적립되며, 행성을 자연 생태계부터 다시 시작합니다.{!canReset && planet.reset_available_at_utc && <><br />다음 초기화 가능: {new Date(planet.reset_available_at_utc).toLocaleString("ko-KR")}</>}</span>
-                <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!canReset || planetBusy}>{planetBusy ? "처리 중" : "행성 초기화"}</button>
+                <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!canReset || planetBusy || sourceBusy !== null || refreshing}>{planetBusy ? "처리 중" : "행성 초기화"}</button>
               </div>
             </div>
           </section> : <section id="panel-group" className="detail-panel group-panel" role="tabpanel" aria-labelledby="tab-group" tabIndex={0}>
             <div className="sharing-stack">
-              {shared?.phase === "shared" && shared.world && <WorldCommunity name={shared.world.name} members={shared.planet_members ?? []} />}
-              {(shared?.phase === "signed_out" || shared?.phase === "signed_in") && <SharingSetup phase={shared.phase} initialNickname={profile?.nickname ?? ""} busy={sharingBusy} onStartAnonymousSession={() => changeSharing(sharing.startAnonymousSession)} onCreateWorld={(name, nickname) => changeSharing(() => sharing.createWorld(name, nickname))} onJoinWorld={(code, nickname) => changeSharing(() => sharing.joinWorld(code, nickname))} />}
-              {shared?.phase === "shared" && shared.world && <>
-                <InvitePanel memberCount={shared.world.member_count} isOwner={shared.world.is_owner} memberCode={memberCode} busy={sharingBusy} onRotate={rotateMemberCode} />
-                <section className="sharing-panel sharing-manage" aria-label="세계 관리">
-                  <h2>세계 관리</h2>
-                  {shared.world.is_owner && shared.world.member_count > 1 && <div className="owner-transfer"><label htmlFor="new-owner">소유권을 넘길 참여자</label><select id="new-owner" value={newOwnerId} onChange={(event) => setNewOwnerId(event.target.value)}><option value="">참여자 선택</option>{members.filter((member) => member.role === "member").map((member) => <option key={member.user_id} value={member.user_id}>참여자 {member.user_id.slice(-8)}</option>)}</select><button type="button" disabled={!newOwnerId || sharingBusy} onClick={() => void changeSharing(() => sharing.transferOwner(newOwnerId))}>소유권 이전</button></div>}
-                  <button type="button" disabled={sharingBusy} onClick={() => { if (window.confirm("공동 세계의 내 집계를 삭제하고 동기화를 일시정지할까요?")) void changeSharing(sharing.deleteUsage); }}>공유된 내 집계 삭제</button>
-                  <button type="button" disabled={sharingBusy} onClick={() => { if (window.confirm("이 세계에서 나갈까요? 공유한 내 집계도 삭제됩니다.")) void changeSharing(sharing.leave); }}>세계에서 나가기</button>
-                </section>
-              </>}
-              {shared?.phase === "unavailable" && <p className="detail-note">공동 세계 서버 설정을 확인하세요. 나의 행성은 이 기기에서 계속 자랍니다.</p>}
+              {sharedLoading && <LoadingStatus label="그룹 정보를 불러오고 있습니다." />}
+                {shared?.phase === "shared" && shared.world && <>
+                  <WorldCommunity name={shared.world.name} members={shared.planet_members ?? []} />
+                  {((sharedPhase === "shared" && memberCodeLoadedContext !== memberContext) || (sharedIsOwner && membersEntry?.context !== memberListContext))
+                    ? <LoadingStatus label="초대 및 참여자 정보를 불러오고 있습니다." />
+                    : <>
+                      <InvitePanel memberCount={shared.world.member_count} isOwner={shared.world.is_owner} memberCode={memberCode} busy={sharingBusy} onRotate={rotateMemberCode} />
+                      <section className="sharing-panel sharing-manage" aria-label="세계 관리">
+                        <h2>세계 관리</h2>
+                        {shared.world.is_owner && shared.world.member_count > 1 && <div className="owner-transfer"><label htmlFor="new-owner">소유권을 넘길 참여자</label><select id="new-owner" value={newOwnerId} onChange={(event) => setNewOwnerId(event.target.value)}><option value="">참여자 선택</option>{members.filter((member) => member.role === "member").map((member) => <option key={member.user_id} value={member.user_id}>참여자 {member.user_id.slice(-8)}</option>)}</select><button type="button" disabled={!newOwnerId || sharingBusy} onClick={() => void changeSharing(() => sharing.transferOwner(newOwnerId))}>소유권 이전</button></div>}
+                        <button type="button" disabled={sharingBusy} onClick={() => { if (window.confirm("공동 세계의 내 집계를 삭제하고 동기화를 일시정지할까요?")) void changeSharing(sharing.deleteUsage); }}>공유된 내 집계 삭제</button>
+                        <button type="button" disabled={sharingBusy} onClick={() => { if (window.confirm("이 세계에서 나갈까요? 공유한 내 집계도 삭제됩니다.")) void changeSharing(sharing.leave); }}>세계에서 나가기</button>
+                      </section>
+                    </>}
+                </>}
+                {(shared?.phase === "signed_out" || shared?.phase === "signed_in") && <SharingSetup phase={shared.phase} initialNickname={profile?.nickname ?? ""} busy={sharingBusy} onStartAnonymousSession={() => changeSharing(sharing.startAnonymousSession)} onCreateWorld={(name, nickname) => changeSharing(() => sharing.createWorld(name, nickname))} onJoinWorld={(code, nickname) => changeSharing(() => sharing.joinWorld(code, nickname))} />}
+                {shared?.phase === "unavailable" && <p className="detail-note">공동 세계 서버 설정을 확인하세요. 나의 행성은 이 기기에서 계속 자랍니다.</p>}
+                {!shared && !sharedLoading && <p className="detail-note">공동 세계 정보를 확인하지 못했습니다.</p>}
               <details className="privacy-disclosure">
                 <summary>그룹에는 행성 모습과 집계값만 공유됩니다</summary>
                 <p>그룹 멤버에게는 닉네임, 아바타, 행성 모습, 이번 행성 토큰, 누적 토큰과 성장 점수가 표시됩니다.</p>

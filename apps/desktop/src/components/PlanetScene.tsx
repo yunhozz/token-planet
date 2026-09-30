@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useId, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useId, useMemo, useRef, useState } from "react";
 import { AvatarSprite } from "./AvatarSprite";
 import type { EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
 import { styleIdForSku } from "./cosmeticStyles";
@@ -81,15 +81,18 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   const speechTimer = useRef<number | null>(null);
   const motionActive = animate && !compact && isIntersecting && documentVisible && !reducedMotion;
   const motionState = compact ? "paused" : reducedMotion ? "reduced" : motionActive ? "active" : "paused";
-  const tiles = new Map<string, { column: number; row: number; objects: PlanetObject[] }>();
-  for (const object of objects) {
-    const column = Math.min(9, Math.floor(object.x / 10));
-    const row = Math.min(4, Math.max(0, Math.floor((object.y - 28) / 11)));
-    const key = `${column}-${row}`;
-    const tile = tiles.get(key) ?? { column, row, objects: [] };
-    tile.objects.push(object);
-    tiles.set(key, tile);
-  }
+  const tiles = useMemo(() => {
+    const result = new Map<string, { column: number; row: number; objects: PlanetObject[] }>();
+    for (const object of objects) {
+      const column = Math.min(9, Math.floor(object.x / 10));
+      const row = Math.min(4, Math.max(0, Math.floor((object.y - 28) / 11)));
+      const key = `${column}-${row}`;
+      const tile = result.get(key) ?? { column, row, objects: [] };
+      tile.objects.push(object);
+      result.set(key, tile);
+    }
+    return result;
+  }, [objects]);
   const hasCosmetic = (slotId: string, styleId: string) => equippedCosmetics.some(
     (item) => item.slot_id === slotId && styleIdForSku(item.sku) === styleId,
   );

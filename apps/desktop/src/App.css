@@ -38,6 +38,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .brand-symbol { display: grid; place-items: center; width: 17px; height: 17px; border: 2px solid var(--gold); border-radius: 50%; box-shadow: 3px 2px 0 -1px var(--water); color: transparent; }
 .icon-button { width: 44px; height: 44px; padding: 0; border: 2px solid var(--rule); color: var(--paper); background: var(--panel); font-size: 20px; }
 .icon-button:hover { color: var(--gold); background: #303750; }
+.loading-status { display: flex; align-items: center; gap: 8px; min-height: 28px; margin: 8px 0; color: var(--muted); font-size: 14px; line-height: 1.45; }
+.loading-status-spinner { width: 14px; height: 14px; flex: none; border: 2px solid #647286; border-top-color: var(--gold); border-radius: 50%; animation: loading-status-spin .8s linear infinite; }
+.loading-status--compact { min-height: 20px; margin: 2px 0; font-size: 13px; }
+.loading-status--compact .loading-status-spinner { width: 12px; height: 12px; }
+.loading-status--refresh { margin: 2px 0 7px; }
+@keyframes loading-status-spin { to { transform: rotate(360deg); } }
 .world-layout { width: min(100%, 1100px); margin: 0 auto; }
 .world-visual { padding-top: 1px; }
 .planet-figure { margin: 0; text-align: center; }
@@ -71,7 +77,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .usage-number { margin: 5px 0 3px; color: var(--gold); font-size: clamp(28px, 6vw, 32px); font-weight: 800; overflow-wrap: break-word; }
 .usage-footnote, .empty-note { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.55; }
 .source-list { margin-top: 7px; border-top: 1px solid #3c4a5c; }
-.source-row { min-height: 44px; display: flex; align-items: center; gap: 8px; padding: 6px 0; border-bottom: 1px solid #3c4a5c; }
+.source-row-wrap { padding: 6px 0; border-bottom: 1px solid #3c4a5c; }
+.source-row { min-height: 44px; display: flex; align-items: center; gap: 8px; }
+.source-row-status { margin: 3px 0 0 16px; }
+.source-row-error { margin: 5px 0 0 16px; padding: 6px 8px; }
 .source-mark { width: 8px; height: 8px; flex: none; background: var(--gold); box-shadow: 2px 2px 0 #725f47; }
 .source-mark--claude_code { background: var(--water); box-shadow: 2px 2px 0 #3c7473; }
 .source-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
@@ -80,6 +89,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .source-count { margin-left: auto; color: var(--paper); font-size: 14px; font-weight: 700; text-align: right; overflow-wrap: break-word; }
 .source-toggle { flex: none; border: 0; padding: 5px 0 5px 7px; color: var(--water); background: transparent; font-size: 14px; text-align: right; }
 .source-toggle:hover { color: white; text-decoration: underline; }
+.source-toggle:disabled { text-decoration: none; }
 .error-note { padding: 9px; margin: 10px 0 0; border: 1px solid #c86f65; color: #ffe1cc; background: #542e3b; font-size: 14px; line-height: 1.5; }
 .error-retry { min-height: 32px; padding: 3px 7px; border: 1px solid #f0b08d; color: #ffe1cc; background: #3b2937; font-size: 14px; }
 .detail-note { margin-top: 18px; padding-top: 13px; border-top: 2px solid var(--rule); }
@@ -327,8 +337,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 
 .cosmetic-entry { width: 100%; min-height: 44px; padding: 8px 11px; margin: 9px 0 12px; border: 2px solid #b9d8a6; color: #1b2937; background: var(--mint); box-shadow: 3px 3px 0 #0c1020; font-size: 14px; font-weight: 800; text-align: left; }
 .cosmetic-entry:hover { background: #c8e9be; }
-.cosmetic-load-state { padding: 10px 0 13px; color: var(--muted); font-size: 14px; }
-.cosmetic-load-state p { margin: 0 0 8px; }
+.cosmetic-load-state { padding: 10px 0 13px; }
 .cosmetic-shop { position: relative; margin: 9px 0 14px; border: 2px solid #637488; background: #182136; box-shadow: 4px 4px 0 #0c1020; }
 .cosmetic-shop-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 11px 12px 9px; border-bottom: 1px solid var(--rule); background: #202b40; }
 .cosmetic-shop-heading h2 { margin: 3px 0 0; color: var(--paper); font-size: 20px; }

@@ -26,6 +26,10 @@ impl Ledger {
                 event_key TEXT PRIMARY KEY, account_id TEXT NOT NULL
              );",
         )?;
+        tx.execute_batch(
+            "CREATE INDEX IF NOT EXISTS planet_usage_owner_account_event
+             ON planet_usage_owner(account_id, event_key);",
+        )?;
         // Older versions did not record the planet's account. A cached world
         // may belong to an earlier login, so preserve previously shared data
         // separately and restore the signed-in account from its server state.

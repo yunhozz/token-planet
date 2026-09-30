@@ -3,6 +3,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::sync::client::shared_http_client;
+
 #[derive(Clone)]
 pub struct AuthConfig {
     pub base_url: String,
@@ -121,7 +123,7 @@ pub struct SupabaseAuthClient {
 impl SupabaseAuthClient {
     pub fn new(config: AuthConfig) -> Self {
         Self {
-            http: Client::new(),
+            http: shared_http_client(),
             config,
         }
     }

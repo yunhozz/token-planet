@@ -1,5 +1,6 @@
 use reqwest::Client;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use std::{sync::OnceLock, time::Duration};
 
 use crate::domain::cosmetic_shop::{
     CosmeticEquipResult, CosmeticPurchaseResult, CosmeticShopState, GuestCosmeticImport,
@@ -8,6 +9,19 @@ use crate::domain::cosmetic_shop::{
 use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
 use crate::domain::planet::{PlanetDeviceContribution, PlanetState, WorldPlanet};
 use crate::sync::aggregate::DailyUsageSnapshot;
+
+pub(crate) fn shared_http_client() -> Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT
+        .get_or_init(|| {
+            Client::builder()
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(Duration::from_secs(20))
+                .build()
+                .expect("shared HTTP client configuration is valid")
+        })
+        .clone()
+}
 
 #[derive(Debug, Eq, PartialEq)]
 pub enum SyncError {
@@ -98,7 +112,7 @@ pub struct SupabaseSyncClient {
 impl SupabaseSyncClient {
     pub fn new(base_url: &str, publishable_key: &str) -> Self {
         Self {
-            http: Client::new(),
+            http: shared_http_client(),
             base_url: base_url.trim_end_matches('/').to_owned(),
             publishable_key: publishable_key.to_owned(),
         }
