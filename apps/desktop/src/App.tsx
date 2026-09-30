@@ -33,6 +33,17 @@ const EMPTY_SNAPSHOT: WorldSnapshot = {
   },
 };
 
+const COSMETIC_SHOP_READ_SUPERSEDED = "cosmetic-shop-read-superseded";
+
+type CosmeticShopLoad = {
+  generation: number;
+  pending: Promise<CosmeticShopState> | null;
+};
+
+function isCosmeticShopReadSuperseded(cause: unknown) {
+  return cause instanceof Error && cause.message === COSMETIC_SHOP_READ_SUPERSEDED;
+}
+
 function App() {
   const [snapshot, setSnapshot] = useState<WorldSnapshot | null>(null);
   const [detail, setDetail] = useState(false);
@@ -77,13 +88,68 @@ function App() {
   const cosmeticShopContext = JSON.stringify([shared?.user_id ?? null, snapshot?.planet.current_cycle_id ?? null]);
   const cosmeticShopContextRef = useRef(cosmeticShopContext);
   cosmeticShopContextRef.current = cosmeticShopContext;
+  const cosmeticShopLoads = useRef(new Map<string, CosmeticShopLoad>());
   const [cosmeticShopEntry, setCosmeticShopEntry] = useState<{ context: string; state: CosmeticShopState } | null>(null);
   const cosmeticShop = cosmeticShopEntry?.context === cosmeticShopContext ? cosmeticShopEntry.state : null;
   const [cosmeticPreview, setCosmeticPreview] = useState<EquippedCosmetic[] | null>(null);
   const [cosmeticShopError, setCosmeticShopError] = useState("");
+  const [cosmeticShopLoadingContext, setCosmeticShopLoadingContext] = useState<string | null>(null);
 
-  function storeCosmeticShop(context: string, shop: CosmeticShopState) {
-    if (cosmeticShopContextRef.current === context) setCosmeticShopEntry({ context, state: shop });
+  function cosmeticShopLoad(context: string) {
+    let load = cosmeticShopLoads.current.get(context);
+    if (!load) {
+      load = { generation: 0, pending: null };
+      cosmeticShopLoads.current.set(context, load);
+    }
+    return load;
+  }
+
+  function storeCosmeticShop(context: string, shop: CosmeticShopState, generation?: number) {
+    const load = cosmeticShopLoad(context);
+    if (cosmeticShopContextRef.current === context && (generation === undefined || load.generation === generation)) {
+      setCosmeticShopEntry({ context, state: shop });
+    }
+  }
+
+  function invalidateCosmeticShopReads(context: string) {
+    const load = cosmeticShopLoad(context);
+    load.generation += 1;
+    load.pending = null;
+    if (cosmeticShopContextRef.current === context) {
+      setCosmeticShopLoadingContext((current) => current === context ? null : current);
+    }
+    return load.generation;
+  }
+
+  function loadCosmeticShop(context: string): Promise<CosmeticShopState> {
+    const load = cosmeticShopLoad(context);
+    if (cosmeticShopContextRef.current === context) {
+      setCosmeticShopLoadingContext(context);
+      setCosmeticShopError("");
+    }
+    if (load.pending) return load.pending;
+
+    const generation = load.generation;
+    let pending: Promise<CosmeticShopState>;
+    pending = invoke<CosmeticShopState>("get_shop_state")
+      .then((value) => {
+        if (load.generation !== generation || cosmeticShopContextRef.current !== context) {
+          throw new Error(COSMETIC_SHOP_READ_SUPERSEDED);
+        }
+        storeCosmeticShop(context, value, generation);
+        if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
+        return value;
+      })
+      .finally(() => {
+        if (load.pending === pending) {
+          load.pending = null;
+          if (load.generation === generation && cosmeticShopContextRef.current === context) {
+            setCosmeticShopLoadingContext((current) => current === context ? null : current);
+          }
+        }
+      });
+    load.pending = pending;
+    return pending;
   }
 
   useEffect(() => {
@@ -109,9 +175,11 @@ function App() {
         if (active && requestId === sharedRequestId.current) setSharedLoading(false);
       }
     };
-    void refreshSharedContext();
     const unlisten = listen<WorldSnapshot>("usage-updated", (event) => {
       if (active) { setSnapshot(event.payload); setError(false); }
+    }).catch(() => () => {});
+    const unlistenScanFailed = listen("usage-scan-failed", () => {
+      if (active) setError(true);
     }).catch(() => () => {});
     const unlistenCompact = listen("show-compact", () => {
       if (active) {
@@ -123,14 +191,16 @@ function App() {
     const unlistenSync = listen("sync-status-updated", () => {
       void refreshSharedContext();
       const context = cosmeticShopContextRef.current;
-      void invoke<CosmeticShopState>("get_shop_state")
-        .then((value) => { if (active) storeCosmeticShop(context, value); })
-        .catch(() => {});
+      if (active) void loadCosmeticShop(context).catch(() => {});
     }).catch(() => () => {});
+    void Promise.all([unlisten, unlistenScanFailed]).then(() => {
+      if (active) void refreshSharedContext();
+    });
     return () => {
       active = false;
       sharedRequestId.current += 1;
       void unlisten.then((stop) => stop());
+      void unlistenScanFailed.then((stop) => stop());
       void unlistenCompact.then((stop) => stop());
       void unlistenSync.then((stop) => stop());
     };
@@ -195,9 +265,11 @@ function App() {
     setCosmeticShopEntry(null);
     setCosmeticPreview(null);
     setCosmeticShopError("");
-    invoke<CosmeticShopState>("get_shop_state")
-      .then((value) => { if (active) storeCosmeticShop(context, value); })
-      .catch((cause) => { if (active) setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다."); });
+    void loadCosmeticShop(context).catch((cause) => {
+      if (active && cosmeticShopContextRef.current === context && !isCosmeticShopReadSuperseded(cause)) {
+        setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
+      }
+    });
     return () => { active = false; };
   }, [cosmeticShopContext]);
 
@@ -288,7 +360,8 @@ function App() {
   async function purchaseCosmetic(sku: string): Promise<CosmeticPurchaseAction> {
     const context = cosmeticShopContext;
     const action = await invoke<CosmeticPurchaseAction>("purchase_cosmetic", { sku });
-    storeCosmeticShop(context, action.state);
+    const generation = invalidateCosmeticShopReads(context);
+    storeCosmeticShop(context, action.state, generation);
     if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
     return action;
   }
@@ -301,7 +374,8 @@ function App() {
   ): Promise<CosmeticEquipAction> {
     const context = cosmeticShopContext;
     const action = await invoke<CosmeticEquipAction>("equip_cosmetic", { slotId, sku, cycleId, expectedVersion });
-    storeCosmeticShop(context, action.state);
+    const generation = invalidateCosmeticShopReads(context);
+    storeCosmeticShop(context, action.state, generation);
     if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
     return action;
   }
@@ -309,9 +383,9 @@ function App() {
   async function retryLoadCosmeticShop() {
     const context = cosmeticShopContext;
     setCosmeticShopError("");
-    try { storeCosmeticShop(context, await invoke<CosmeticShopState>("get_shop_state")); }
+    try { await loadCosmeticShop(context); }
     catch (cause) {
-      if (cosmeticShopContextRef.current === context) {
+      if (cosmeticShopContextRef.current === context && !isCosmeticShopReadSuperseded(cause)) {
         setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
       }
     }
@@ -319,9 +393,7 @@ function App() {
 
   async function refreshCosmeticShop() {
     const context = cosmeticShopContext;
-    const updated = await invoke<CosmeticShopState>("get_shop_state");
-    storeCosmeticShop(context, updated);
-    return updated;
+    return loadCosmeticShop(context);
   }
 
   async function changeView(next = !detail) {
@@ -411,7 +483,20 @@ function App() {
       {planetError && <p className="error-note setup-error" role="alert">{planetError}</p>}
     </>;
   }
-  if (!snapshot) return <main className="setup-screen"><div className="setup-mark" aria-hidden="true"><span /></div><p className="pixel-kicker">Token Planet</p><h1>행성 기록을 불러오고 있습니다</h1><LoadingStatus label="기기 안의 사용량 원장을 읽고 있습니다." />{error && <p className="error-note" role="alert">기기 안의 사용량 원장을 열지 못했습니다.</p>}</main>;
+  if (!snapshot) return (
+    <main className="setup-screen">
+      <div className="setup-mark" aria-hidden="true"><span /></div>
+      <p className="pixel-kicker">Token Planet</p>
+      <h1>행성 기록을 불러오고 있습니다</h1>
+      {(!error || refreshing) && <LoadingStatus label={refreshing ? "사용량 원장을 다시 읽고 있습니다." : "기기 안의 사용량 원장을 읽고 있습니다."} />}
+      {error && <>
+        <p className="error-note" role="alert">기기 안의 사용량 원장을 열지 못했습니다.</p>
+        <button className="error-retry" type="button" onClick={() => void refresh()} disabled={refreshing} aria-busy={refreshing || undefined}>
+          {refreshing ? "다시 읽는 중" : "다시 시도"}
+        </button>
+      </>}
+    </main>
+  );
 
   return (
     <main className={`app-shell ${detail ? "app-shell--detail" : "app-shell--popover"}`} aria-label={detail ? undefined : "행성 팝오버"}>
@@ -485,15 +570,16 @@ function App() {
                 </div>
               </section>
               <UsageSummary snapshot={view} />
-              {cosmeticShop
-                ? <CosmeticShop
+              {cosmeticShop && <CosmeticShop
                   state={cosmeticShop}
                   onPurchase={purchaseCosmetic}
                   onEquip={equipCosmetic}
                   onPreviewChange={setCosmeticPreview}
                   onRefresh={refreshCosmeticShop}
-                />
-                : !cosmeticShopError && <LoadingStatus className="cosmetic-load-state" label="상점을 불러오고 있습니다." />}
+                />}
+              {cosmeticShopLoadingContext === cosmeticShopContext
+                ? <LoadingStatus className="cosmetic-load-state" label={cosmeticShop ? "상점 상태를 갱신하고 있습니다." : "상점을 불러오고 있습니다."} />
+                : !cosmeticShop && !cosmeticShopError && <LoadingStatus className="cosmetic-load-state" label="상점을 불러오고 있습니다." />}
               <div className="source-list" aria-label="수집 상태">
                 <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "codex"} error={sourceError?.agent === "codex" ? sourceError.message : undefined} />
                 <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "claude_code"} error={sourceError?.agent === "claude_code" ? sourceError.message : undefined} />
@@ -507,7 +593,7 @@ function App() {
                 {journalOpen ? "성장 일지 접기" : "성장 일지 보기"}
               </button>
               {journalOpen && <>
-                {journalBusy && <LoadingStatus label={journal ? "성장 일지를 갱신하고 있습니다." : "성장 일지를 불러오고 있습니다."} />}
+                {journalBusy && <LoadingStatus label={journal ? "기록 동기화를 기다리며 성장 일지를 갱신하고 있습니다." : "기록 동기화를 기다리며 성장 일지를 불러오고 있습니다."} />}
                 {journal && journalOwner === (shared?.user_id ?? "local") && <GrowthJournal
                   journal={journal}
                   busy={journalBusy}
@@ -524,7 +610,7 @@ function App() {
             </div>
           </section> : <section id="panel-group" className="detail-panel group-panel" role="tabpanel" aria-labelledby="tab-group" tabIndex={0}>
             <div className="sharing-stack">
-              {sharedLoading && <LoadingStatus label="그룹 정보를 불러오고 있습니다." />}
+              {sharedLoading && <LoadingStatus label="기록 동기화를 기다리며 그룹 정보를 확인하고 있습니다." />}
                 {shared?.phase === "shared" && shared.world && <>
                   <WorldCommunity name={shared.world.name} members={shared.planet_members ?? []} />
                   {((sharedPhase === "shared" && memberCodeLoadedContext !== memberContext) || (sharedIsOwner && membersEntry?.context !== memberListContext))

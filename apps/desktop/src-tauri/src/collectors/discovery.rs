@@ -7,7 +7,7 @@ use std::{
 
 use chrono::{DateTime, Utc};
 use chrono_tz::Tz;
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use walkdir::WalkDir;
@@ -219,6 +219,7 @@ fn scan_root(root: &Path, agent: Agent, ledger: &mut Ledger) -> Result<SourceHea
     }
     let mut health = SourceHealth::Ready;
     let mut found_file = false;
+    let mut files = Vec::new();
     for entry in WalkDir::new(root).follow_links(false) {
         match entry {
             Ok(entry)
@@ -226,12 +227,7 @@ fn scan_root(root: &Path, agent: Agent, ledger: &mut Ledger) -> Result<SourceHea
                     && entry.path().extension().is_some_and(|e| e == "jsonl") =>
             {
                 found_file = true;
-                match scan_file(entry.path(), agent, ledger) {
-                    Ok(()) => {}
-                    Err(ScanError::SourcePermission) => health = SourceHealth::PermissionDenied,
-                    Err(ScanError::SourceIo) => health = SourceHealth::UsageUnavailable,
-                    Err(error) => return Err(error),
-                }
+                files.push(entry.into_path());
             }
             Ok(_) => {}
             Err(error)
@@ -244,6 +240,22 @@ fn scan_root(root: &Path, agent: Agent, ledger: &mut Ledger) -> Result<SourceHea
             Err(_) => health = SourceHealth::UsageUnavailable,
         }
     }
+    if !files.is_empty() {
+        let mut tx = ledger.connection.transaction()?;
+        let mut usage_changed = false;
+        for path in files {
+            match scan_file(&path, agent, ledger.timezone, &mut tx) {
+                Ok(changed) => usage_changed |= changed,
+                Err(ScanError::SourcePermission) => health = SourceHealth::PermissionDenied,
+                Err(ScanError::SourceIo) => health = SourceHealth::UsageUnavailable,
+                Err(error) => return Err(error),
+            }
+        }
+        if usage_changed {
+            rebuild_daily(&tx)?;
+        }
+        tx.commit()?;
+    }
     Ok(if !found_file && health == SourceHealth::Ready {
         SourceHealth::UsageUnavailable
     } else {
@@ -251,8 +263,13 @@ fn scan_root(root: &Path, agent: Agent, ledger: &mut Ledger) -> Result<SourceHea
     })
 }
 
-fn scan_file(path: &Path, agent: Agent, ledger: &mut Ledger) -> Result<(), ScanError> {
-    let file = File::open(path).map_err(source_io_error)?;
+fn scan_file(
+    path: &Path,
+    agent: Agent,
+    timezone: Tz,
+    tx: &mut Transaction<'_>,
+) -> Result<bool, ScanError> {
+    let mut file = File::open(path).map_err(source_io_error)?;
     let meta = file.metadata().map_err(source_io_error)?;
     let source_id = format!(
         "{}:{}",
@@ -263,28 +280,35 @@ fn scan_file(path: &Path, agent: Agent, ledger: &mut Ledger) -> Result<(), ScanE
         Agent::Codex => codex::PARSER_VERSION,
         Agent::ClaudeCode => claude_code::PARSER_VERSION,
     };
-    let prior: Option<(String, i64, i64, Option<i64>, String)> = ledger.connection.query_row(
+    let prior: Option<(String, i64, i64, Option<i64>, String)> = tx.query_row(
         "SELECT file_fingerprint,byte_offset,parser_version,last_snapshot_total,status FROM source_checkpoint WHERE source_id=?1",
         [&source_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
     ).optional()?;
+    let mut validated_digest = None;
     let resume = match prior.as_ref() {
         Some(previous)
             if previous.1 >= 0
                 && previous.2 == i64::from(version)
-                && (previous.1 as u64) <= meta.len()
-                && previous.0 == prefix_fingerprint(path, previous.1 as u64)? =>
+                && (previous.1 as u64) <= meta.len() =>
         {
-            Some(previous)
+            let digest = prefix_digest(&mut file, previous.1 as u64)?;
+            if previous.0 == digest_fingerprint(digest.clone()) {
+                validated_digest = Some(digest);
+                Some(previous)
+            } else {
+                None
+            }
         }
         _ => None,
     };
     let start = resume
         .map(|(_, offset, _, _, _)| *offset as u64)
         .unwrap_or(0);
-    if start == meta.len() {
-        return Ok(());
+    if start == meta.len() && (resume.is_some() || prior.is_none()) {
+        return Ok(false);
     }
     let mut previous_snapshot = resume.and_then(|(_, _, _, total, _)| *total).unwrap_or(0);
+    let mut digest = validated_digest.unwrap_or_else(Sha256::new);
     let mut reader = BufReader::new(file);
     reader
         .seek(SeekFrom::Start(start))
@@ -293,9 +317,11 @@ fn scan_file(path: &Path, agent: Agent, ledger: &mut Ledger) -> Result<(), ScanE
     let mut status = resume
         .map(|(_, _, _, _, status)| status.as_str())
         .unwrap_or("complete");
-    let tx = ledger.connection.transaction()?;
+    let savepoint = tx.savepoint()?;
+    let mut usage_changed = false;
     if prior.is_some() && resume.is_none() {
-        tx.execute("DELETE FROM usage_record WHERE source_id=?1", [&source_id])?;
+        usage_changed |=
+            savepoint.execute("DELETE FROM usage_record WHERE source_id=?1", [&source_id])? > 0;
     }
     loop {
         let mut bytes = Vec::new();
@@ -306,6 +332,7 @@ fn scan_file(path: &Path, agent: Agent, ledger: &mut Ledger) -> Result<(), ScanE
             break;
         }
         next_offset += length as u64;
+        digest.update(&bytes);
         let line = match std::str::from_utf8(&bytes) {
             Ok(line) => line.trim_end_matches(['\r', '\n']),
             Err(_) => {
@@ -333,24 +360,26 @@ fn scan_file(path: &Path, agent: Agent, ledger: &mut Ledger) -> Result<(), ScanE
                         previous_snapshot = current;
                     }
                 }
-                insert_record(&tx, &record, &source_id, ledger.timezone)?;
+                usage_changed |= insert_record(&savepoint, &record, &source_id, timezone)?;
             }
             Ok(None) => {}
             Err(_) => status = "unsupported",
         }
     }
-    drop(reader);
-    let fingerprint = prefix_fingerprint(path, next_offset)?;
-    tx.execute("INSERT INTO source_checkpoint(source_id,file_fingerprint,byte_offset,parser_version,last_snapshot_total,status)
+    let file = reader.into_inner();
+    if next_offset > file.metadata().map_err(source_io_error)?.len() {
+        return Err(ScanError::SourceIo);
+    }
+    let fingerprint = digest_fingerprint(digest);
+    savepoint.execute("INSERT INTO source_checkpoint(source_id,file_fingerprint,byte_offset,parser_version,last_snapshot_total,status)
         VALUES (?1,?2,?3,?4,?5,?6)
         ON CONFLICT(source_id) DO UPDATE SET file_fingerprint=excluded.file_fingerprint,
         byte_offset=excluded.byte_offset,parser_version=excluded.parser_version,
         last_snapshot_total=excluded.last_snapshot_total,status=excluded.status",
         params![source_id, fingerprint, i64::try_from(next_offset).map_err(|_| ScanError::SourceIo)?,
             version, previous_snapshot, status])?;
-    rebuild_daily(&tx)?;
-    tx.commit()?;
-    Ok(())
+    savepoint.commit()?;
+    Ok(usage_changed)
 }
 
 fn source_io_error(error: std::io::Error) -> ScanError {
@@ -361,8 +390,7 @@ fn source_io_error(error: std::io::Error) -> ScanError {
     }
 }
 
-fn prefix_fingerprint(path: &Path, length: u64) -> Result<String, ScanError> {
-    let mut file = File::open(path).map_err(source_io_error)?;
+fn prefix_digest(file: &mut File, length: u64) -> Result<Sha256, ScanError> {
     let mut remaining = length;
     let mut buffer = [0_u8; 8192];
     let mut digest = Sha256::new();
@@ -375,7 +403,11 @@ fn prefix_fingerprint(path: &Path, length: u64) -> Result<String, ScanError> {
         digest.update(&buffer[..amount]);
         remaining -= amount as u64;
     }
-    Ok(format!("v2:{}", hex_digest(&digest.finalize())))
+    Ok(digest)
+}
+
+fn digest_fingerprint(digest: Sha256) -> String {
+    format!("v2:{}", hex_digest(&digest.finalize()))
 }
 
 fn hex_hash(input: &[u8]) -> String {
@@ -637,5 +669,125 @@ mod tests {
                 .total_tokens,
             Some(50)
         );
+    }
+
+    #[test]
+    fn truncating_populated_log_to_zero_clears_usage_and_resumes_from_empty_checkpoint() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex = temp.path().join("codex");
+        fs::create_dir(&codex).unwrap();
+        let source = codex.join("session.jsonl");
+        let row = |total| {
+            format!(
+            "{{\"timestamp\":\"2026-09-25T00:00:00Z\",\"type\":\"token_usage_record\",\"payload\":{{\"session_id\":\"s1\",\"response_id\":\"r1\",\"usage\":{{\"total_tokens\":{total}}}}}}}\n"
+        )
+        };
+        fs::write(&source, row(42)).unwrap();
+        let mut ledger = Ledger::open(&temp.path().join("ledger.db"), Seoul).unwrap();
+        let config = SourceConfig {
+            codex_root: codex,
+            claude_root: temp.path().join("missing"),
+            timezone: Seoul,
+        };
+
+        assert_eq!(
+            scan_sources(&config, &mut ledger)
+                .unwrap()
+                .codex
+                .total_tokens,
+            Some(42)
+        );
+        fs::write(&source, "").unwrap();
+
+        assert_eq!(
+            scan_sources(&config, &mut ledger)
+                .unwrap()
+                .codex
+                .total_tokens,
+            None
+        );
+        assert!(ledger.daily_known_totals().unwrap().is_empty());
+        let checkpoint: (i64, String) = ledger
+            .connection
+            .query_row(
+                "SELECT byte_offset,file_fingerprint FROM source_checkpoint",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            checkpoint,
+            (
+                0,
+                "v2:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855".into()
+            )
+        );
+
+        fs::write(&source, row(19)).unwrap();
+        assert_eq!(
+            scan_sources(&config, &mut ledger)
+                .unwrap()
+                .codex
+                .total_tokens,
+            Some(19)
+        );
+        assert_eq!(ledger.daily_known_totals().unwrap(), vec![19]);
+    }
+
+    #[test]
+    fn failed_later_file_rolls_back_the_entire_root_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex = temp.path().join("codex");
+        fs::create_dir(&codex).unwrap();
+        for (file, session, total) in [("first.jsonl", "s1", 42), ("second.jsonl", "s2", 19)] {
+            fs::write(
+                codex.join(file),
+                format!(
+                    "{{\"timestamp\":\"2026-09-25T00:00:00Z\",\"type\":\"token_usage_record\",\"payload\":{{\"session_id\":\"{session}\",\"response_id\":\"r1\",\"usage\":{{\"total_tokens\":{total}}}}}}}\n"
+                ),
+            )
+            .unwrap();
+        }
+        let mut ledger = Ledger::open(&temp.path().join("ledger.db"), Seoul).unwrap();
+        let config = SourceConfig {
+            codex_root: codex,
+            claude_root: temp.path().join("missing"),
+            timezone: Seoul,
+        };
+        ledger
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_after_first_checkpoint BEFORE INSERT ON usage_record
+             WHEN EXISTS (SELECT 1 FROM source_checkpoint)
+             BEGIN SELECT RAISE(ABORT, 'fail a later file'); END;",
+            )
+            .unwrap();
+
+        assert!(matches!(
+            scan_sources(&config, &mut ledger),
+            Err(crate::storage::ledger::ScanError::Database)
+        ));
+        for table in ["usage_record", "source_checkpoint", "daily_agent_total"] {
+            let count: i64 = ledger
+                .connection
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "{table} must roll back with the root scan");
+        }
+
+        ledger
+            .connection
+            .execute_batch("DROP TRIGGER fail_after_first_checkpoint;")
+            .unwrap();
+        assert_eq!(
+            scan_sources(&config, &mut ledger)
+                .unwrap()
+                .codex
+                .total_tokens,
+            Some(61)
+        );
+        assert_eq!(ledger.daily_known_totals().unwrap(), vec![61]);
     }
 }

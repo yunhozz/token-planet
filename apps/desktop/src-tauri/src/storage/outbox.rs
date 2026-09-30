@@ -50,7 +50,8 @@ impl Ledger {
     fn set_setting(&self, key: &str, value: &str) -> Result<(), OutboxError> {
         self.connection.execute(
             "INSERT INTO setting(key,value) VALUES (?1,?2)
-            ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            ON CONFLICT(key) DO UPDATE SET value=excluded.value
+            WHERE setting.value IS NOT excluded.value",
             params![key, value],
         )?;
         Ok(())

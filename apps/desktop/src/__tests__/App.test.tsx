@@ -39,6 +39,26 @@ function shopState(balance: number): CosmeticShopState {
   };
 }
 
+function catalogShopState(balance: number, owned: string[] = []): CosmeticShopState {
+  return {
+    ...shopState(balance),
+    slots: [{ slot_id: "sky", display_name: "하늘" }],
+    products: [{ sku: "star_cluster", slot_id: "sky", display_name: "별무리", price: 100_000, catalog_revision: 1, purchasable: true }],
+    owned_skus: owned,
+    slot_versions: { sky: 0 },
+  };
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (cause?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 it("starts anonymous sharing without email sign-in", async () => {
   let started = false;
   invokeMock.mockImplementation(async (command: string) => {
@@ -123,6 +143,82 @@ it("refreshes the confirmed shop state after sync finishes", async () => {
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
 
   await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰"));
+});
+
+it("coalesces a shared shop read and retries after that read fails", async () => {
+  let latestShop = catalogShopState(200_000);
+  let heldRead: ReturnType<typeof deferred<CosmeticShopState>> | null = null;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return heldRead?.promise ?? structuredClone(latestShop);
+    if (command === "list_world_members") return [{ user_id: "owner", role: "owner" }, { user_id: "member", role: "member" }];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
+
+  const readsBefore = invokeMock.mock.calls.filter(([command]) => command === "get_shop_state").length;
+  heldRead = deferred<CosmeticShopState>();
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 1));
+
+  fireEvent.click(screen.getByRole("button", { name: "상점 닫기" }));
+  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
+  await screen.findByRole("region", { name: "행성 꾸미기 상점" });
+  expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 1);
+
+  await act(async () => { heldRead!.reject(new Error("temporary network error")); });
+  expect(await screen.findByText("상점 상태를 새로 확인하지 못했습니다.")).toHaveAttribute("role", "status");
+
+  heldRead = null;
+  latestShop = catalogShopState(300_000);
+  fireEvent.click(screen.getByRole("button", { name: "상점 닫기" }));
+  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 2));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("300,000 토큰"));
+});
+
+it("keeps the confirmed purchase after an older shared shop read finishes", async () => {
+  const originalShop = catalogShopState(200_000);
+  const purchasedShop = catalogShopState(100_000, ["star_cluster"]);
+  let heldRead: ReturnType<typeof deferred<CosmeticShopState>> | null = null;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return heldRead?.promise ?? structuredClone(originalShop);
+    if (command === "purchase_cosmetic") return {
+      result: { purchase_id: "purchase-1", sku: "star_cluster", status: "purchased", price: 100_000, available_balance: 100_000 },
+      state: structuredClone(purchasedShop), unavailable_reason: null,
+    };
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
+
+  const readsBefore = invokeMock.mock.calls.filter(([command]) => command === "get_shop_state").length;
+  heldRead = deferred<CosmeticShopState>();
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 1));
+
+  fireEvent.click(screen.getByRole("button", { name: "별무리 구매" }));
+  fireEvent.click(await screen.findByRole("button", { name: "구매 확인" }));
+  expect(await screen.findByText("별무리 구매 완료 · 잔액 100,000 토큰")).toBeInTheDocument();
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰"));
+
+  await act(async () => { heldRead!.resolve(structuredClone(originalShop)); });
+  fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
+  expect(await screen.findByRole("button", { name: "별무리 장착" })).toBeInTheDocument();
+  expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰");
 });
 
 it("does not show the previous account shop when the next account lookup fails", async () => {

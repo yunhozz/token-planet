@@ -59,6 +59,14 @@ impl Ledger {
     }
 
     pub fn prepare_growth_journal(&mut self) -> Result<(), ScanError> {
+        let data_version = self
+            .connection
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, u64>(0))?;
+        let signature = (self.connection.total_changes(), data_version);
+        if self.growth_journal_signature == Some(signature) {
+            return Ok(());
+        }
+
         let account_id = self.current_planet_account_id()?;
         let device_id =
             journal_setting(&self.connection, "planet_device_id")?.ok_or(ScanError::Database)?;
@@ -238,6 +246,13 @@ impl Ledger {
                     payload_hash: String::new(),
                 },
             )?;
+        }
+        let final_data_version = self
+            .connection
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, u64>(0))?;
+        if final_data_version == data_version {
+            self.growth_journal_signature =
+                Some((self.connection.total_changes(), final_data_version));
         }
         Ok(())
     }
@@ -1145,5 +1160,81 @@ mod tests {
         let journal = ledger.growth_journal().unwrap();
         assert_eq!(journal.entries[0].confirmed_tokens, Some(100));
         assert_eq!(journal.entries[0].coverage, UsageCoverage::Partial);
+    }
+
+    #[test]
+    fn cached_journal_skips_unchanged_writes_and_refreshes_after_local_or_external_correction() {
+        let temp = tempfile::tempdir().unwrap();
+        let db = temp.path().join("ledger.db");
+        let mut ledger = Ledger::open(&db, Seoul).unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='2026-09-27T00:00:00Z' WHERE key='planet_activation_at_utc'",
+                [],
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='2026-09-27T00:00:00Z' WHERE key='planet_cycle_started_at_utc'",
+                [],
+            )
+            .unwrap();
+        let event = "same-row-correction";
+        ledger
+            .insert(&record(event, "2026-09-28T10:00:00Z", Some(100)))
+            .unwrap();
+        ledger.prepare_growth_journal().unwrap();
+        assert_eq!(
+            ledger.growth_journal().unwrap().entries[0].confirmed_tokens,
+            Some(100)
+        );
+
+        let writes_before = ledger.connection.total_changes();
+        ledger.prepare_growth_journal().unwrap();
+        assert_eq!(ledger.connection.total_changes(), writes_before);
+        assert_eq!(
+            ledger.growth_journal().unwrap().entries[0].confirmed_tokens,
+            Some(100)
+        );
+
+        ledger
+            .insert(&record(event, "2026-09-28T10:00:00Z", Some(200)))
+            .unwrap();
+        ledger.prepare_growth_journal().unwrap();
+        assert_eq!(
+            ledger.growth_journal().unwrap().entries[0].confirmed_tokens,
+            Some(200)
+        );
+        assert_eq!(
+            ledger
+                .connection
+                .query_row("SELECT COUNT(*) FROM usage_record", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+
+        let external = rusqlite::Connection::open(&db).unwrap();
+        external
+            .execute(
+                "UPDATE usage_record SET total_tokens=300 WHERE event_key=?1",
+                [event],
+            )
+            .unwrap();
+        ledger.prepare_growth_journal().unwrap();
+        assert_eq!(
+            ledger.growth_journal().unwrap().entries[0].confirmed_tokens,
+            Some(300)
+        );
+        assert_eq!(
+            ledger
+                .connection
+                .query_row("SELECT COUNT(*) FROM usage_record", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
     }
 }

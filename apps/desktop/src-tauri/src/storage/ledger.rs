@@ -2,7 +2,7 @@ use std::{collections::BTreeMap, fmt, path::Path};
 
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::collectors::{ParsedRecord, RecordKind};
 use crate::domain::planet::{
@@ -51,6 +51,7 @@ impl From<rusqlite::Error> for ScanError {
 pub struct Ledger {
     pub(crate) connection: Connection,
     pub timezone: Tz,
+    pub(super) growth_journal_signature: Option<(u64, u64)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -275,6 +276,7 @@ impl Ledger {
         let mut ledger = Self {
             connection,
             timezone,
+            growth_journal_signature: None,
         };
         ledger.initialize_planet_accounts()?;
         ledger.initialize_growth_journal()?;
@@ -843,7 +845,8 @@ fn setting_value(connection: &Connection, key: &str) -> Result<Option<String>, S
 fn set_setting_value(connection: &Connection, key: &str, value: &str) -> Result<(), ScanError> {
     connection.execute(
         "INSERT INTO setting(key,value) VALUES (?1,?2)
-         ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+         ON CONFLICT(key) DO UPDATE SET value=excluded.value
+         WHERE setting.value IS NOT excluded.value",
         params![key, value],
     )?;
     Ok(())
@@ -884,11 +887,11 @@ fn optional_i64(value: Option<u64>) -> Result<Option<i64>, ScanError> {
 }
 
 pub(crate) fn insert_record(
-    tx: &Transaction<'_>,
+    connection: &Connection,
     record: &ParsedRecord,
     source_id: &str,
     timezone: Tz,
-) -> Result<(), ScanError> {
+) -> Result<bool, ScanError> {
     let date = record
         .occurred_at_utc
         .with_timezone(&timezone)
@@ -907,7 +910,7 @@ pub(crate) fn insert_record(
     } else {
         record.event_key.clone()
     };
-    tx.execute("INSERT INTO usage_record (
+    let changed = connection.execute("INSERT INTO usage_record (
         event_key,source_id,agent,kind,bucket_date,occurred_at_utc,
         input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,coverage,parser_version
     ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13)
@@ -917,24 +920,36 @@ pub(crate) fn insert_record(
       input_tokens=excluded.input_tokens,output_tokens=excluded.output_tokens,
       cache_read_tokens=excluded.cache_read_tokens,cache_write_tokens=excluded.cache_write_tokens,
       total_tokens=excluded.total_tokens,coverage=excluded.coverage,
-      parser_version=excluded.parser_version", params![
+      parser_version=excluded.parser_version
+    WHERE usage_record.source_id IS NOT excluded.source_id
+      OR usage_record.agent IS NOT excluded.agent
+      OR usage_record.kind IS NOT excluded.kind
+      OR usage_record.bucket_date IS NOT excluded.bucket_date
+      OR usage_record.occurred_at_utc IS NOT excluded.occurred_at_utc
+      OR usage_record.input_tokens IS NOT excluded.input_tokens
+      OR usage_record.output_tokens IS NOT excluded.output_tokens
+      OR usage_record.cache_read_tokens IS NOT excluded.cache_read_tokens
+      OR usage_record.cache_write_tokens IS NOT excluded.cache_write_tokens
+      OR usage_record.total_tokens IS NOT excluded.total_tokens
+      OR usage_record.coverage IS NOT excluded.coverage
+      OR usage_record.parser_version IS NOT excluded.parser_version", params![
         event_key, source_id, agent_name(record.agent), kind, date, record.occurred_at_utc.to_rfc3339(),
         optional_i64(record.usage.input_tokens)?, optional_i64(record.usage.output_tokens)?,
         optional_i64(record.usage.cache_read_tokens)?, optional_i64(record.usage.cache_write_tokens)?,
         optional_i64(record.usage.total_tokens)?, coverage_name(record.usage.coverage), version,
     ])?;
-    tx.execute(
+    connection.execute(
         "INSERT OR IGNORE INTO planet_usage_owner(event_key,account_id)
          VALUES (?1,(SELECT value FROM setting WHERE key='planet_account_id'))",
         [&event_key],
     )?;
-    Ok(())
+    Ok(changed > 0)
 }
 
-pub(crate) fn rebuild_daily(tx: &Transaction<'_>) -> Result<(), ScanError> {
+pub(crate) fn rebuild_daily(connection: &Connection) -> Result<(), ScanError> {
     let mut groups: BTreeMap<(String, String), (Option<u64>, bool, bool)> = BTreeMap::new();
     {
-        let mut statement = tx.prepare("SELECT agent,bucket_date,total_tokens,coverage FROM usage_record r
+        let mut statement = connection.prepare("SELECT agent,bucket_date,total_tokens,coverage FROM usage_record r
             WHERE r.kind='response' OR NOT EXISTS (
                 SELECT 1 FROM usage_record other WHERE other.source_id=r.source_id AND other.kind='response' AND other.agent=r.agent
             )")?;
@@ -966,7 +981,7 @@ pub(crate) fn rebuild_daily(tx: &Transaction<'_>) -> Result<(), ScanError> {
             }
         }
     }
-    tx.execute("DELETE FROM daily_agent_total", [])?;
+    connection.execute("DELETE FROM daily_agent_total", [])?;
     for ((agent, date), (known, incomplete, unsupported)) in groups {
         let coverage = if known.is_some() && incomplete {
             "partial"
@@ -977,7 +992,7 @@ pub(crate) fn rebuild_daily(tx: &Transaction<'_>) -> Result<(), ScanError> {
         } else {
             "unavailable"
         };
-        tx.execute("INSERT INTO daily_agent_total(agent,bucket_date,total_tokens,coverage) VALUES (?1,?2,?3,?4)",
+        connection.execute("INSERT INTO daily_agent_total(agent,bucket_date,total_tokens,coverage) VALUES (?1,?2,?3,?4)",
             params![agent, date, optional_i64(known)?, coverage])?;
     }
     Ok(())

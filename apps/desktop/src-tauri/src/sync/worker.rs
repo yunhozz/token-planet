@@ -41,6 +41,9 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
         return Ok(());
     };
     state.select_planet_account(&saved.user.id)?;
+    if state.has_usage_scan_failure() {
+        return Err("사용량 기록을 확인한 뒤 동기화할 수 있습니다".into());
+    }
     let session = match SupabaseAuthClient::new(config.clone())
         .session(&store)
         .await
@@ -92,7 +95,7 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
             .merge_remote_planet_state(&remote)
             .map_err(|_| "행성 동기화 상태를 반영할 수 없습니다")?;
         state
-            .scan()
+            .rebuild_snapshot_from_latest_usage()
             .map_err(|_| "행성 상태를 새로 계산할 수 없습니다")?;
     }
     let server_upload_credits = state
@@ -101,11 +104,14 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
         .map_err(|_| "로컬 지갑 오류")?
         .planet_wallet_credits_for_server_upload()
         .map_err(|_| "서버 지갑 전송 내역 오류")?;
-    let server_upload_balance = server_upload_credits.iter().try_fold(0_u64, |balance, credit| {
-        balance
-            .checked_add(credit.amount)
-            .ok_or("서버 지갑 잔액 범위 오류")
-    })?;
+    let server_upload_balance =
+        server_upload_credits
+            .iter()
+            .try_fold(0_u64, |balance, credit| {
+                balance
+                    .checked_add(credit.amount)
+                    .ok_or("서버 지갑 잔액 범위 오류")
+            })?;
     let local_snapshot = state
         .latest
         .lock()
@@ -156,7 +162,7 @@ pub async fn sync_once(state: &AppState) -> Result<(), String> {
             .merge_remote_planet_state(&canonical)
             .map_err(|_| "행성 동기화 상태를 반영할 수 없습니다")?;
         state
-            .scan()
+            .rebuild_snapshot_from_latest_usage()
             .map_err(|_| "행성 상태를 새로 계산할 수 없습니다")?;
     }
 

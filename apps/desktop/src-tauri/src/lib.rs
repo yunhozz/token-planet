@@ -27,6 +27,7 @@ use storage::ledger::Ledger;
 use tauri_plugin_dialog::DialogExt;
 
 use platform::popover::{physical_icon_bounds, popup_bounds, Bounds};
+use sync::auth::{AuthConfig, SessionStore};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowMode {
@@ -68,6 +69,7 @@ pub struct AppState {
     config: Mutex<SourceConfig>,
     pub(crate) ledger: Mutex<Ledger>,
     pub(crate) latest: Mutex<Option<WorldSnapshot>>,
+    usage_scan_failed: AtomicBool,
     pub(crate) sync_failed: Mutex<bool>,
     pub(crate) sync_gate: tokio::sync::Mutex<()>,
     pub(crate) window_mode: Mutex<WindowMode>,
@@ -79,6 +81,38 @@ pub(crate) fn transition_window_mode(
     app: &AppHandle,
     target: WindowMode,
     icon_rect: Option<Rect>,
+) -> Result<(), String> {
+    transition_window_mode_with_visibility(app, target, icon_rect, true)
+}
+
+fn transition_startup_window_mode(
+    app: &AppHandle,
+    target: WindowMode,
+    icon_rect: Option<Rect>,
+) -> Result<(), String> {
+    let window = app
+        .get_webview_window("main")
+        .ok_or_else(|| "main window unavailable".to_string())?;
+    let state = app.state::<AppState>();
+    if *state
+        .window_mode
+        .lock()
+        .map_err(|_| "window mode unavailable".to_string())?
+        == WindowMode::Detail
+    {
+        return Ok(());
+    }
+    let visible = window
+        .is_visible()
+        .map_err(|_| "window visibility unavailable".to_string())?;
+    transition_window_mode_with_visibility(app, target, icon_rect, visible)
+}
+
+fn transition_window_mode_with_visibility(
+    app: &AppHandle,
+    target: WindowMode,
+    icon_rect: Option<Rect>,
+    show: bool,
 ) -> Result<(), String> {
     let window = app
         .get_webview_window("main")
@@ -92,7 +126,7 @@ pub(crate) fn transition_window_mode(
         .mode_transitioning
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| "window transition already in progress".to_string())?;
-    let applied = apply_window_mode(&window, target, icon_rect);
+    let applied = apply_window_mode(&window, target, icon_rect, show);
     let result = if applied.is_ok() {
         state
             .window_mode
@@ -103,7 +137,7 @@ pub(crate) fn transition_window_mode(
         applied
     };
     if result.is_err() {
-        let _ = apply_window_mode(&window, previous, icon_rect);
+        let _ = apply_window_mode(&window, previous, icon_rect, show);
     }
     state.mode_transitioning.store(false, Ordering::SeqCst);
     result
@@ -113,6 +147,7 @@ fn apply_window_mode(
     window: &WebviewWindow,
     mode: WindowMode,
     icon_rect: Option<Rect>,
+    show: bool,
 ) -> Result<(), String> {
     match mode {
         WindowMode::Detail => {
@@ -181,15 +216,17 @@ fn apply_window_mode(
         }
     }
 
-    window
-        .unminimize()
-        .map_err(|_| "window restore unavailable".to_string())?;
-    window
-        .show()
-        .map_err(|_| "window show unavailable".to_string())?;
-    window
-        .set_focus()
-        .map_err(|_| "window focus unavailable".to_string())?;
+    if show {
+        window
+            .unminimize()
+            .map_err(|_| "window restore unavailable".to_string())?;
+        window
+            .show()
+            .map_err(|_| "window show unavailable".to_string())?;
+        window
+            .set_focus()
+            .map_err(|_| "window focus unavailable".to_string())?;
+    }
     Ok(())
 }
 
@@ -213,7 +250,7 @@ fn popup_monitor(
                 && center_x < left + i64::from(size.width)
                 && center_y >= top
                 && center_y < top + i64::from(size.height))
-                .then(|| (monitor.clone(), icon))
+            .then(|| (monitor.clone(), icon))
         })
     });
     if let Some((monitor, icon)) = icon_monitor {
@@ -245,16 +282,31 @@ mod window_mode_tests {
 
     #[test]
     fn failed_startup_scan_shows_loading_popup_without_offering_profile_creation() {
-        assert_eq!(initial_mode_after_scan(Err::<bool, ()>(())), WindowMode::Popup);
-        assert_eq!(initial_mode_after_scan(Ok::<bool, ()>(true)), WindowMode::Popup);
-        assert_eq!(initial_mode_after_scan(Ok::<bool, ()>(false)), WindowMode::Setup);
+        assert_eq!(
+            initial_mode_after_scan(Err::<bool, ()>(())),
+            WindowMode::Popup
+        );
+        assert_eq!(
+            initial_mode_after_scan(Ok::<bool, ()>(true)),
+            WindowMode::Popup
+        );
+        assert_eq!(
+            initial_mode_after_scan(Ok::<bool, ()>(false)),
+            WindowMode::Setup
+        );
     }
 
     #[test]
     fn tray_click_toggles_popup() {
         assert_eq!(tray_target(WindowMode::Popup, true), None);
-        assert_eq!(tray_target(WindowMode::Popup, false), Some(WindowMode::Popup));
-        assert_eq!(tray_target(WindowMode::Detail, true), Some(WindowMode::Popup));
+        assert_eq!(
+            tray_target(WindowMode::Popup, false),
+            Some(WindowMode::Popup)
+        );
+        assert_eq!(
+            tray_target(WindowMode::Detail, true),
+            Some(WindowMode::Popup)
+        );
     }
 
     #[test]
@@ -279,6 +331,13 @@ mod window_mode_tests {
 
 impl AppState {
     pub(crate) fn select_planet_account(&self, user_id: &str) -> Result<(), String> {
+        if self.switch_planet_account(user_id)? {
+            self.scan()?;
+        }
+        Ok(())
+    }
+
+    fn switch_planet_account(&self, user_id: &str) -> Result<bool, String> {
         let changed = self
             .ledger
             .lock()
@@ -289,12 +348,19 @@ impl AppState {
             // Invalidate the previous account's frontend snapshot before any
             // fallible scan, so it can never become an upload for this account.
             *self.latest.lock().map_err(|_| "usage status unavailable")? = None;
-            self.scan()?;
+            self.usage_scan_failed.store(false, Ordering::SeqCst);
         }
-        Ok(())
+        Ok(changed)
     }
 
     pub(crate) fn scan(&self) -> Result<WorldSnapshot, String> {
+        let result = self.scan_inner();
+        self.usage_scan_failed
+            .store(result.is_err(), Ordering::SeqCst);
+        result
+    }
+
+    fn scan_inner(&self) -> Result<WorldSnapshot, String> {
         let config = self
             .config
             .lock()
@@ -315,10 +381,49 @@ impl AppState {
         *self.latest.lock().map_err(|_| "usage status unavailable")? = Some(snapshot.clone());
         Ok(snapshot)
     }
+
+    pub(crate) fn rebuild_snapshot_from_latest_usage(&self) -> Result<WorldSnapshot, String> {
+        let mut ledger = self.ledger.lock().map_err(|_| "local ledger unavailable")?;
+        if self.usage_scan_failed.load(Ordering::SeqCst) {
+            return Err("usage scan unavailable".into());
+        }
+        let usage = self
+            .latest
+            .lock()
+            .map_err(|_| "usage status unavailable")?
+            .as_ref()
+            .map(|snapshot| snapshot.usage.clone());
+        let Some(usage) = usage else {
+            drop(ledger);
+            return self.scan();
+        };
+        ledger
+            .prepare_growth_journal()
+            .map_err(|_| "growth journal unavailable")?;
+        let snapshot = world_snapshot(&ledger, usage).map_err(|_| "world growth unavailable")?;
+        *self.latest.lock().map_err(|_| "usage status unavailable")? = Some(snapshot.clone());
+        Ok(snapshot)
+    }
+
+    pub(crate) fn has_usage_scan_failure(&self) -> bool {
+        self.usage_scan_failed.load(Ordering::SeqCst)
+    }
+}
+
+fn restore_saved_planet_account(state: &AppState) -> Result<(), String> {
+    let Some(config) = AuthConfig::from_env() else {
+        return Ok(());
+    };
+    let store = SessionStore::new(&config).map_err(|_| "로그인 정보 오류".to_string())?;
+    if let Some(saved) = store.load().map_err(|_| "로그인 정보 오류".to_string())? {
+        state.switch_planet_account(&saved.user.id)?;
+    }
+    Ok(())
 }
 
 #[tauri::command]
 fn refresh_usage(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnapshot, String> {
+    restore_saved_planet_account(&state)?;
     let snapshot = state.scan()?;
     let _ = platform::tray::refresh_status(&app, &snapshot);
     Ok(snapshot)
@@ -326,11 +431,15 @@ fn refresh_usage(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnap
 
 #[tauri::command]
 fn current_usage(state: State<'_, AppState>) -> Result<Option<WorldSnapshot>, String> {
-    Ok(state
+    let snapshot = state
         .latest
         .lock()
         .map_err(|_| "usage status unavailable")?
-        .clone())
+        .clone();
+    if snapshot.is_none() && state.usage_scan_failed.load(Ordering::SeqCst) {
+        return Err("usage scan unavailable".into());
+    }
+    Ok(snapshot)
 }
 
 #[tauri::command]
@@ -340,6 +449,7 @@ fn set_planet_profile(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorldSnapshot, String> {
+    restore_saved_planet_account(&state)?;
     state
         .ledger
         .lock()
@@ -348,16 +458,13 @@ fn set_planet_profile(
         .map_err(|_| "행성 프로필을 저장할 수 없습니다")?;
     let snapshot = state.scan()?;
     let _ = platform::tray::refresh_status(&app, &snapshot);
-    transition_window_mode(
-        &app,
-        WindowMode::Popup,
-        platform::tray::icon_rect(&app),
-    )?;
+    transition_window_mode(&app, WindowMode::Popup, platform::tray::icon_rect(&app))?;
     Ok(snapshot)
 }
 
 #[tauri::command]
 fn reset_planet(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnapshot, String> {
+    restore_saved_planet_account(&state)?;
     let _ = state.scan()?;
     state
         .ledger
@@ -370,7 +477,7 @@ fn reset_planet(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnaps
             }
             _ => String::from("행성을 초기화할 수 없습니다"),
         })?;
-    let snapshot = state.scan()?;
+    let snapshot = state.rebuild_snapshot_from_latest_usage()?;
     let _ = platform::tray::refresh_status(&app, &snapshot);
     Ok(snapshot)
 }
@@ -382,6 +489,7 @@ fn set_source_enabled(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorldSnapshot, String> {
+    restore_saved_planet_account(&state)?;
     state
         .ledger
         .lock()
@@ -399,6 +507,7 @@ async fn choose_source_folder(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<WorldSnapshot>, String> {
+    restore_saved_planet_account(&state)?;
     let title = match agent {
         Agent::Codex => "Codex sessions 폴더 선택",
         Agent::ClaudeCode => "Claude Code projects 폴더 선택",
@@ -436,6 +545,7 @@ async fn choose_source_folder(
             Agent::ClaudeCode => config.claude_root = folder,
         }
     }
+    restore_saved_planet_account(&state)?;
     let snapshot = state.scan()?;
     let _ = platform::tray::refresh_status(&app, &snapshot);
     Ok(Some(snapshot))
@@ -443,7 +553,11 @@ async fn choose_source_folder(
 
 #[tauri::command]
 fn set_detail_view(detail: bool, app: AppHandle) -> Result<(), String> {
-    let target = if detail { WindowMode::Detail } else { WindowMode::Popup };
+    let target = if detail {
+        WindowMode::Detail
+    } else {
+        WindowMode::Popup
+    };
     let icon_rect = (!detail).then(|| platform::tray::icon_rect(&app)).flatten();
     transition_window_mode(&app, target, icon_rect)
 }
@@ -522,57 +636,91 @@ pub fn run() {
                 config: Mutex::new(config),
                 ledger: Mutex::new(ledger),
                 latest: Mutex::new(None),
+                usage_scan_failed: AtomicBool::new(false),
                 sync_failed: Mutex::new(false),
                 sync_gate: tokio::sync::Mutex::new(()),
                 window_mode: Mutex::new(WindowMode::Popup),
                 mode_transitioning: AtomicBool::new(false),
                 tray_press_pending: AtomicBool::new(false),
             };
-            let initial_scan = state.scan();
-            let startup_mode = initial_mode_after_scan(
-                initial_scan
-                    .as_ref()
-                    .map(|snapshot| snapshot.planet.profile.is_some()),
-            );
-            *state
-                .window_mode
-                .lock()
-                .map_err(|_| io::Error::other("window mode unavailable"))? = startup_mode;
             app.manage(state);
-            if let Some(snapshot) = app
-                .state::<AppState>()
-                .latest
-                .lock()
-                .ok()
-                .and_then(|value| value.clone())
-            {
-                let _ = platform::tray::refresh_status(app.handle(), &snapshot);
-            }
-            transition_window_mode(
-                app.handle(),
-                startup_mode,
-                (startup_mode == WindowMode::Popup)
-                    .then(|| platform::tray::icon_rect(app.handle()))
-                    .flatten(),
-            )
-            .map_err(io::Error::other)?;
             let handle = app.handle().clone();
-            std::thread::spawn(move || {
-                let mut retry = sync::worker::RetryDelay::default();
-                loop {
-                    let state = handle.state::<AppState>();
-                    if let Ok(summary) = state.scan() {
-                        let _ = platform::tray::refresh_status(&handle, &summary);
-                        let _ = handle.emit("usage-updated", summary);
-                    }
-                    let result = tauri::async_runtime::block_on(sync::worker::sync_once(&state));
-                    if let Ok(mut failed) = state.sync_failed.lock() {
-                        *failed = result.is_err();
-                    }
-                    let _ = handle.emit("sync-status-updated", ());
-                    std::thread::sleep(retry.next_after(result.is_ok()));
-                }
-            });
+            handle
+                .clone()
+                .run_on_main_thread(move || {
+                    let _ = transition_window_mode(
+                        &handle,
+                        WindowMode::Popup,
+                        platform::tray::icon_rect(&handle),
+                    );
+                    let worker_handle = handle.clone();
+                    std::thread::spawn(move || {
+                        let state = worker_handle.state::<AppState>();
+                        let initial_scan =
+                            restore_saved_planet_account(&state).and_then(|_| state.scan());
+                        state
+                            .usage_scan_failed
+                            .store(initial_scan.is_err(), Ordering::SeqCst);
+                        let startup_mode = initial_mode_after_scan(
+                            initial_scan
+                                .as_ref()
+                                .map(|snapshot| snapshot.planet.profile.is_some()),
+                        );
+                        match &initial_scan {
+                            Ok(snapshot) => {
+                                let _ = platform::tray::refresh_status(&worker_handle, snapshot);
+                                let _ = worker_handle.emit("usage-updated", snapshot);
+                            }
+                            Err(error) => {
+                                let _ = worker_handle.emit("usage-scan-failed", error);
+                            }
+                        }
+                        let mode_handle = worker_handle.clone();
+                        let mode_dispatch = mode_handle.clone();
+                        let _ = mode_dispatch.run_on_main_thread(move || {
+                            let icon_rect = (startup_mode == WindowMode::Popup)
+                                .then(|| platform::tray::icon_rect(&mode_handle))
+                                .flatten();
+                            let _ = transition_startup_window_mode(
+                                &mode_handle,
+                                startup_mode,
+                                icon_rect,
+                            );
+                        });
+
+                        let mut retry = sync::worker::RetryDelay::default();
+                        let mut first_cycle = true;
+                        loop {
+                            let state = worker_handle.state::<AppState>();
+                            if !first_cycle {
+                                match restore_saved_planet_account(&state)
+                                    .and_then(|_| state.scan())
+                                {
+                                    Ok(snapshot) => {
+                                        let _ = platform::tray::refresh_status(
+                                            &worker_handle,
+                                            &snapshot,
+                                        );
+                                        let _ = worker_handle.emit("usage-updated", snapshot);
+                                    }
+                                    Err(error) => {
+                                        state.usage_scan_failed.store(true, Ordering::SeqCst);
+                                        let _ = worker_handle.emit("usage-scan-failed", error);
+                                    }
+                                }
+                            }
+                            first_cycle = false;
+                            let result =
+                                tauri::async_runtime::block_on(sync::worker::sync_once(&state));
+                            if let Ok(mut failed) = state.sync_failed.lock() {
+                                *failed = result.is_err();
+                            }
+                            let _ = worker_handle.emit("sync-status-updated", ());
+                            std::thread::sleep(retry.next_after(result.is_ok()));
+                        }
+                    });
+                })
+                .map_err(io::Error::other)?;
             Ok(())
         })
         .on_window_event(|window, event| {
@@ -584,15 +732,9 @@ pub fn run() {
                     return;
                 };
                 if !state.mode_transitioning.load(Ordering::SeqCst)
-                    && state
-                        .window_mode
-                        .lock()
-                        .is_ok_and(|mode| {
-                            should_hide_on_blur(
-                                *mode,
-                                state.tray_press_pending.load(Ordering::SeqCst),
-                            )
-                        })
+                    && state.window_mode.lock().is_ok_and(|mode| {
+                        should_hide_on_blur(*mode, state.tray_press_pending.load(Ordering::SeqCst))
+                    })
                 {
                     let _ = window.hide();
                 }
