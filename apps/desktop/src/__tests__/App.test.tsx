@@ -1,8 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../App";
 import type { SharingState } from "../lib/sharing";
-import type { CosmeticShopState, WorldSnapshot } from "../types/usage";
+import type { CosmeticShopState, GrowthJournal as GrowthJournalData, WorldSnapshot } from "../types/usage";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn());
@@ -46,6 +46,23 @@ function catalogShopState(balance: number, owned: string[] = []): CosmeticShopSt
     products: [{ sku: "star_cluster", slot_id: "sky", display_name: "별무리", price: 100_000, catalog_revision: 1, purchasable: true }],
     owned_skus: owned,
     slot_versions: { sky: 0 },
+  };
+}
+
+function growthJournal(generation = 1, deletedAt: string | null = null, hasRecord = true, tokens = 123_456): GrowthJournalData {
+  const today = new Date().toISOString().slice(0, 10);
+  return {
+    generation,
+    deleted_at_utc: deletedAt,
+    timezone: "UTC",
+    cycles: hasRecord ? [{
+      cycle_id: "cycle-1", started_at_utc: `${today}T00:00:00Z`, ended_at_utc: null,
+      wallet_credit: null, wallet_credit_at_utc: null,
+    }] : [],
+    entries: hasRecord ? [{
+      device_id: "device-1", cycle_id: "cycle-1", bucket_date: today, agent: "codex",
+      revision: 1, generation, present: true, confirmed_tokens: tokens, coverage: "complete", payload_hash: "fixture",
+    }] : [],
   };
 }
 
@@ -338,6 +355,99 @@ it("ignores a late journal failure after leaving and reloads on reentry", async 
     currentRead.resolve({ generation: 1, deleted_at_utc: null, timezone: "UTC", cycles: [], entries: [] });
   });
   expect(await screen.findByText("확인된 행성 주기가 없습니다.")).toBeInTheDocument();
+});
+
+it("does not offer personal journal deletion in a signed-out local phase", async () => {
+  const localState: SharingState = {
+    ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local",
+  };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(localState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_growth_journal") return growthJournal();
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(screen.getByRole("button", { name: "성장 일지 보기" }));
+  const journalRegion = await screen.findByRole("region", { name: "성장 일지" });
+
+  expect(journalRegion.querySelector(".growth-journal-total")?.textContent).toContain("123,456");
+  expect(within(journalRegion).queryByRole("button", { name: "개인 일지 삭제" })).not.toBeInTheDocument();
+  expect(invokeMock).not.toHaveBeenCalledWith("delete_growth_journal");
+});
+
+it.each(["shared", "signed_in"] as const)("requires confirmation and then applies journal deletion for %s users", async (phase) => {
+  const state: SharingState = phase === "shared"
+    ? structuredClone(ownerState)
+    : { ...ownerState, phase: "signed_in", world: null };
+  const deletedJournal = growthJournal(2, new Date().toISOString(), false);
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(state);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_growth_journal") return growthJournal();
+    if (command === "delete_growth_journal") return structuredClone(deletedJournal);
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(screen.getByRole("button", { name: "성장 일지 보기" }));
+  const journalRegion = await screen.findByRole("region", { name: "성장 일지" });
+  const deleteButton = within(journalRegion).getByRole("button", { name: "개인 일지 삭제" });
+  expect(journalRegion.querySelector(".growth-journal-total")?.textContent).toContain("123,456");
+
+  fireEvent.click(deleteButton);
+  expect(confirm).toHaveBeenCalled();
+  expect(invokeMock).not.toHaveBeenCalledWith("delete_growth_journal");
+  expect(journalRegion.querySelector(".growth-journal-total")?.textContent).toContain("123,456");
+
+  confirm.mockReturnValue(true);
+  fireEvent.click(deleteButton);
+
+  expect(await within(journalRegion).findByText("확인된 행성 주기가 없습니다.")).toBeInTheDocument();
+  expect(journalRegion.querySelector(".growth-journal-total")).toBeNull();
+  expect(invokeMock).toHaveBeenCalledWith("delete_growth_journal");
+});
+
+it("shows a retryable journal error after delete fails", async () => {
+  let journalReads = 0;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_growth_journal") return journalReads++ === 0 ? growthJournal() : growthJournal(2, null, true, 654_321);
+    if (command === "delete_growth_journal") throw new Error("temporary delete failure");
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(screen.getByRole("button", { name: "성장 일지 보기" }));
+  const journalRegion = await screen.findByRole("region", { name: "성장 일지" });
+  await waitFor(() => expect(journalRegion.querySelector(".growth-journal-total")?.textContent).toContain("123,456"));
+  fireEvent.click(within(journalRegion).getByRole("button", { name: "개인 일지 삭제" }));
+
+  expect(await within(journalRegion).findByRole("alert")).toHaveTextContent("개인 일지를 삭제하지 못했습니다.");
+  const reloadButton = within(journalRegion).getByRole("button", { name: "성장 일지 새로고침" });
+  expect(reloadButton).toBeEnabled();
+  const previousJournalReads = journalReads;
+  fireEvent.click(reloadButton);
+
+  await waitFor(() => expect(journalReads).toBeGreaterThan(previousJournalReads));
+  await waitFor(() => expect(screen.getByRole("region", { name: "성장 일지" }).querySelector(".growth-journal-total")?.textContent).toContain("654,321"));
+  expect(within(screen.getByRole("region", { name: "성장 일지" })).queryByRole("alert")).not.toBeInTheDocument();
 });
 
 it("refreshes owner candidates even when the member count stays the same", async () => {
