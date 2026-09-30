@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { beforeEach, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../App";
 import type { SharingState } from "../lib/sharing";
 import type { CosmeticShopState, WorldSnapshot } from "../types/usage";
@@ -82,6 +82,7 @@ it("starts anonymous sharing without email sign-in", async () => {
 });
 
 beforeEach(() => {
+  window.history.replaceState({}, "", "/");
   invokeMock.mockReset();
   listenMock.mockReset();
   isTauriMock.mockReturnValue(false);
@@ -97,6 +98,74 @@ beforeEach(() => {
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
+
+it("opens the cosmetic shop in the current window and restores exploration on return", async () => {
+  const snapshot = structuredClone(localSnapshot);
+  snapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+    { stage: 1, ordinal: 3, kind: "tree", x: 63, y: 20, seed: 3 },
+  ];
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
+    if (command === "get_shop_state") return shopState(0);
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  const openWindow = vi.spyOn(window, "open").mockImplementation(() => null);
+  const { container } = render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(screen.getByRole("button", { name: "확대" }));
+  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  const originalViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
+
+  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
+
+  expect(openWindow).not.toHaveBeenCalled();
+  expect(await screen.findByRole("heading", { name: "행성 꾸미기", level: 1 })).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+
+  expect(await screen.findByRole("region", { name: "행성 풍경" })).toBeInTheDocument();
+  expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
+  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
+  expect(screen.getByRole("button", { name: "행성 꾸미기" })).toHaveFocus();
+});
+
+it("opens the growth journal in the current window and returns to personal detail", async () => {
+  const openWindow = vi.spyOn(window, "open").mockImplementation(() => null);
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(screen.getByRole("button", { name: "성장 일지 보기" }));
+
+  expect(openWindow).not.toHaveBeenCalled();
+  expect(await screen.findByRole("heading", { name: "성장 일지", level: 1 })).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+
+  expect(await screen.findByRole("region", { name: "행성 풍경" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "성장 일지 보기" })).toHaveFocus();
+});
+
+it("opens legacy feature URLs in detail mode and returns to personal detail", async () => {
+  window.history.replaceState({}, "", "/?window=cosmetic-shop");
+  const { container } = render(<App />);
+
+  expect(await screen.findByRole("heading", { name: "행성 꾸미기", level: 1 })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+
+  expect(await screen.findByRole("tab", { name: "내 행성" })).toHaveAttribute("aria-selected", "true");
+  expect(container.querySelector(".planet-landscape")).toBeInTheDocument();
+  expect(screen.queryByRole("main", { name: "행성 팝오버" })).not.toBeInTheDocument();
 });
 
 it("uses the flat landscape only in personal detail and keeps exploration when switching tabs", async () => {
@@ -212,7 +281,32 @@ it("refreshes the confirmed shop state after sync finishes", async () => {
   await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰"));
 });
 
-it("coalesces a shared shop read and retries after that read fails", async () => {
+it("retries an unavailable shop when navigating to the in-app shop screen", async () => {
+  let shopReads = 0;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") {
+      shopReads += 1;
+      if (shopReads === 1) throw new Error("temporary shop read failure");
+      return catalogShopState(300_000);
+    }
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  await screen.findByText("상점 상태를 불러오지 못했습니다.");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("300,000 토큰"));
+  expect(shopReads).toBe(2);
+});
+
+it("coalesces a shared shop read when opening the in-app shop screen", async () => {
   let latestShop = catalogShopState(200_000);
   let heldRead: ReturnType<typeof deferred<CosmeticShopState>> | null = null;
   invokeMock.mockImplementation(async (command: string) => {
@@ -225,32 +319,21 @@ it("coalesces a shared shop read and retries after that read fails", async () =>
   });
   render(<App />);
   await screen.findByText("Orbit의 행성");
-  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
-
   const readsBefore = invokeMock.mock.calls.filter(([command]) => command === "get_shop_state").length;
   heldRead = deferred<CosmeticShopState>();
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
   await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 1));
 
-  fireEvent.click(screen.getByRole("button", { name: "상점 닫기" }));
-  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
-  await screen.findByRole("region", { name: "행성 꾸미기 상점" });
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  await waitFor(() => expect(document.querySelector(".cosmetic-shop")).toBeInTheDocument());
   expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 1);
 
-  await act(async () => { heldRead!.reject(new Error("temporary network error")); });
-  expect(await screen.findByText("상점 상태를 새로 확인하지 못했습니다.")).toHaveAttribute("role", "status");
-
-  heldRead = null;
-  latestShop = catalogShopState(300_000);
-  fireEvent.click(screen.getByRole("button", { name: "상점 닫기" }));
-  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 2));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("300,000 토큰"));
+  await act(async () => { heldRead!.resolve(structuredClone(latestShop)); });
+  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
 });
 
-it("keeps the confirmed purchase after an older shared shop read finishes", async () => {
+it("keeps a confirmed purchase without equipping it automatically", async () => {
   const originalShop = catalogShopState(200_000);
   const purchasedShop = catalogShopState(100_000, ["star_cluster"]);
   let heldRead: ReturnType<typeof deferred<CosmeticShopState>> | null = null;
@@ -266,7 +349,7 @@ it("keeps the confirmed purchase after an older shared shop read finishes", asyn
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
-  render(<App />);
+  const { container } = render(<App />);
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
@@ -286,6 +369,43 @@ it("keeps the confirmed purchase after an older shared shop read finishes", asyn
   fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
   expect(await screen.findByRole("button", { name: "별무리 장착" })).toBeInTheDocument();
   expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰");
+
+  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  expect(container.querySelector('[data-cosmetic="star_cluster"]')).not.toBeInTheDocument();
+});
+
+it("shows confirmed equipment on the planet after returning from the shop", async () => {
+  const ownedShop = catalogShopState(500_000, ["star_cluster"]);
+  const equippedShop = {
+    ...ownedShop,
+    equipped: [{ slot_id: "sky", sku: "star_cluster", version: 1 }],
+    slot_versions: { sky: 1 },
+  };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return structuredClone(ownedShop);
+    if (command === "equip_cosmetic") return {
+      result: { status: "equipped", cycle_id: "cycle-1", slot_id: "sky", sku: "star_cluster", version: 1 },
+      state: structuredClone(equippedShop), unavailable_reason: null,
+    };
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  const { container } = render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
+  fireEvent.click(await screen.findByRole("button", { name: "별무리 장착" }));
+  expect(await screen.findByText("행성에 장식을 장착했습니다.")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  expect(container.querySelector('[data-cosmetic="star_cluster"]')).toBeInTheDocument();
 });
 
 it("does not show the previous account shop when the next account lookup fails", async () => {
@@ -436,7 +556,7 @@ it("keeps_unknown_usage_distinct_from_zero", async () => {
   expect(screen.getByRole("region", { name: "수집 상태" })).not.toHaveTextContent("0 토큰");
 });
 
-it("clears a cosmetic preview when leaving the personal detail tab", async () => {
+it("clears a cosmetic preview when leaving the shop and personal detail", async () => {
   const previewShop: CosmeticShopState = {
     ...shopState(600_000),
     slots: [{ slot_id: "sky", display_name: "하늘" }],
@@ -457,6 +577,10 @@ it("clears a cosmetic preview when leaving the personal detail tab", async () =>
   fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
   fireEvent.click(await screen.findByRole("button", { name: "별무리 미리보기" }));
   expect(document.querySelector('[data-cosmetic="star_cluster"]')).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  expect(document.querySelector('[data-cosmetic="star_cluster"]')).not.toBeInTheDocument();
 
   fireEvent.click(screen.getByRole("tab", { name: "그룹" }));
   fireEvent.click(screen.getByRole("tab", { name: "내 행성" }));

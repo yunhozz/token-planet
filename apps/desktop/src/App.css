@@ -384,8 +384,12 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
   .cosmetic-item-actions { justify-content: flex-start; }
 }
 
-.app-shell--feature-window { display: flex; flex-direction: column; width: 100vw; height: 100vh; min-height: 0; padding: 12px 16px; overflow: hidden; }
-.app-shell--feature-window .topbar { flex: none; }
+.app-shell--feature-screen { display: flex; flex-direction: column; width: 100vw; height: 100vh; min-height: 0; padding: 12px 16px; overflow: hidden; }
+.app-shell--feature-screen .topbar { flex: none; gap: 10px; }
+.feature-screen-title { flex: 1; min-width: 0; margin: 0; color: var(--paper); font-size: 20px; text-align: center; }
+.feature-screen-title:focus { outline: none; }
+.feature-screen-back { flex: none; min-height: 40px; padding: 6px 9px; border: 1px solid var(--rule); color: var(--paper); background: #20283c; font-size: 14px; font-weight: 700; }
+.feature-screen-back:hover { color: var(--gold); border-color: var(--gold); }
 .feature-window-content { flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain; scrollbar-color: #63728a transparent; scrollbar-width: thin; }
 .planet-feature-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 12px 0; }
 .planet-feature-actions button { min-height: 48px; padding: 9px 11px; border: 2px solid #b5d6a2; color: #172735; background: var(--mint); font-weight: 800; }
@@ -393,7 +397,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .shop-planet-preview { position: sticky; top: 0; z-index: 2; display: grid; grid-template-columns: minmax(145px, 190px) minmax(0, 1fr); align-items: center; gap: 10px; margin: 0 -2px; padding: 5px 2px 8px; border-bottom: 1px solid #536173; background: #171d31f5; }
 .shop-planet-preview .planet-scene-canvas { width: min(100%, 190px); }
 .shop-planet-preview-copy { min-width: 0; }
-.shop-planet-preview-copy h1 { margin: 0 0 7px; color: var(--paper); font-size: 18px; overflow-wrap: anywhere; }
+.shop-planet-preview-copy h2 { margin: 0 0 7px; color: var(--paper); font-size: 18px; overflow-wrap: anywhere; }
 .shop-planet-preview-copy p { margin: 0 0 7px; color: var(--muted); font-size: 14px; line-height: 1.4; }
 .shop-planet-preview-copy strong { color: var(--gold); font-size: 14px; }
 .shop-window-store .cosmetic-shop { margin-top: 10px; }
@@ -409,7 +413,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 @media (max-height: 580px) {
   .shop-planet-preview { grid-template-columns: minmax(110px, 145px) minmax(0, 1fr); }
   .shop-planet-preview .planet-scene-canvas { width: min(100%, 145px); }
-  .shop-planet-preview-copy h1 { margin-bottom: 4px; }
+  .shop-planet-preview-copy h2 { margin-bottom: 4px; }
   .shop-planet-preview-copy p { margin-bottom: 4px; }
 }
 
