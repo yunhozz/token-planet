@@ -422,11 +422,16 @@ fn restore_saved_planet_account(state: &AppState) -> Result<(), String> {
 }
 
 #[tauri::command]
-fn refresh_usage(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnapshot, String> {
-    restore_saved_planet_account(&state)?;
-    let snapshot = state.scan()?;
-    let _ = platform::tray::refresh_status(&app, &snapshot);
-    Ok(snapshot)
+async fn refresh_usage(app: AppHandle) -> Result<WorldSnapshot, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        restore_saved_planet_account(&state)?;
+        let snapshot = state.scan()?;
+        let _ = platform::tray::refresh_status(&app, &snapshot);
+        Ok(snapshot)
+    })
+    .await
+    .map_err(|_| "사용량 새로고침 작업을 완료하지 못했습니다".to_string())?
 }
 
 #[tauri::command]
