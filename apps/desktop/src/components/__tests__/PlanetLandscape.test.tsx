@@ -1,17 +1,77 @@
-import { render } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
-import { PlanetLandscape } from "../PlanetLandscape";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
+import { useState } from "react";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { PlanetLandscape, planetLandscapeBounds, type PlanetExplorationState } from "../PlanetLandscape";
 import { PlanetLandscapeDecorations } from "../PlanetLandscapeDecorations";
+import { fitLandscape } from "../planetLandscapeCamera";
+import type { PlanetObject } from "../../types/usage";
+
+class TestResizeObserver {
+  static latest: TestResizeObserver | null = null;
+  private target: Element | null = null;
+
+  constructor(private callback: ResizeObserverCallback) {
+    TestResizeObserver.latest = this;
+  }
+
+  observe(target: Element) { this.target = target; }
+  disconnect() {}
+  unobserve() {}
+
+  resize(width: number, height: number) {
+    if (!this.target) throw new Error("ResizeObserver was not attached");
+    const entry = { target: this.target, contentRect: { width, height } as DOMRectReadOnly } as ResizeObserverEntry;
+    this.callback([entry], this as unknown as ResizeObserver);
+  }
+}
+
+afterEach(() => vi.unstubAllGlobals());
 
 const objects = [
   { stage: 0, ordinal: 0, kind: "water", x: 34, y: 29, seed: 14 },
   { stage: 2, ordinal: 0, kind: "house", x: 52, y: 45, seed: 39 },
 ] as const;
 
+const selectableObjects: PlanetObject[] = [
+  { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+  { stage: 1, ordinal: 3, kind: "tree", x: 63, y: 20, seed: 3 },
+];
+
+function ControlledLandscape({
+  objects = selectableObjects,
+  stage = 2,
+  avatar = "masculine",
+  equippedCosmetics = [],
+}: {
+  objects?: PlanetObject[];
+  stage?: number;
+  avatar?: "masculine" | "feminine";
+  equippedCosmetics?: { slot_id: string; sku: string; version: number }[];
+}) {
+  const [exploration, setExploration] = useState<PlanetExplorationState>(() => ({
+    camera: fitLandscape(planetLandscapeBounds(objects)),
+    selectedObjectId: null,
+  }));
+
+  return (
+    <PlanetLandscape
+      stage={stage}
+      progress={0.35}
+      avatar={avatar}
+      objects={objects}
+      equippedCosmetics={equippedCosmetics}
+      incomplete={false}
+      cycleId="cycle-1"
+      exploration={exploration}
+      onExplorationChange={setExploration}
+    />
+  );
+}
+
 describe("planet landscape artwork", () => {
   it("shows a flat sky and ground without stretching or hiding saved objects", () => {
     const { container } = render(
-      <PlanetLandscape stage={2} avatar="masculine" objects={[...objects]} equippedCosmetics={[]} />,
+      <ControlledLandscape stage={2} objects={[...objects]} />,
     );
     const svg = container.querySelector(".planet-landscape-svg");
 
@@ -26,7 +86,7 @@ describe("planet landscape artwork", () => {
 
   it("keeps decorative era scenery separate from actual objects on an empty planet", () => {
     const { container } = render(
-      <PlanetLandscape stage={0} avatar="feminine" objects={[]} equippedCosmetics={[]} />,
+      <ControlledLandscape stage={0} avatar="feminine" objects={[]} />,
     );
 
     expect(container.querySelector("[data-landscape-decoration='natural-stream']")).toBeInTheDocument();
@@ -36,9 +96,8 @@ describe("planet landscape artwork", () => {
 
   it("draws each recognized equipped cosmetic in its matching landscape layer", () => {
     const { container } = render(
-      <PlanetLandscape
+      <ControlledLandscape
         stage={4}
-        avatar="masculine"
         objects={[{ stage: 0, ordinal: 0, kind: "rock", x: 12, y: 40, seed: 8 }]}
         equippedCosmetics={[
           { slot_id: "sky", sku: "star_cluster_v2", version: 1 },
@@ -111,5 +170,132 @@ describe("planet landscape artwork", () => {
 
     first.unmount();
     second.unmount();
+  });
+
+  it("selects a saved object from the list and shows its mapped name, era, and one-based order", () => {
+    const { container } = render(<ControlledLandscape />);
+    const svg = container.querySelector(".planet-landscape-svg")!;
+    const initialViewBox = svg.getAttribute("viewBox");
+
+    fireEvent.click(screen.getByRole("region", { name: "오브젝트 목록" }).querySelector('[data-object-list-id="1-3"]')!);
+
+    const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
+    expect(selected).toHaveTextContent("나무");
+    expect(selected).toHaveTextContent("정착·농경");
+    expect(selected).toHaveTextContent("4번째");
+    expect(selected).not.toHaveTextContent(/20\d\d[-./년]/);
+    expect(within(screen.getByRole("region", { name: "오브젝트 목록" }))
+      .getByRole("button", { name: /나무.*4번째/ })).toHaveAttribute("aria-pressed", "true");
+    expect(svg.getAttribute("viewBox")).not.toBe(initialViewBox);
+  });
+
+  it("provides a separate keyboard-accessible scene target and list entry for every saved object", () => {
+    const manyCollocated: PlanetObject[] = Array.from({ length: 120 }, (_, ordinal) => ({
+      stage: 0, ordinal, kind: "rock", x: 50, y: 50, seed: 1,
+    }));
+    const { container } = render(<ControlledLandscape objects={manyCollocated} />);
+
+    expect(container.querySelectorAll("[data-landscape-object-id]")).toHaveLength(manyCollocated.length);
+    expect(container.querySelectorAll("[data-landscape-hit-id]")).toHaveLength(manyCollocated.length);
+    expect(within(screen.getByRole("region", { name: "오브젝트 목록" })).getAllByRole("button"))
+      .toHaveLength(manyCollocated.length);
+    expect(screen.queryByText(/^\+\d/)).not.toBeInTheDocument();
+  });
+
+  it("explains when an empty planet has no saved objects", () => {
+    render(<ControlledLandscape objects={[]} />);
+
+    expect(screen.getByRole("region", { name: "오브젝트 목록" }))
+      .toHaveTextContent("아직 생성된 오브젝트가 없습니다.");
+    expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
+  });
+
+  it("zooms, restores the full view, and pans with arrow keys only while the scene is focused", () => {
+    const { container } = render(<ControlledLandscape />);
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector(".planet-landscape-svg")!;
+    const initialViewBox = svg.getAttribute("viewBox");
+
+    fireEvent.click(screen.getByRole("button", { name: "확대" }));
+    const zoomedViewBox = svg.getAttribute("viewBox");
+    expect(zoomedViewBox).not.toBe(initialViewBox);
+
+    viewport.focus();
+    fireEvent.keyDown(viewport, { key: "ArrowDown" });
+    expect(svg.getAttribute("viewBox")).not.toBe(zoomedViewBox);
+
+    fireEvent.click(screen.getByRole("button", { name: "전체 보기" }));
+    expect(svg.getAttribute("viewBox")).toBe(initialViewBox);
+  });
+
+  it("pans by pointer and ends the drag on pointer cancellation", () => {
+    const { container } = render(<ControlledLandscape />);
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector(".planet-landscape-svg")!;
+
+    fireEvent.click(screen.getByRole("button", { name: "확대" }));
+    const zoomedViewBox = svg.getAttribute("viewBox");
+    fireEvent.pointerDown(viewport, { pointerId: 7, button: 0, clientX: 240, clientY: 220 });
+    fireEvent.pointerMove(viewport, { pointerId: 7, clientX: 240, clientY: 170 });
+    const draggedViewBox = svg.getAttribute("viewBox");
+    expect(draggedViewBox).not.toBe(zoomedViewBox);
+    expect(viewport).toHaveClass("is-dragging");
+
+    fireEvent.pointerCancel(viewport, { pointerId: 7 });
+    expect(viewport).not.toHaveClass("is-dragging");
+    fireEvent.pointerMove(viewport, { pointerId: 7, clientX: 240, clientY: 80 });
+    expect(svg.getAttribute("viewBox")).toBe(draggedViewBox);
+  });
+
+  it("reclamps camera geometry after ResizeObserver reports a new viewport", () => {
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
+    const { container } = render(<ControlledLandscape />);
+    const svg = container.querySelector(".planet-landscape-svg")!;
+    const root = container.querySelector<HTMLElement>(".planet-landscape")!;
+
+    fireEvent.click(screen.getByRole("button", { name: "확대" }));
+    expect(Number(root.dataset.cameraZoom)).toBeGreaterThan(1);
+    act(() => TestResizeObserver.latest!.resize(360, 500));
+
+    const [x, y, width, height] = svg.getAttribute("viewBox")!.split(" ").map(Number);
+    expect(width / 360).toBeCloseTo(height / 500);
+    expect(Number.isFinite(x) && Number.isFinite(y)).toBe(true);
+    expect(Number(root.dataset.cameraCenterX)).toBeGreaterThanOrEqual(0);
+    expect(Number(root.dataset.cameraCenterX)).toBeLessThanOrEqual(600);
+    expect(Number(root.dataset.cameraZoom)).toBeGreaterThan(1);
+  });
+
+  it("applies camera changes instantly when reduced motion is preferred", () => {
+    vi.stubGlobal("matchMedia", () => ({
+      matches: true,
+      media: "(prefers-reduced-motion: reduce)",
+      onchange: null,
+      addListener: () => {},
+      removeListener: () => {},
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      dispatchEvent: () => false,
+    } as MediaQueryList));
+    const { container } = render(<ControlledLandscape />);
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+
+    fireEvent.click(screen.getByRole("button", { name: "확대" }));
+
+    expect(svg.style.transition).toBe("none");
+    expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBeGreaterThan(1);
+  });
+
+  it("selects a scene target and clears that selection if the object disappears", () => {
+    const { container, rerender } = render(<ControlledLandscape />);
+
+    fireEvent.click(container.querySelector('[data-landscape-hit-id="0-0"]')!);
+    expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toHaveTextContent("바위");
+    expect(within(screen.getByRole("region", { name: "오브젝트 목록" }))
+      .getByRole("button", { name: /바위.*1번째/ })).toHaveAttribute("aria-pressed", "true");
+
+    rerender(<ControlledLandscape objects={[]} />);
+    expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
+    expect(screen.getByRole("region", { name: "오브젝트 목록" }))
+      .toHaveTextContent("아직 생성된 오브젝트가 없습니다.");
   });
 });

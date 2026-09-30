@@ -99,6 +99,73 @@ beforeEach(() => {
   });
 });
 
+it("uses the flat landscape only in personal detail and keeps exploration when switching tabs", async () => {
+  const snapshot = structuredClone(localSnapshot);
+  snapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+    { stage: 1, ordinal: 3, kind: "tree", x: 63, y: 20, seed: 3 },
+  ];
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  const { container } = render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  expect(container.querySelector(".planet-landscape")).not.toBeInTheDocument();
+  expect(container.querySelector(".planet-svg")).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
+  expect(selected).toHaveTextContent("정착·농경");
+  expect(selected).toHaveTextContent("4번째");
+  const selectedViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
+
+  fireEvent.click(screen.getByRole("tab", { name: "그룹" }));
+  expect(container.querySelector(".planet-landscape")).not.toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("tab", { name: "내 행성" }));
+
+  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
+  expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", selectedViewBox);
+});
+
+it("resets selection and camera when the current planet cycle changes", async () => {
+  let activeSnapshot = structuredClone(localSnapshot);
+  activeSnapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+    { stage: 1, ordinal: 3, kind: "tree", x: 63, y: 20, seed: 3 },
+  ];
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(activeSnapshot);
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  const { container } = render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(screen.getByRole("button", { name: "확대" }));
+  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
+
+  activeSnapshot = structuredClone(activeSnapshot);
+  activeSnapshot.planet.current_cycle_id = "cycle-2";
+  fireEvent.click(screen.getByRole("button", { name: "사용량 새로고침" }));
+
+  await waitFor(() => expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-cycle-id", "cycle-2"));
+  expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
+  expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(1);
+  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "false");
+});
+
 it("refreshes owner candidates even when the member count stays the same", async () => {
   let roster = 0;
   invokeMock.mockImplementation(async (command: string) => {

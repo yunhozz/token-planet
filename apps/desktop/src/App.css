@@ -435,3 +435,34 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
   image-rendering: pixelated;
 }
 .planet-landscape-avatar-sprite { width: 20px; height: 25px; overflow: visible; }
+.app-shell--detail .personal-hero { display: block; }
+.app-shell--detail .personal-quick-facts,
+.app-shell--detail .personal-information { width: min(100%, 900px); margin: 16px auto 0; }
+.planet-landscape-controls { position: absolute; z-index: 2; top: 12px; right: 12px; display: flex; flex-wrap: wrap; gap: 6px; }
+.planet-landscape-controls button { min-width: 44px; min-height: 44px; padding: 6px 10px; border: 1px solid #a3b7a5; color: var(--paper); background: #1a2937eF; font: inherit; font-weight: 700; }
+.planet-landscape-controls button:hover { border-color: var(--gold); color: var(--gold); }
+.planet-landscape-viewport { touch-action: none; cursor: grab; }
+.planet-landscape-viewport.is-dragging { cursor: grabbing; }
+.planet-landscape-viewport:focus-visible { outline: 3px solid var(--gold); outline-offset: -4px; }
+.planet-landscape-object { cursor: pointer; }
+.planet-landscape-object.is-selected { filter: drop-shadow(0 0 3px #f1cf89); }
+.planet-landscape-object:focus-visible { outline: 2px solid #f1cf89; outline-offset: 2px; }
+.planet-landscape-selection,
+.planet-landscape-object-list { min-width: 0; margin: 12px auto 0; padding: 12px; border: 1px solid #536578; background: #1d2938; }
+.planet-landscape-selection { width: min(100%, 900px); }
+.planet-landscape-selection h2 { margin: 0; color: var(--gold); font-size: 20px; }
+.planet-landscape-selection p { margin: 5px 0 0; color: var(--muted); }
+.planet-landscape-object-list { width: min(100%, 1100px); }
+.planet-landscape-object-list ol { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); gap: 6px; max-height: 280px; overflow: auto; padding: 0; margin: 0; list-style: none; }
+.planet-landscape-object-list li { min-width: 0; }
+.planet-landscape-object-list button { width: 100%; min-height: 44px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 7px; padding: 6px 8px; border: 1px solid #536578; color: var(--paper); background: #202a3a; font: inherit; text-align: left; }
+.planet-landscape-object-list button span:first-of-type { color: var(--gold); }
+.planet-landscape-object-list button span:last-of-type { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
+.planet-landscape-object-list button[aria-pressed="true"] { border: 2px solid var(--mint); background: #293b43; }
+.planet-landscape-object-list button:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+
+@media (max-width: 540px) {
+  .planet-landscape-controls { top: 8px; right: 8px; gap: 4px; }
+  .planet-landscape-controls button { min-width: 40px; min-height: 40px; padding: 5px 7px; }
+  .planet-landscape-object-list ol { grid-template-columns: minmax(0, 1fr); }
+}

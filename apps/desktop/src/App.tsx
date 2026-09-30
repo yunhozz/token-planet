@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { InvitePanel } from "./components/InvitePanel";
@@ -7,6 +7,8 @@ import { FormattedNumber } from "./components/FormattedNumber";
 import { LoadingStatus } from "./components/LoadingStatus";
 import { PlanetProfileSetup } from "./components/PlanetProfileSetup";
 import { objectName, objectProgress, PlanetScene, STAGE_NAMES } from "./components/PlanetScene";
+import { fitLandscape } from "./components/planetLandscapeCamera";
+import { PlanetLandscape, planetLandscapeBounds, type PlanetExplorationState } from "./components/PlanetLandscape";
 import { SharingSetup } from "./components/SharingSetup";
 import { SourceStatus } from "./components/SourceStatus";
 import { SyncStatus } from "./components/SyncStatus";
@@ -63,6 +65,7 @@ function App() {
   const [snapshot, setSnapshot] = useState<WorldSnapshot | null>(null);
   const [detail, setDetail] = useState(false);
   const [detailTab, setDetailTab] = useState<"planet" | "group">("planet");
+  const [planetExplorationEntry, setPlanetExplorationEntry] = useState<{ context: string; value: PlanetExplorationState } | null>(null);
   const detailTabRefs = useRef<(HTMLButtonElement | null)[]>([]);
   const [error, setError] = useState(false);
   const [transitionError, setTransitionError] = useState("");
@@ -630,6 +633,23 @@ function App() {
   const view = snapshot ?? EMPTY_SNAPSHOT;
   const planet = view.planet;
   const profile = planet.profile;
+  const explorationContext = worldContext(shared, snapshot);
+  const sceneBounds = useMemo(() => planetLandscapeBounds(planet.objects), [planet.objects]);
+  const initialExploration = useMemo<PlanetExplorationState>(() => ({
+    camera: fitLandscape(sceneBounds),
+    selectedObjectId: null,
+  }), [sceneBounds]);
+  const planetExploration = planetExplorationEntry?.context === explorationContext
+    ? planetExplorationEntry.value
+    : initialExploration;
+  useEffect(() => {
+    setPlanetExplorationEntry((current) => current?.context === explorationContext
+      ? current
+      : { context: explorationContext, value: initialExploration });
+  }, [explorationContext, initialExploration]);
+  const updatePlanetExploration = (value: PlanetExplorationState) => {
+    setPlanetExplorationEntry({ context: explorationContext, value });
+  };
   const canReset = planet.can_reset || Boolean(planet.reset_available_at_utc && resetCheckAt >= Date.parse(planet.reset_available_at_utc));
   const nextObjectProgress = objectProgress(planet.growth_credit, planet.stage);
   const confirmedCosmetics = cosmeticShop?.current_cycle_id === planet.current_cycle_id
@@ -778,9 +798,17 @@ function App() {
           </div>
           {detailTab === "planet" ? <section id="panel-personal" className="detail-panel personal-panel" role="tabpanel" aria-labelledby="tab-personal" tabIndex={0}>
             <div className="personal-hero">
-              <section className="world-visual" aria-label="나의 행성">
-                <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} animate={detail} interactive publicOnly={false} incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
-              </section>
+              <PlanetLandscape
+                stage={planet.stage}
+                progress={planet.progress_to_next}
+                avatar={profile!.avatar}
+                objects={planet.objects}
+                equippedCosmetics={sceneCosmetics}
+                incomplete={planet.incomplete}
+                cycleId={planet.current_cycle_id}
+                exploration={planetExploration}
+                onExplorationChange={updatePlanetExploration}
+              />
               <div className="personal-quick-facts">
                 <h1>{profile!.nickname}의 행성</h1>
                 <div className="summary-era"><span>현재 시대</span><strong>{STAGE_NAMES[planet.stage] ?? STAGE_NAMES[4]}</strong></div>
