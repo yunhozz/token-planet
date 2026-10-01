@@ -112,7 +112,16 @@ pub struct ShopEffectTimeline {
     pub effect_revision: u64,
     pub server_time_utc: String,
     pub reward_timezone: String,
+    pub cycle_bounds: Vec<ShopCycleBound>,
     pub intervals: Vec<ShopEffectInterval>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShopCycleBound {
+    pub cycle_id: String,
+    pub started_at_utc: String,
+    pub ended_at_utc: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -633,7 +642,7 @@ pub fn legacy_equivalent(new_sku: &str) -> Option<&'static str> {
 
 #[cfg(test)]
 mod effect_timeline_tests {
-    use super::{ActiveEffects, ShopEffectInterval, ShopEffectTimeline};
+    use super::{ActiveEffects, ShopCycleBound, ShopEffectInterval, ShopEffectTimeline};
 
     #[test]
     fn confirmed_effect_timeline_uses_only_the_personal_wire_contract() {
@@ -643,6 +652,11 @@ mod effect_timeline_tests {
             effect_revision: 1,
             server_time_utc: "2026-10-01T00:00:00+00:00".into(),
             reward_timezone: "UTC".into(),
+            cycle_bounds: vec![ShopCycleBound {
+                cycle_id: "cycle-current".into(),
+                started_at_utc: "2026-09-24T00:00:00+00:00".into(),
+                ended_at_utc: None,
+            }],
             intervals: vec![ShopEffectInterval {
                 cycle_id: "cycle-current".into(),
                 revision: 1,
@@ -664,6 +678,11 @@ mod effect_timeline_tests {
                 "effect_revision": 1,
                 "server_time_utc": "2026-10-01T00:00:00+00:00",
                 "reward_timezone": "UTC",
+                "cycle_bounds": [{
+                    "cycle_id": "cycle-current",
+                    "started_at_utc": "2026-09-24T00:00:00+00:00",
+                    "ended_at_utc": null
+                }],
                 "intervals": [{
                     "cycle_id": "cycle-current",
                     "revision": 1,
@@ -682,5 +701,21 @@ mod effect_timeline_tests {
                 }]
             })
         );
+    }
+
+    #[test]
+    fn cycle_bounds_are_required_in_the_personal_timeline_contract() {
+        let timeline = ShopEffectTimeline {
+            account_id: "00000000-0000-0000-0000-000000000031".into(),
+            current_cycle_id: "cycle-current".into(),
+            effect_revision: 0,
+            server_time_utc: "2026-10-01T00:00:00Z".into(),
+            reward_timezone: "UTC".into(),
+            cycle_bounds: vec![],
+            intervals: vec![],
+        };
+        let mut wire = serde_json::to_value(timeline).unwrap();
+        wire.as_object_mut().unwrap().remove("cycle_bounds");
+        assert!(serde_json::from_value::<ShopEffectTimeline>(wire).is_err());
     }
 }
