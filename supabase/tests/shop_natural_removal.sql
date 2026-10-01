@@ -272,8 +272,8 @@ select is(pg_temp.try_shop_quote(jsonb_build_object(
 ))->>'error', '22023', 'canonical-shaped objects that were never generated are rejected');
 
 reset role;
-insert into private.shop_natural_removal(user_id, cycle_id, stage, ordinal)
-values ('00000000-0000-0000-0000-000000001206', 'natural-removal-cycle', 0, 0);
+insert into private.shop_natural_removal(user_id, cycle_id, stage, ordinal, price)
+values ('00000000-0000-0000-0000-000000001206', 'natural-removal-cycle', 0, 0, 100000);
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000001206', true);
 select is(pg_temp.try_shop_quote(jsonb_build_object(
