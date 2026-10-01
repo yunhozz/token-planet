@@ -525,6 +525,31 @@ fn validate_timeline_successor(
 }
 
 impl Ledger {
+    pub(super) fn confirmed_current_cycle_start(
+        &self,
+    ) -> Result<Option<DateTime<Utc>>, ScanError> {
+        let account_id = current_account_id(&self.connection)?;
+        if !account_id.starts_with("account:") {
+            return Ok(None);
+        }
+        let cycle_id = current_cycle_id(&self.connection)?;
+        let started_at: Option<String> = self
+            .connection
+            .query_row(
+                "SELECT b.started_at_utc
+                 FROM shop_effect_cycle_bounds_state initialized
+                 JOIN shop_effect_timeline_state timeline USING(account_id)
+                 JOIN shop_effect_cycle_bound b USING(account_id)
+                 WHERE initialized.account_id=?1
+                   AND timeline.current_cycle_id=?2
+                   AND b.cycle_id=?2",
+                params![account_id, cycle_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        started_at.as_deref().map(parse_utc).transpose()
+    }
+
     pub fn rebuild_shop_contributions(&mut self) -> Result<(), ScanError> {
         let transaction = self.connection.transaction()?;
         rebuild_shop_contributions_in_transaction(&transaction)?;

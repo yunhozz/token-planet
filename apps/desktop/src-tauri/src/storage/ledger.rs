@@ -398,7 +398,10 @@ impl Ledger {
     pub fn planet_usage_totals(&self) -> Result<(BTreeMap<String, u64>, u64, u64), ScanError> {
         let activation = self.planet_activation_at()?;
         let planet_timezone = self.planet_timezone()?;
-        let cycle_start = self.last_reset_at()?.unwrap_or(activation).max(activation);
+        let local_cycle_start = self.last_reset_at()?.unwrap_or(activation).max(activation);
+        let confirmed_cycle_start = self.confirmed_current_cycle_start()?;
+        let server_cycle_bound_is_known = confirmed_cycle_start.is_some();
+        let cycle_start = confirmed_cycle_start.unwrap_or(local_cycle_start);
         let mut statement = self.connection.prepare(
             "SELECT r.occurred_at_utc,r.total_tokens FROM usage_record r
              WHERE r.total_tokens IS NOT NULL AND r.occurred_at_utc > ?1
@@ -433,7 +436,12 @@ impl Ledger {
             let timestamp = DateTime::parse_from_rfc3339(&occurred_at)
                 .map_err(|_| ScanError::Database)?
                 .with_timezone(&Utc);
-            if timestamp > cycle_start {
+            let belongs_to_current_cycle = if server_cycle_bound_is_known {
+                timestamp >= cycle_start
+            } else {
+                timestamp > cycle_start
+            };
+            if belongs_to_current_cycle {
                 current = current.checked_add(tokens).ok_or(ScanError::InvalidCount)?;
                 let date = timestamp
                     .with_timezone(&planet_timezone)
