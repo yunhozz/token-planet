@@ -6,6 +6,10 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use super::ledger::{Ledger, ScanError};
 use crate::domain::cosmetic_shop::{ActiveEffects, EffectContribution, RewardState};
+use crate::domain::planet::{
+    PlanetActivityDayContribution, PlanetDeviceContributionSnapshot,
+    PlanetEffectContributionSegment,
+};
 use crate::domain::shop_effects::{cycle_token_bonus, weighted_growth};
 
 #[derive(Clone)]
@@ -133,6 +137,61 @@ impl Ledger {
         )?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Reads the canonical contribution snapshot without rebuilding it from raw usage.
+    /// Callers that upload after collecting new events must rebuild explicitly first.
+    pub fn shop_device_contribution(
+        &self,
+        incomplete: bool,
+    ) -> Result<PlanetDeviceContributionSnapshot, ScanError> {
+        let transaction = self.connection.unchecked_transaction()?;
+        let raw = self.planet_device_contribution(incomplete)?;
+        let account_id = current_account_id(&transaction)?;
+        let stored_version: Option<i64> = transaction.query_row(
+            "SELECT canonical_version FROM shop_contribution_state WHERE account_id=?1",
+            [&account_id],
+            |row| row.get(0),
+        ).optional()?;
+        let canonical_version = to_u64(stored_version.unwrap_or(0))?;
+        let device_id = raw.device_id.clone();
+        let segments = {
+            let mut statement = transaction.prepare(
+                "SELECT cycle_id,date,effect_revision,tokens FROM shop_effect_contribution
+                 WHERE account_id=?1 AND device_id=?2
+                 ORDER BY cycle_id,date,effect_revision",
+            )?;
+            let rows = statement.query_map(params![account_id,device_id],|row|Ok((
+                row.get::<_,String>(0)?,
+                row.get::<_,String>(1)?,
+                row.get::<_,i64>(2)?,
+                row.get::<_,i64>(3)?,
+            )))?.collect::<Result<Vec<_>,_>>()?;
+            rows
+        };
+        let daily_segments = segments.into_iter().map(|(cycle_id,date,revision,tokens)|Ok(
+            PlanetEffectContributionSegment {
+                cycle_id,
+                date,
+                effect_revision: to_u64(revision)?,
+                tokens: to_u64(tokens)?,
+            }
+        )).collect::<Result<Vec<_>,ScanError>>()?;
+        let activity_days = activity_snapshot(&transaction,&account_id)?.into_iter().map(|activity|
+            PlanetActivityDayContribution {
+                reward_date: activity.reward_date,
+                cycle_id: activity.cycle_id,
+                first_occurred_at_utc: activity.first_occurred_at_utc,
+                tokens: activity.tokens,
+            }
+        ).collect();
+        transaction.commit()?;
+        Ok(PlanetDeviceContributionSnapshot {
+            raw,
+            canonical_version,
+            daily_segments,
+            activity_days,
+        })
     }
 
     pub fn settle_guest_rewards(
@@ -754,6 +813,133 @@ mod tests {
         let growth = ledger.shop_growth_credit_by_date().unwrap();
         let expected = weighted_growth(25_000,&[]).unwrap();
         assert!((growth["2026-09-25"]-expected).abs()<1e-12);
+    }
+
+    #[test]
+    fn shop_device_contribution_reads_stored_all_cycle_segments_and_activity_without_mutation() {
+        let mut ledger = ledger();
+        add_effect_history(&ledger,1,"2026-09-24T00:00:00Z",ActiveEffects::default());
+        add_event(&mut ledger,"snapshot-old-cycle","2026-09-25T08:00:00Z",50_000);
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        let reset_at = DateTime::parse_from_rfc3339("2026-09-25T12:00:00Z").unwrap().with_timezone(&Utc);
+        ledger.reset_guest_planet("snapshot-cycle-reset",&old_cycle,reset_at).unwrap();
+        let current_cycle = ledger.planet_cycle_id().unwrap();
+        add_effect_history(&ledger,1,"2026-09-25T12:00:00Z",ActiveEffects::default());
+        add_event(&mut ledger,"snapshot-current-cycle","2026-09-25T18:00:00Z",25_000);
+        ledger.rebuild_shop_contributions().unwrap();
+
+        let account: String = ledger.connection.query_row(
+            "SELECT value FROM setting WHERE key='planet_account_id'",[],|row|row.get(0),
+        ).unwrap();
+        let device: String = ledger.connection.query_row(
+            "SELECT value FROM setting WHERE key='planet_device_id'",[],|row|row.get(0),
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_contribution_state(account_id,canonical_version) VALUES ('account:bob',77)",
+            [],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_effect_contribution(account_id,device_id,cycle_id,date,effect_revision,
+             canonical_version,tokens,growth_bps,wallet_bps) VALUES (?1,'another-device','ignored-device',
+             '2026-09-25',1,77,9,0,0)",
+            [&account],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_effect_contribution(account_id,device_id,cycle_id,date,effect_revision,
+             canonical_version,tokens,growth_bps,wallet_bps) VALUES ('account:bob',?1,'ignored-account',
+             '2026-09-25',1,77,11,0,0)",
+            [&device],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_activity_day(account_id,reward_date,cycle_id,first_occurred_at_utc,
+             canonical_version,tokens) VALUES ('account:bob','2026-09-26','ignored-account',
+             '2026-09-26T08:00:00+00:00',77,11)",
+            [],
+        ).unwrap();
+
+        let stored_version: i64 = ledger.connection.query_row(
+            "SELECT canonical_version FROM shop_contribution_state WHERE account_id=?1",
+            [&account],|row|row.get(0),
+        ).unwrap();
+        let before_rows: (i64,i64) = ledger.connection.query_row(
+            "SELECT (SELECT count(*) FROM shop_effect_contribution WHERE account_id=?1),
+                    (SELECT count(*) FROM shop_activity_day WHERE account_id=?1)",
+            [&account],|row|Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+
+        let contribution = ledger.shop_device_contribution(false).unwrap();
+        let repeated = ledger.shop_device_contribution(false).unwrap();
+        let value = serde_json::to_value(&contribution).unwrap();
+        assert_eq!(value,serde_json::to_value(&repeated).unwrap());
+        assert_eq!(contribution.canonical_version,stored_version as u64);
+        assert_eq!(contribution.raw.device_id,device);
+        assert_eq!(contribution.raw.current_cycle_id,current_cycle);
+        assert_eq!(contribution.raw.current_planet_tokens,25_000);
+        assert_eq!(contribution.raw.lifetime_tokens,75_000);
+        assert_eq!(contribution.raw.daily_tokens.get("2026-09-25"),Some(&25_000));
+
+        let mut expected_segments = vec![
+            (old_cycle.clone(),serde_json::json!({
+                "cycle_id": old_cycle,
+                "date": "2026-09-25",
+                "effect_revision": 1,
+                "tokens": 50_000,
+            })),
+            (current_cycle.clone(),serde_json::json!({
+                "cycle_id": current_cycle,
+                "date": "2026-09-25",
+                "effect_revision": 2,
+                "tokens": 25_000,
+            })),
+        ];
+        expected_segments.sort_by(|left,right|left.0.cmp(&right.0));
+        let expected_segments: Vec<_> = expected_segments.into_iter().map(|(_,segment)|segment).collect();
+        assert_eq!(value["daily_segments"],serde_json::json!(expected_segments));
+        assert_eq!(value["activity_days"],serde_json::json!([{
+            "reward_date": "2026-09-25",
+            "cycle_id": old_cycle,
+            "first_occurred_at_utc": "2026-09-25T08:00:00+00:00",
+            "tokens": 75_000,
+        }]));
+        let mut top_level_keys = value.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+        top_level_keys.sort_unstable();
+        assert_eq!(top_level_keys,vec![
+            "activity_days","canonical_version","current_cycle_id","current_planet_tokens",
+            "daily_segments","daily_tokens","device_id","incomplete","lifetime_tokens",
+        ]);
+        for segment in value["daily_segments"].as_array().unwrap() {
+            let mut keys = segment.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(keys,vec!["cycle_id","date","effect_revision","tokens"]);
+        }
+        for activity in value["activity_days"].as_array().unwrap() {
+            let mut keys = activity.as_object().unwrap().keys().map(String::as_str).collect::<Vec<_>>();
+            keys.sort_unstable();
+            assert_eq!(keys,vec!["cycle_id","first_occurred_at_utc","reward_date","tokens"]);
+        }
+        let after_version: i64 = ledger.connection.query_row(
+            "SELECT canonical_version FROM shop_contribution_state WHERE account_id=?1",
+            [&account],|row|row.get(0),
+        ).unwrap();
+        let after_rows: (i64,i64) = ledger.connection.query_row(
+            "SELECT (SELECT count(*) FROM shop_effect_contribution WHERE account_id=?1),
+                    (SELECT count(*) FROM shop_activity_day WHERE account_id=?1)",
+            [&account],|row|Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(after_version,stored_version);
+        assert_eq!(after_rows,before_rows);
+
+        // New raw events do not silently rewrite the persisted canonical version during a read.
+        add_event(&mut ledger,"snapshot-not-yet-rebuilt","2026-09-25T20:00:00Z",5_000);
+        let pending = ledger.shop_device_contribution(false).unwrap();
+        assert_eq!(pending.canonical_version,stored_version as u64);
+        assert_eq!(pending.raw.current_planet_tokens,30_000);
+        assert_eq!(pending.daily_segments,contribution.daily_segments);
+        let still_stored_version: i64 = ledger.connection.query_row(
+            "SELECT canonical_version FROM shop_contribution_state WHERE account_id=?1",
+            [&account],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(still_stored_version,stored_version);
     }
 
     #[test]

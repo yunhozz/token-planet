@@ -56,7 +56,7 @@ pub struct PlanetState {
     pub removed_natural_keys: Vec<NaturalObjectKey>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PlanetDeviceContribution {
     pub device_id: String,
     pub current_cycle_id: String,
@@ -64,6 +64,31 @@ pub struct PlanetDeviceContribution {
     pub current_planet_tokens: u64,
     pub daily_tokens: BTreeMap<String, u64>,
     pub incomplete: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlanetEffectContributionSegment {
+    pub cycle_id: String,
+    pub date: String,
+    pub effect_revision: u64,
+    pub tokens: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlanetActivityDayContribution {
+    pub reward_date: String,
+    pub cycle_id: String,
+    pub first_occurred_at_utc: String,
+    pub tokens: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct PlanetDeviceContributionSnapshot {
+    #[serde(flatten)]
+    pub raw: PlanetDeviceContribution,
+    pub canonical_version: u64,
+    pub daily_segments: Vec<PlanetEffectContributionSegment>,
+    pub activity_days: Vec<PlanetActivityDayContribution>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
