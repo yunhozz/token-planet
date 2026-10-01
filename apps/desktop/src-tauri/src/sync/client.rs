@@ -4,7 +4,7 @@ use std::{sync::OnceLock, time::Duration};
 
 use crate::domain::cosmetic_shop::{
     CosmeticEquipResult, CosmeticPurchaseResult, CosmeticShopState, GuestCosmeticImport,
-    GuestCosmeticImportResult,
+    GuestCosmeticImportResult, QuoteTarget, ShopActionResult, ShopQuote, ShopRequest, ShopState,
 };
 use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
 use crate::domain::planet::{PlanetDeviceContribution, PlanetState, WorldPlanet};
@@ -144,6 +144,37 @@ impl SupabaseSyncClient {
     ) -> Result<Option<PlanetState>, SyncError> {
         self.post_rpc(access_token, "get_my_planet_state", &serde_json::json!({}))
             .await
+    }
+
+    pub async fn get_my_shop_state(&self, access_token: &str) -> Result<ShopState, SyncError> {
+        self.post_rpc(access_token, "get_my_shop_state", &serde_json::json!({}))
+            .await
+    }
+
+    pub async fn quote_shop_action(
+        &self,
+        access_token: &str,
+        target: &QuoteTarget,
+    ) -> Result<ShopQuote, SyncError> {
+        self.post_rpc(
+            access_token,
+            "quote_shop_action",
+            &serde_json::json!({ "p_target": target }),
+        )
+        .await
+    }
+
+    pub async fn apply_shop_action(
+        &self,
+        access_token: &str,
+        request: &ShopRequest,
+    ) -> Result<ShopActionResult, SyncError> {
+        self.post_rpc(
+            access_token,
+            "apply_shop_action",
+            &serde_json::json!({ "p_request": request }),
+        )
+        .await
     }
 
     pub async fn cosmetic_shop_state(
@@ -470,11 +501,307 @@ fn one_row<T>(mut rows: Vec<T>) -> Result<T, SyncError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{guest_import_rpc_body, one_row, MySyncPolicy, SyncError, UploadBody, WorldSummary};
-    use crate::domain::cosmetic_shop::{GuestCosmeticImport, GuestCosmeticPurchase};
+    use super::{
+        guest_import_rpc_body, one_row, MySyncPolicy, SupabaseSyncClient, SyncError, UploadBody,
+        WorldSummary,
+    };
+    use crate::domain::cosmetic_shop::{
+        ActiveEffects, AvatarEquipment, AvatarEquipmentItem, GuestCosmeticImport,
+        GuestCosmeticPurchase, QuoteTarget, RewardState, ShopActionResult, ShopActionStatus,
+        ShopQuote, ShopRequest, ShopState,
+    };
     use crate::domain::planet::PlanetWalletCredit;
     use crate::domain::usage::{Agent, UsageCoverage};
     use crate::sync::aggregate::DailyUsageSnapshot;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::thread::{self, JoinHandle};
+
+    #[derive(Debug)]
+    struct CapturedRequest {
+        method: String,
+        path: String,
+        headers: std::collections::HashMap<String, String>,
+        body: serde_json::Value,
+    }
+
+    enum MockResponse {
+        Json(u16, String),
+        Disconnect,
+    }
+
+    fn spawn_rpc_server(response: MockResponse) -> (String, JoinHandle<CapturedRequest>) {
+        let (url, server) = spawn_rpc_sequence(vec![response]);
+        let thread = thread::spawn(move || server.join().unwrap().remove(0));
+        (url, thread)
+    }
+
+    fn spawn_rpc_sequence(responses: Vec<MockResponse>) -> (String, JoinHandle<Vec<CapturedRequest>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let thread = thread::spawn(move || {
+            responses
+                .into_iter()
+                .map(|response| {
+                    let (mut stream, _) = listener.accept().unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                        .unwrap();
+                    let captured = capture_request(&mut stream);
+                    respond(&mut stream, response);
+                    captured
+                })
+                .collect()
+        });
+        (format!("http://{address}"), thread)
+    }
+
+    fn respond(stream: &mut TcpStream, response: MockResponse) {
+        if let MockResponse::Json(status, body) = response {
+            let reason = if status == 200 { "OK" } else { "Rejected" };
+            write!(stream, "HTTP/1.1 {status} {reason}\r\n").unwrap();
+            write!(stream, "Content-Type: application/json\r\n").unwrap();
+            write!(stream, "Content-Length: {}\r\n", body.len()).unwrap();
+            write!(stream, "Connection: close\r\n\r\n{body}").unwrap();
+            stream.flush().unwrap();
+        }
+    }
+
+    fn capture_request(stream: &mut TcpStream) -> CapturedRequest {
+        let mut bytes = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let count = stream.read(&mut buffer).unwrap();
+            assert_ne!(count, 0, "client closed before sending its request");
+            bytes.extend_from_slice(&buffer[..count]);
+            if let Some(header_end) = bytes
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+            {
+                let header_text = std::str::from_utf8(&bytes[..header_end]).unwrap();
+                let content_length = header_text
+                    .lines()
+                    .skip(1)
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                if bytes.len() >= header_end + 4 + content_length {
+                    let mut lines = header_text.lines();
+                    let mut request_line = lines.next().unwrap().split_whitespace();
+                    let method = request_line.next().unwrap().to_owned();
+                    let path = request_line.next().unwrap().to_owned();
+                    let headers = lines
+                        .filter_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            Some((name.to_ascii_lowercase(), value.trim().to_owned()))
+                        })
+                        .collect();
+                    let body_start = header_end + 4;
+                    let body = serde_json::from_slice(
+                        &bytes[body_start..body_start + content_length],
+                    )
+                    .unwrap();
+                    return CapturedRequest {
+                        method,
+                        path,
+                        headers,
+                        body,
+                    };
+                }
+            }
+        }
+    }
+
+    fn run_async<F: std::future::Future>(future: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(future)
+    }
+
+    fn empty_shop_state() -> ShopState {
+        let empty_item = || AvatarEquipmentItem {
+            sku: None,
+            version: 0,
+        };
+        ShopState {
+            account_id: "account-1".into(),
+            current_cycle_id: "cycle-1".into(),
+            catalog_revision: 1,
+            state_revision: 1,
+            available_balance: 42,
+            products: vec![],
+            landscape_instances: vec![],
+            placements: vec![],
+            removed_natural_keys: vec![],
+            avatar_owned_skus: vec![],
+            avatar_equipment: AvatarEquipment {
+                head: empty_item(),
+                outfit: empty_item(),
+                face: empty_item(),
+                back: empty_item(),
+            },
+            effects: ActiveEffects::default(),
+            reward_state: RewardState::default(),
+            action_unavailable_reason: None,
+            guest_import_pending: false,
+            guest_import_error: None,
+        }
+    }
+
+    fn purchase_quote() -> ShopQuote {
+        ShopQuote {
+            target: QuoteTarget::Purchase {
+                sku: "garden_lamp".into(),
+            },
+            catalog_revision: 1,
+            effect_revision: 2,
+            price: 50_000,
+        }
+    }
+
+    fn assert_account_request(request: &CapturedRequest, path: &str) {
+        assert_eq!(request.method, "POST");
+        assert_eq!(request.path, path);
+        assert_eq!(
+            request.headers.get("apikey").map(String::as_str),
+            Some("publishable-key")
+        );
+        assert_eq!(
+            request.headers.get("authorization").map(String::as_str),
+            Some("Bearer account-token")
+        );
+    }
+
+    #[test]
+    fn canonical_shop_rpc_methods_send_typed_bodies_and_decode_current_responses() {
+        let state = empty_shop_state();
+        let (url, server) = spawn_rpc_server(MockResponse::Json(
+            200,
+            serde_json::to_string(&state).unwrap(),
+        ));
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+        let decoded = run_async(client.get_my_shop_state("account-token")).unwrap();
+        assert_eq!(decoded, state);
+        let request = server.join().unwrap();
+        assert_account_request(&request, "/rest/v1/rpc/get_my_shop_state");
+        assert_eq!(request.body, serde_json::json!({}));
+
+        let quote = purchase_quote();
+        let (url, server) = spawn_rpc_server(MockResponse::Json(
+            200,
+            serde_json::to_string(&quote).unwrap(),
+        ));
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+        let decoded = run_async(client.quote_shop_action("account-token", &quote.target))
+            .unwrap();
+        assert_eq!(decoded, quote);
+        let request = server.join().unwrap();
+        assert_account_request(&request, "/rest/v1/rpc/quote_shop_action");
+        assert_eq!(request.body, serde_json::json!({ "p_target": quote.target }));
+
+        let shop_request = ShopRequest::Purchase {
+            request_id: "stable-request-id".into(),
+            quote: quote.clone(),
+        };
+        let result = ShopActionResult {
+            status: ShopActionStatus::Purchased,
+            request_id: "stable-request-id".into(),
+            confirmed_quote: Some(quote),
+            state,
+        };
+        let (url, server) = spawn_rpc_server(MockResponse::Json(
+            200,
+            serde_json::to_string(&result).unwrap(),
+        ));
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+        let decoded = run_async(client.apply_shop_action("account-token", &shop_request))
+            .unwrap();
+        assert_eq!(decoded, result);
+        let request = server.join().unwrap();
+        assert_account_request(&request, "/rest/v1/rpc/apply_shop_action");
+        assert_eq!(request.body, serde_json::json!({ "p_request": shop_request }));
+        assert_eq!(request.body["p_request"]["request_id"], "stable-request-id");
+    }
+
+    #[test]
+    fn canonical_shop_rpc_methods_preserve_transport_rejection_and_decode_errors() {
+        let (url, server) = spawn_rpc_server(MockResponse::Json(401, "{}".into()));
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+        assert_eq!(
+            run_async(client.get_my_shop_state("account-token")),
+            Err(SyncError::Rejected(401)),
+        );
+        assert_account_request(&server.join().unwrap(), "/rest/v1/rpc/get_my_shop_state");
+
+        let (url, server) = spawn_rpc_server(MockResponse::Json(200, "not json".into()));
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+        assert_eq!(
+            run_async(client.get_my_shop_state("account-token")),
+            Err(SyncError::InvalidResponse),
+        );
+        assert_account_request(&server.join().unwrap(), "/rest/v1/rpc/get_my_shop_state");
+
+        let (url, server) = spawn_rpc_server(MockResponse::Disconnect);
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+        assert_eq!(
+            run_async(client.get_my_shop_state("account-token")),
+            Err(SyncError::Transport),
+        );
+        assert_account_request(&server.join().unwrap(), "/rest/v1/rpc/get_my_shop_state");
+    }
+
+    #[test]
+    fn failed_shop_action_retries_keep_the_same_request_id_without_hidden_retry() {
+        let quote = purchase_quote();
+        let request = ShopRequest::Purchase {
+            request_id: "retry-stable-request-id".into(),
+            quote: quote.clone(),
+        };
+        let result = ShopActionResult {
+            status: ShopActionStatus::Purchased,
+            request_id: "retry-stable-request-id".into(),
+            confirmed_quote: Some(quote),
+            state: empty_shop_state(),
+        };
+        let success = serde_json::to_string(&result).unwrap();
+
+        for (failure, expected_error) in [
+            (MockResponse::Json(401, "{}".into()), SyncError::Rejected(401)),
+            (
+                MockResponse::Json(200, "not json".into()),
+                SyncError::InvalidResponse,
+            ),
+            (MockResponse::Disconnect, SyncError::Transport),
+        ] {
+            let (url, server) = spawn_rpc_sequence(vec![
+                failure,
+                MockResponse::Json(200, success.clone()),
+            ]);
+            let client = SupabaseSyncClient::new(&url, "publishable-key");
+
+            assert_eq!(
+                run_async(client.apply_shop_action("account-token", &request)),
+                Err(expected_error),
+            );
+            assert_eq!(
+                run_async(client.apply_shop_action("account-token", &request)).unwrap(),
+                result,
+            );
+
+            let requests = server.join().unwrap();
+            assert_eq!(requests.len(), 2);
+            for captured in &requests {
+                assert_account_request(captured, "/rest/v1/rpc/apply_shop_action");
+                assert_eq!(captured.body["p_request"]["request_id"], "retry-stable-request-id");
+            }
+            assert_eq!(requests[0].body, requests[1].body);
+        }
+    }
 
     #[test]
     fn rpc_body_contains_only_world_id_and_daily_aggregate() {
