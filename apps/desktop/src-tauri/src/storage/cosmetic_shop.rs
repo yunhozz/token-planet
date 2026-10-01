@@ -94,6 +94,43 @@ fn shop_available_balance(connection: &Connection, account_id: &str) -> Result<u
     u64::try_from(available).map_err(|_| ScanError::InvalidCount)
 }
 
+pub(crate) fn store_confirmed_shop_state_in_transaction(
+    connection: &Connection,
+    state: &ShopState,
+) -> Result<(), ScanError> {
+    let account_id = active_account_id(connection)?;
+    if !account_id.starts_with("account:") || state.account_id != account_id {
+        return Err(ScanError::InvalidShopState);
+    }
+    let prior_json: Option<String> = connection
+        .query_row(
+            "SELECT state_json FROM shop_remote_state WHERE account_id=?1",
+            [&account_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(json) = prior_json {
+        let prior: ShopState = serde_json::from_str(&json).map_err(|_| ScanError::Database)?;
+        if prior.state_revision > state.state_revision {
+            return Err(ScanError::InvalidShopState);
+        }
+    }
+    let serialized = serde_json::to_string(state).map_err(|_| ScanError::Database)?;
+    connection.execute(
+        "INSERT INTO shop_remote_state(account_id,state_json,updated_at_utc)
+         VALUES (?1,?2,?3) ON CONFLICT(account_id) DO UPDATE SET
+           state_json=excluded.state_json,updated_at_utc=excluded.updated_at_utc",
+        params![account_id, serialized, Utc::now().to_rfc3339()],
+    )?;
+    connection.execute(
+        "INSERT INTO shop_account_state(account_id,state_revision,reward_timezone)
+         VALUES (?1,?2,?3) ON CONFLICT(account_id) DO UPDATE SET
+           state_revision=excluded.state_revision",
+        params![account_id,to_i64(state.state_revision)?,state.reward_state.reward_timezone],
+    )?;
+    Ok(())
+}
+
 impl Ledger {
     pub(crate) fn initialize_cosmetic_shop(&mut self) -> Result<(), ScanError> {
         self.connection.execute_batch(
@@ -758,34 +795,8 @@ impl Ledger {
     }
 
     pub fn store_confirmed_shop_state(&mut self, state: &ShopState) -> Result<(), ScanError> {
-        let account_id = active_account_id(&self.connection)?;
-        if !account_id.starts_with("account:") || state.account_id != account_id {
-            return Err(ScanError::InvalidShopState);
-        }
-        let prior_json: Option<String> = self.connection.query_row(
-            "SELECT state_json FROM shop_remote_state WHERE account_id=?1",
-            [&account_id], |row| row.get(0),
-        ).optional()?;
-        if let Some(json) = prior_json {
-            let prior: ShopState = serde_json::from_str(&json).map_err(|_| ScanError::Database)?;
-            if prior.state_revision > state.state_revision {
-                return Err(ScanError::InvalidShopState);
-            }
-        }
-        let serialized = serde_json::to_string(state).map_err(|_| ScanError::Database)?;
         let transaction = self.connection.transaction()?;
-        transaction.execute(
-            "INSERT INTO shop_remote_state(account_id,state_json,updated_at_utc)
-             VALUES (?1,?2,?3) ON CONFLICT(account_id) DO UPDATE SET
-               state_json=excluded.state_json,updated_at_utc=excluded.updated_at_utc",
-            params![account_id, serialized, Utc::now().to_rfc3339()],
-        )?;
-        transaction.execute(
-            "INSERT INTO shop_account_state(account_id,state_revision,reward_timezone)
-             VALUES (?1,?2,?3) ON CONFLICT(account_id) DO UPDATE SET
-               state_revision=excluded.state_revision",
-            params![account_id,to_i64(state.state_revision)?,state.reward_state.reward_timezone],
-        )?;
+        store_confirmed_shop_state_in_transaction(&transaction, state)?;
         transaction.commit()?;
         Ok(())
     }

@@ -2,14 +2,23 @@ use std::{collections::BTreeMap, fmt, path::Path};
 
 use chrono::{DateTime, Duration, Utc};
 use chrono_tz::Tz;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::collectors::{ParsedRecord, RecordKind};
+use crate::domain::cosmetic_shop::{
+    ResetShopResult, ShopActionStatus, ShopEffectTimeline,
+};
 use crate::domain::planet::{
     PlanetAvatar, PlanetDeviceContribution, PlanetObject, PlanetProfile, PlanetState,
     PlanetWalletCredit,
 };
 use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
+
+use super::cosmetic_shop::store_confirmed_shop_state_in_transaction;
+use super::shop_effects::{
+    apply_confirmed_shop_effect_timeline_in_transaction,
+    validate_reset_timeline_current_bound,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScanError {
@@ -783,6 +792,89 @@ impl Ledger {
         Ok(())
     }
 
+    /// Atomically applies a server-confirmed signed reset to the cached planet,
+    /// shop state, and effect timeline. No reset reward is settled locally.
+    pub fn apply_confirmed_reset_result(
+        &mut self,
+        result: &ResetShopResult,
+        timeline: &ShopEffectTimeline,
+        expected_account_id: &str,
+        expected_old_cycle_id: &str,
+    ) -> Result<(), ScanError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let account_id: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_account_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let expected_account_id = expected_account_id
+            .strip_prefix("account:")
+            .unwrap_or(expected_account_id);
+        let expected_account_uuid = uuid::Uuid::parse_str(expected_account_id)
+            .map_err(|_| ScanError::InvalidShopState)?;
+        let actual_account_uuid = account_id
+            .strip_prefix("account:")
+            .and_then(|id| uuid::Uuid::parse_str(id).ok());
+        let actual_cycle_id: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_current_cycle_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let reset_state = &result.planet_state;
+        let new_cycle_id = &reset_state.current_cycle_id;
+        if !account_id.starts_with("account:")
+            || actual_account_uuid != Some(expected_account_uuid)
+            || actual_cycle_id != expected_old_cycle_id
+            || expected_old_cycle_id.trim().is_empty()
+            || new_cycle_id.trim().is_empty()
+            || new_cycle_id == expected_old_cycle_id
+            || result.action.status != ShopActionStatus::Reset
+            || result.action.request_id.trim().is_empty()
+            || result.action.state.account_id != account_id
+            || result.action.state.current_cycle_id != *new_cycle_id
+            || timeline.current_cycle_id != *new_cycle_id
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+
+        let cycle_started_at = DateTime::parse_from_rfc3339(&reset_state.cycle_started_at_utc)
+            .map_err(|_| ScanError::InvalidShopState)?
+            .with_timezone(&Utc);
+        let reset_at = reset_state
+            .last_reset_at_utc
+            .as_deref()
+            .ok_or(ScanError::InvalidShopState)?;
+        let reset_at = DateTime::parse_from_rfc3339(reset_at)
+            .map_err(|_| ScanError::InvalidShopState)?
+            .with_timezone(&Utc);
+        if cycle_started_at != reset_at {
+            return Err(ScanError::InvalidShopState);
+        }
+        validate_reset_timeline_current_bound(
+            timeline,
+            new_cycle_id,
+            &reset_state.cycle_started_at_utc,
+        )?;
+
+        apply_confirmed_reset_planet_state_in_transaction(
+            &transaction,
+            reset_state,
+            &account_id,
+            expected_old_cycle_id,
+        )?;
+        store_confirmed_shop_state_in_transaction(&transaction, &result.action.state)?;
+        apply_confirmed_shop_effect_timeline_in_transaction(
+            &transaction,
+            timeline,
+            &expected_account_uuid.to_string(),
+            new_cycle_id,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
     pub fn all_time_usage(&self, agent: Agent) -> Result<TokenUsage, ScanError> {
         let mut statement = self
             .connection
@@ -835,6 +927,151 @@ fn setting_value(connection: &Connection, key: &str) -> Result<Option<String>, S
         })
         .optional()
         .map_err(Into::into)
+}
+
+fn apply_confirmed_reset_planet_state_in_transaction(
+    connection: &Connection,
+    state: &PlanetState,
+    account_id: &str,
+    expected_old_cycle_id: &str,
+) -> Result<(), ScanError> {
+    let active_cycle: String = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_current_cycle_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if active_cycle != expected_old_cycle_id
+        || state.current_cycle_id.trim().is_empty()
+        || state.current_cycle_id == expected_old_cycle_id
+        || state.current_planet_tokens != 0
+        || !state.growth_credit.is_finite()
+        || state.growth_credit < 0.0
+        || !state.progress_to_next.is_finite()
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+
+    let cycle_started = DateTime::parse_from_rfc3339(&state.cycle_started_at_utc)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .with_timezone(&Utc);
+    let last_reset = state
+        .last_reset_at_utc
+        .as_deref()
+        .ok_or(ScanError::InvalidShopState)?;
+    let last_reset = DateTime::parse_from_rfc3339(last_reset)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .with_timezone(&Utc);
+    let reset_available = state
+        .reset_available_at_utc
+        .as_deref()
+        .ok_or(ScanError::InvalidShopState)?;
+    let reset_available = DateTime::parse_from_rfc3339(reset_available)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .with_timezone(&Utc);
+    if cycle_started != last_reset || reset_available <= last_reset {
+        return Err(ScanError::InvalidShopState);
+    }
+    let _: Tz = state
+        .timezone
+        .parse()
+        .map_err(|_| ScanError::TimezoneMismatch)?;
+
+    let current_nickname = setting_value(connection, "planet_nickname")?;
+    let current_avatar = setting_value(connection, "planet_avatar")?;
+    match (current_nickname, current_avatar) {
+        (Some(_), Some(_)) => {}
+        (None, None) => {
+            if let Some(profile) = &state.profile {
+                let nickname = profile.nickname.trim();
+                if nickname.is_empty() || nickname.chars().count() > 24 {
+                    return Err(ScanError::InvalidProfile);
+                }
+                let avatar = match profile.avatar {
+                    PlanetAvatar::Masculine => "masculine",
+                    PlanetAvatar::Feminine => "feminine",
+                };
+                set_setting_value(connection, "planet_nickname", nickname)?;
+                set_setting_value(connection, "planet_avatar", avatar)?;
+            }
+        }
+        _ => return Err(ScanError::InvalidProfile),
+    }
+
+    let mut seen_cycles = std::collections::HashSet::new();
+    for credit in &state.wallet_credits {
+        if credit.previous_cycle_id.trim().is_empty()
+            || !seen_cycles.insert(&credit.previous_cycle_id)
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        DateTime::parse_from_rfc3339(&credit.created_at_utc)
+            .map_err(|_| ScanError::InvalidShopState)?;
+        as_i64(credit.amount)?;
+    }
+    let mut seen_objects = std::collections::HashSet::new();
+    for object in &state.objects {
+        if !seen_objects.insert((object.stage, object.ordinal)) {
+            return Err(ScanError::InvalidShopState);
+        }
+    }
+
+    for (key, value) in [
+        ("planet_current_cycle_id", state.current_cycle_id.as_str()),
+        ("planet_cycle_started_at_utc", state.cycle_started_at_utc.as_str()),
+        ("planet_last_reset_at_utc", last_reset.to_rfc3339().as_str()),
+        (
+            "planet_reset_available_at_utc",
+            reset_available.to_rfc3339().as_str(),
+        ),
+        ("planet_timezone", state.timezone.as_str()),
+        ("planet_remote_cycle_id", state.current_cycle_id.as_str()),
+        (
+            "planet_remote_current_tokens",
+            &state.current_planet_tokens.to_string(),
+        ),
+        ("planet_remote_lifetime_tokens", &state.lifetime_tokens.to_string()),
+        ("planet_remote_growth_credit", &state.growth_credit.to_string()),
+        ("planet_remote_incomplete", &state.incomplete.to_string()),
+    ] {
+        set_setting_value(connection, key, value)?;
+    }
+
+    connection.execute("DELETE FROM planet_object", [])?;
+    for object in &state.objects {
+        connection.execute(
+            "INSERT INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                state.current_cycle_id,
+                object.stage,
+                object.ordinal,
+                object.kind,
+                object.x,
+                object.y,
+                object.seed.to_string(),
+            ],
+        )?;
+    }
+
+    connection.execute("DELETE FROM planet_wallet_credit", [])?;
+    for credit in &state.wallet_credits {
+        connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES (?1,?2,?3)",
+            params![credit.previous_cycle_id, as_i64(credit.amount)?, credit.created_at_utc],
+        )?;
+    }
+
+    // Ensure the reset result remains scoped to the same authenticated planet.
+    let active_account: String = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_account_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if active_account != account_id {
+        return Err(ScanError::InvalidShopState);
+    }
+    Ok(())
 }
 
 fn set_setting_value(connection: &Connection, key: &str, value: &str) -> Result<(), ScanError> {

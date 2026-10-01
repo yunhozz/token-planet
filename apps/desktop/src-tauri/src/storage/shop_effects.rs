@@ -566,91 +566,12 @@ impl Ledger {
         expected_cycle_id: &str,
     ) -> Result<(), ScanError> {
         let transaction = self.connection.transaction()?;
-        let actual_account = current_account_id(&transaction)?;
-        let actual_cycle = current_cycle_id(&transaction)?;
-        let expected_account = normalize_account_uuid(expected_account_id)?;
-        let timeline_account = normalize_account_uuid(&timeline.account_id)?;
-        if !actual_account.starts_with("account:")
-            || normalize_account_uuid(&actual_account)? != expected_account
-            || timeline_account != expected_account
-            || actual_cycle != expected_cycle_id
-            || timeline.current_cycle_id != expected_cycle_id
-        {
-            return Err(ScanError::InvalidShopState);
-        }
-
-        let (incoming_cycle_bounds, incoming) = validate_shop_effect_timeline(timeline)?;
-        let prior = load_confirmed_timeline(&transaction, &actual_account)?;
-        if let Some(prior) = &prior {
-            validate_cycle_bounds_successor(
-                prior.cycle_bounds_initialized,
-                &prior.cycle_bounds,
-                &incoming_cycle_bounds,
-                prior.server_time,
-            )?;
-            validate_timeline_successor(
-                prior,
-                timeline,
-                &incoming_cycle_bounds,
-                &incoming,
-            )?;
-        }
-
-        if prior.as_ref().is_none_or(|prior| prior.effect_revision != timeline.effect_revision) {
-            transaction.execute("DELETE FROM shop_effect_history WHERE account_id=?1",[&actual_account])?;
-            for interval in &incoming {
-                transaction.execute(
-                    "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
-                     ended_at_utc,active_instance_ids_json,effects_json)
-                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
-                    params![actual_account,interval.cycle_id,to_i64(interval.revision)?,
-                        interval.started_at.to_rfc3339(),
-                        interval.ended_at.map(|value|value.to_rfc3339()),
-                        serde_json::to_string(&interval.active_instance_ids).map_err(|_|ScanError::Database)?,
-                        serde_json::to_string(&interval.effects).map_err(|_|ScanError::Database)?],
-                )?;
-            }
-        }
-        if prior
-            .as_ref()
-            .is_none_or(|prior| prior.cycle_bounds != incoming_cycle_bounds)
-        {
-            transaction.execute(
-                "DELETE FROM shop_effect_cycle_bound WHERE account_id=?1",
-                [&actual_account],
-            )?;
-            for bound in &incoming_cycle_bounds {
-                transaction.execute(
-                    "INSERT INTO shop_effect_cycle_bound(account_id,cycle_id,started_at_utc,ended_at_utc)
-                     VALUES (?1,?2,?3,?4)",
-                    params![
-                        actual_account,
-                        bound.cycle_id,
-                        bound.started_at.to_rfc3339(),
-                        bound.ended_at.map(|value| value.to_rfc3339()),
-                    ],
-                )?;
-            }
-        }
-        // Row presence records a confirmed server response, including an empty list.
-        transaction.execute(
-            "INSERT OR IGNORE INTO shop_effect_cycle_bounds_state(account_id) VALUES (?1)",
-            [&actual_account],
+        apply_confirmed_shop_effect_timeline_in_transaction(
+            &transaction,
+            timeline,
+            expected_account_id,
+            expected_cycle_id,
         )?;
-        transaction.execute(
-            "INSERT INTO shop_effect_timeline_state(account_id,current_cycle_id,effect_revision,
-             server_time_utc,reward_timezone) VALUES (?1,?2,?3,?4,?5)
-             ON CONFLICT(account_id) DO UPDATE SET current_cycle_id=excluded.current_cycle_id,
-             effect_revision=excluded.effect_revision,server_time_utc=excluded.server_time_utc,
-             reward_timezone=excluded.reward_timezone",
-            params![actual_account,timeline.current_cycle_id,to_i64(timeline.effect_revision)?,
-                parse_utc(&timeline.server_time_utc)?.to_rfc3339(),timeline.reward_timezone],
-        )?;
-        transaction.execute(
-            "UPDATE shop_account_state SET reward_timezone=?2 WHERE account_id=?1",
-            params![actual_account,timeline.reward_timezone],
-        )?;
-        rebuild_shop_contributions_in_transaction(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -1263,18 +1184,155 @@ fn record_game_reward(
     Ok(())
 }
 
+pub(crate) fn apply_confirmed_shop_effect_timeline_in_transaction(
+    connection: &Connection,
+    timeline: &ShopEffectTimeline,
+    expected_account_id: &str,
+    expected_cycle_id: &str,
+) -> Result<(), ScanError> {
+    let actual_account = current_account_id(connection)?;
+    let actual_cycle = current_cycle_id(connection)?;
+    let expected_account = normalize_account_uuid(expected_account_id)?;
+    let timeline_account = normalize_account_uuid(&timeline.account_id)?;
+    if !actual_account.starts_with("account:")
+        || normalize_account_uuid(&actual_account)? != expected_account
+        || timeline_account != expected_account
+        || actual_cycle != expected_cycle_id
+        || timeline.current_cycle_id != expected_cycle_id
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+
+    let (incoming_cycle_bounds, incoming) = validate_shop_effect_timeline(timeline)?;
+    let prior = load_confirmed_timeline(connection, &actual_account)?;
+    if let Some(prior) = &prior {
+        validate_cycle_bounds_successor(
+            prior.cycle_bounds_initialized,
+            &prior.cycle_bounds,
+            &incoming_cycle_bounds,
+            prior.server_time,
+        )?;
+        validate_timeline_successor(prior, timeline, &incoming_cycle_bounds, &incoming)?;
+    }
+
+    if prior
+        .as_ref()
+        .is_none_or(|prior| prior.effect_revision != timeline.effect_revision)
+    {
+        connection.execute(
+            "DELETE FROM shop_effect_history WHERE account_id=?1",
+            [&actual_account],
+        )?;
+        for interval in &incoming {
+            connection.execute(
+                "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+                 ended_at_utc,active_instance_ids_json,effects_json)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    actual_account,
+                    interval.cycle_id,
+                    to_i64(interval.revision)?,
+                    interval.started_at.to_rfc3339(),
+                    interval.ended_at.map(|value| value.to_rfc3339()),
+                    serde_json::to_string(&interval.active_instance_ids)
+                        .map_err(|_| ScanError::Database)?,
+                    serde_json::to_string(&interval.effects).map_err(|_| ScanError::Database)?,
+                ],
+            )?;
+        }
+    }
+    if prior
+        .as_ref()
+        .is_none_or(|prior| prior.cycle_bounds != incoming_cycle_bounds)
+    {
+        connection.execute(
+            "DELETE FROM shop_effect_cycle_bound WHERE account_id=?1",
+            [&actual_account],
+        )?;
+        for bound in &incoming_cycle_bounds {
+            connection.execute(
+                "INSERT INTO shop_effect_cycle_bound(account_id,cycle_id,started_at_utc,ended_at_utc)
+                 VALUES (?1,?2,?3,?4)",
+                params![
+                    actual_account,
+                    bound.cycle_id,
+                    bound.started_at.to_rfc3339(),
+                    bound.ended_at.map(|value| value.to_rfc3339()),
+                ],
+            )?;
+        }
+    }
+    // Row presence records a confirmed server response, including an empty list.
+    connection.execute(
+        "INSERT OR IGNORE INTO shop_effect_cycle_bounds_state(account_id) VALUES (?1)",
+        [&actual_account],
+    )?;
+    connection.execute(
+        "INSERT INTO shop_effect_timeline_state(account_id,current_cycle_id,effect_revision,
+         server_time_utc,reward_timezone) VALUES (?1,?2,?3,?4,?5)
+         ON CONFLICT(account_id) DO UPDATE SET current_cycle_id=excluded.current_cycle_id,
+         effect_revision=excluded.effect_revision,server_time_utc=excluded.server_time_utc,
+         reward_timezone=excluded.reward_timezone",
+        params![
+            actual_account,
+            timeline.current_cycle_id,
+            to_i64(timeline.effect_revision)?,
+            parse_utc(&timeline.server_time_utc)?.to_rfc3339(),
+            timeline.reward_timezone
+        ],
+    )?;
+    connection.execute(
+        "UPDATE shop_account_state SET reward_timezone=?2 WHERE account_id=?1",
+        params![actual_account, timeline.reward_timezone],
+    )?;
+    rebuild_shop_contributions_in_transaction(connection)?;
+    Ok(())
+}
+
+pub(crate) fn validate_reset_timeline_current_bound(
+    timeline: &ShopEffectTimeline,
+    expected_cycle_id: &str,
+    expected_started_at_utc: &str,
+) -> Result<(), ScanError> {
+    let (cycle_bounds, _) = validate_shop_effect_timeline(timeline)?;
+    let expected_started_at = DateTime::parse_from_rfc3339(expected_started_at_utc)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .with_timezone(&Utc);
+    let current_bounds = cycle_bounds
+        .iter()
+        .filter(|bound| bound.cycle_id == expected_cycle_id)
+        .collect::<Vec<_>>();
+    let Some(current_bound) = current_bounds.first() else {
+        return Err(ScanError::InvalidShopState);
+    };
+    if timeline.current_cycle_id != expected_cycle_id
+        || current_bounds.len() != 1
+        || cycle_bounds.last().map(|bound| bound.cycle_id.as_str()) != Some(expected_cycle_id)
+        || current_bound.ended_at.is_some()
+        || current_bound.started_at != expected_started_at
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::Ledger;
     use crate::collectors::{ParsedRecord, RecordKind};
     use crate::domain::cosmetic_shop::{
-        ActiveEffects, EffectContribution, ShopCycleBound, ShopEffectInterval, ShopEffectTimeline,
+        ActiveEffects, EffectContribution, ResetShopResult, ShopActionResult, ShopActionStatus,
+        ShopCycleBound, ShopEffectInterval, ShopEffectTimeline,
+    };
+    use crate::domain::planet::{
+        PlanetAvatar, PlanetObject, PlanetProfile, PlanetState, PlanetWalletCredit,
     };
     use crate::domain::shop_effects::weighted_growth;
     use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
     use chrono::{DateTime, Utc};
     use chrono_tz::UTC;
     use rusqlite::params;
+    use std::collections::BTreeMap;
     use std::path::Path;
 
     fn ledger() -> Ledger {
@@ -1362,6 +1420,429 @@ mod tests {
             [format!("account:{account_id}")],
             |row| row.get(0),
         ).unwrap()
+    }
+
+    fn reset_planet_state(cycle_id: &str, reset_at: &str, old_cycle_id: &str) -> PlanetState {
+        PlanetState {
+            version: 1,
+            profile: Some(PlanetProfile {
+                nickname: "Reset account".into(),
+                avatar: PlanetAvatar::Feminine,
+            }),
+            timezone: "UTC".into(),
+            current_cycle_id: cycle_id.into(),
+            cycle_started_at_utc: reset_at.into(),
+            last_reset_at_utc: Some(reset_at.into()),
+            wallet_balance: 50_007,
+            wallet_credits: vec![
+                PlanetWalletCredit {
+                    previous_cycle_id: "previous-credit-cycle".into(),
+                    amount: 7,
+                    created_at_utc: "2026-09-25T00:00:00Z".into(),
+                },
+                PlanetWalletCredit {
+                    previous_cycle_id: old_cycle_id.into(),
+                    amount: 50_000,
+                    created_at_utc: reset_at.into(),
+                },
+            ],
+            current_planet_tokens: 0,
+            lifetime_tokens: 50_000,
+            growth_credit: 0.0,
+            stage: 0,
+            progress_to_next: 0.0,
+            incomplete: false,
+            can_reset: false,
+            reset_available_at_utc: Some("2026-10-02T18:00:00Z".into()),
+            objects: vec![PlanetObject {
+                stage: 0,
+                ordinal: 0,
+                kind: "forest".into(),
+                x: 8,
+                y: 8,
+                seed: 42,
+            }],
+            removed_natural_keys: vec![],
+        }
+    }
+
+    fn reset_shop_state(ledger: &Ledger, account_id: &str, new_cycle_id: &str) -> crate::domain::cosmetic_shop::ShopState {
+        let mut state = ledger.shop_state().unwrap();
+        state.account_id = format!("account:{account_id}");
+        state.current_cycle_id = new_cycle_id.into();
+        state.state_revision = 2;
+        state.available_balance = 50_007;
+        state.placements.clear();
+        state.effects = ActiveEffects::default();
+        state.removed_natural_keys.clear();
+        state
+    }
+
+    fn reset_timeline(account_id: &str, old_cycle_id: &str, new_cycle_id: &str) -> ShopEffectTimeline {
+        ShopEffectTimeline {
+            account_id: account_id.into(),
+            current_cycle_id: new_cycle_id.into(),
+            effect_revision: 2,
+            server_time_utc: "2026-10-02T00:05:00Z".into(),
+            reward_timezone: "UTC".into(),
+            cycle_bounds: vec![
+                ShopCycleBound {
+                    cycle_id: old_cycle_id.into(),
+                    started_at_utc: "2026-09-24T00:00:00Z".into(),
+                    ended_at_utc: Some("2026-10-02T00:00:00Z".into()),
+                },
+                ShopCycleBound {
+                    cycle_id: new_cycle_id.into(),
+                    started_at_utc: "2026-10-02T00:00:00Z".into(),
+                    ended_at_utc: None,
+                },
+            ],
+            intervals: vec![
+                effect_interval(
+                    old_cycle_id,
+                    1,
+                    "2026-09-24T00:00:00Z",
+                    Some("2026-10-02T00:00:00Z"),
+                    &[],
+                    ActiveEffects::default(),
+                ),
+                effect_interval(
+                    new_cycle_id,
+                    2,
+                    "2026-10-02T00:00:00Z",
+                    None,
+                    &[],
+                    ActiveEffects::default(),
+                ),
+            ],
+        }
+    }
+
+    #[test]
+    fn confirmed_reset_rejects_a_timeline_without_the_new_cycle_bound() {
+        let mut ledger = ledger();
+        let (account_id, old_cycle_id) = signed_account(&mut ledger);
+        ledger.set_planet_profile("Keep source profile", PlanetAvatar::Masculine).unwrap();
+        add_event(&mut ledger, "unbounded-reset-source", "2026-10-01T12:00:00Z", 12);
+
+        let new_cycle_id = "reset-cycle-without-bound";
+        let reset_at = "2026-10-02T00:00:00Z";
+        let state = reset_shop_state(&ledger, &account_id, new_cycle_id);
+        let result = ResetShopResult {
+            action: ShopActionResult {
+                status: ShopActionStatus::Reset,
+                request_id: "reset-missing-bound".into(),
+                confirmed_quote: None,
+                state,
+            },
+            planet_state: reset_planet_state(new_cycle_id, reset_at, &old_cycle_id),
+        };
+        let timeline = ShopEffectTimeline {
+            account_id: account_id.clone(),
+            current_cycle_id: new_cycle_id.into(),
+            effect_revision: 1,
+            server_time_utc: "2026-10-02T00:05:00Z".into(),
+            reward_timezone: "UTC".into(),
+            cycle_bounds: vec![],
+            intervals: vec![],
+        };
+
+        assert_eq!(
+            ledger.apply_confirmed_reset_result(&result, &timeline, &account_id, &old_cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+        assert_eq!(ledger.planet_cycle_id().unwrap(), old_cycle_id);
+        assert_eq!(ledger.planet_profile().unwrap().unwrap().nickname, "Keep source profile");
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM usage_record WHERE event_key=?1",
+            ["unbounded-reset-source"], |row| row.get(0),
+        ).unwrap(), 1);
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM shop_remote_state",
+            [], |row| row.get(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn confirmed_reset_cache_failure_rolls_back_planet_shop_and_timeline_together() {
+        let mut ledger = ledger();
+        let (account_id, old_cycle_id) = signed_account(&mut ledger);
+        ledger.set_planet_profile("Keep my avatar", PlanetAvatar::Masculine).unwrap();
+        add_event(&mut ledger, "reset-source-event", "2026-09-25T12:00:00Z", 50_000);
+        ledger.connection.execute(
+            "INSERT INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed)
+             VALUES (?1,0,0,'old-natural',1,2,'1')",
+            [&old_cycle_id],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES ('previous-credit-cycle',7,'2026-09-25T00:00:00Z')",
+            [],
+        ).unwrap();
+        let account_key = format!("account:{account_id}");
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,
+             variation_version,acquired_at_utc) VALUES (?1,'owned-tree','land_tree',0,'seed-tree',1,
+             '2026-09-25T00:00:00Z')",
+            [&account_key],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+             VALUES (?1,'owned-tree',?2,12,34,1)",
+            params![account_key, old_cycle_id],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_avatar_owned(account_id,sku,purchase_id,price,acquired_at_utc)
+             VALUES (?1,'avatar_crown','avatar-crown-purchase',200000000,'2026-09-25T00:00:00Z')",
+            [&account_key],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_avatar_equipment(account_id,slot,sku,version)
+             VALUES (?1,'head','avatar_crown',3)",
+            [&account_key],
+        ).unwrap();
+
+        let mut old_shop_state = ledger.shop_state().unwrap();
+        old_shop_state.state_revision = 1;
+        ledger.store_confirmed_shop_state(&old_shop_state).unwrap();
+        let old_timeline = one_interval_timeline(
+            &account_id,
+            &old_cycle_id,
+            "2026-10-01T00:00:00Z",
+            ActiveEffects::default(),
+            &[],
+        );
+        ledger
+            .apply_confirmed_shop_effect_timeline(&old_timeline, &account_id, &old_cycle_id)
+            .unwrap();
+
+        let new_cycle_id = "server-generated-reset-cycle";
+        let reset_at = "2026-10-02T00:00:00+00:00";
+        let mut new_shop_state = reset_shop_state(&ledger, &account_id, new_cycle_id);
+        new_shop_state.landscape_instances = old_shop_state.landscape_instances.clone();
+        let reset_result = ResetShopResult {
+            action: ShopActionResult {
+                status: ShopActionStatus::Reset,
+                request_id: "reset-cache-atomicity".into(),
+                confirmed_quote: None,
+                state: new_shop_state,
+            },
+            planet_state: reset_planet_state(new_cycle_id, reset_at, &old_cycle_id),
+        };
+        let timeline = reset_timeline(&account_id, &old_cycle_id, new_cycle_id);
+
+        let before_planet_settings: Vec<(String, String)> = ledger.connection.prepare(
+            "SELECT key,value FROM setting WHERE key IN ('planet_current_cycle_id',
+             'planet_cycle_started_at_utc','planet_last_reset_at_utc','planet_reset_available_at_utc',
+             'planet_remote_cycle_id','planet_remote_current_tokens','planet_remote_lifetime_tokens')
+             ORDER BY key",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?))).unwrap()
+            .collect::<Result<_,_>>().unwrap();
+        let before_shop_state: String = ledger.connection.query_row(
+            "SELECT state_json FROM shop_remote_state WHERE account_id=?1",
+            [&account_key], |row| row.get(0),
+        ).unwrap();
+        let before_timeline: (String, i64, String) = ledger.connection.query_row(
+            "SELECT current_cycle_id,effect_revision,server_time_utc
+             FROM shop_effect_timeline_state WHERE account_id=?1",
+            [&account_key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        let before_wallet: Vec<(String, i64, String)> = ledger.connection.prepare(
+            "SELECT previous_cycle_id,amount,created_at_utc FROM planet_wallet_credit ORDER BY previous_cycle_id",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap()
+            .collect::<Result<_,_>>().unwrap();
+        let before_objects: Vec<(String, i64, i64, String)> = ledger.connection.prepare(
+            "SELECT cycle_id,stage,ordinal,kind FROM planet_object ORDER BY cycle_id,stage,ordinal",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap()
+            .collect::<Result<_,_>>().unwrap();
+        let before_owned: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM shop_landscape_instance WHERE account_id=?1",
+            [&account_key], |row| row.get(0),
+        ).unwrap();
+        let before_avatar: (i64, Option<String>, i64) = ledger.connection.query_row(
+            "SELECT (SELECT count(*) FROM shop_avatar_owned WHERE account_id=?1),
+             (SELECT sku FROM shop_avatar_equipment WHERE account_id=?1 AND slot='head'),
+             (SELECT version FROM shop_avatar_equipment WHERE account_id=?1 AND slot='head')",
+            [&account_key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        let before_source_count: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM usage_record WHERE event_key='reset-source-event'",
+            [], |row| row.get(0),
+        ).unwrap();
+
+        assert_eq!(
+            ledger.apply_confirmed_reset_result(
+                &reset_result,
+                &timeline,
+                "00000000-0000-0000-0000-000000000032",
+                &old_cycle_id,
+            ),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+        assert_eq!(
+            ledger.apply_confirmed_reset_result(
+                &reset_result,
+                &timeline,
+                &account_id,
+                "stale-old-cycle",
+            ),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+
+        let mut shifted_cycle_start = timeline.clone();
+        shifted_cycle_start.cycle_bounds.last_mut().unwrap().started_at_utc =
+            "2026-10-02T00:01:00Z".into();
+        shifted_cycle_start.intervals.last_mut().unwrap().started_at_utc =
+            "2026-10-02T00:01:00Z".into();
+        assert_eq!(
+            ledger.apply_confirmed_reset_result(
+                &reset_result,
+                &shifted_cycle_start,
+                &account_id,
+                &old_cycle_id,
+            ),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+            "effect bounds must begin at the authoritative reset instant",
+        );
+
+        let mut missing_current_bound = timeline.clone();
+        missing_current_bound.cycle_bounds.clear();
+        assert_eq!(
+            ledger.apply_confirmed_reset_result(
+                &reset_result,
+                &missing_current_bound,
+                &account_id,
+                &old_cycle_id,
+            ),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+            "a reset response must include its new cycle bound",
+        );
+        assert_eq!(ledger.planet_cycle_id().unwrap(), old_cycle_id);
+        let unchanged_shop_state: String = ledger.connection.query_row(
+            "SELECT state_json FROM shop_remote_state WHERE account_id=?1",
+            [&account_key], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(unchanged_shop_state, before_shop_state);
+        let unchanged_timeline: (String, i64, String) = ledger.connection.query_row(
+            "SELECT current_cycle_id,effect_revision,server_time_utc
+             FROM shop_effect_timeline_state WHERE account_id=?1",
+            [&account_key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!(unchanged_timeline, before_timeline);
+        let unchanged_source_count: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM usage_record WHERE event_key=?1",
+            ["reset-source-event"], |row| row.get(0),
+        ).unwrap();
+        assert_eq!(unchanged_source_count, before_source_count);
+
+        ledger.connection.execute_batch(
+            "CREATE TRIGGER fail_confirmed_reset_timeline
+             BEFORE INSERT ON shop_effect_history
+             WHEN NEW.cycle_id='server-generated-reset-cycle'
+             BEGIN SELECT RAISE(ABORT, 'injected timeline failure'); END;",
+        ).unwrap();
+        assert_eq!(
+            ledger.apply_confirmed_reset_result(
+                &reset_result,
+                &timeline,
+                &account_id,
+                &old_cycle_id,
+            ),
+            Err(crate::storage::ledger::ScanError::Database),
+        );
+
+        let after_planet_settings: Vec<(String, String)> = ledger.connection.prepare(
+            "SELECT key,value FROM setting WHERE key IN ('planet_current_cycle_id',
+             'planet_cycle_started_at_utc','planet_last_reset_at_utc','planet_reset_available_at_utc',
+             'planet_remote_cycle_id','planet_remote_current_tokens','planet_remote_lifetime_tokens')
+             ORDER BY key",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?))).unwrap()
+            .collect::<Result<_,_>>().unwrap();
+        let after_shop_state: String = ledger.connection.query_row(
+            "SELECT state_json FROM shop_remote_state WHERE account_id=?1",
+            [&account_key], |row| row.get(0),
+        ).unwrap();
+        let after_timeline: (String, i64, String) = ledger.connection.query_row(
+            "SELECT current_cycle_id,effect_revision,server_time_utc
+             FROM shop_effect_timeline_state WHERE account_id=?1",
+            [&account_key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        let after_wallet: Vec<(String, i64, String)> = ledger.connection.prepare(
+            "SELECT previous_cycle_id,amount,created_at_utc FROM planet_wallet_credit ORDER BY previous_cycle_id",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap()
+            .collect::<Result<_,_>>().unwrap();
+        let after_objects: Vec<(String, i64, i64, String)> = ledger.connection.prepare(
+            "SELECT cycle_id,stage,ordinal,kind FROM planet_object ORDER BY cycle_id,stage,ordinal",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?,row.get(3)?))).unwrap()
+            .collect::<Result<_,_>>().unwrap();
+        let after_owned: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM shop_landscape_instance WHERE account_id=?1",
+            [&account_key], |row| row.get(0),
+        ).unwrap();
+        let after_avatar: (i64, Option<String>, i64) = ledger.connection.query_row(
+            "SELECT (SELECT count(*) FROM shop_avatar_owned WHERE account_id=?1),
+             (SELECT sku FROM shop_avatar_equipment WHERE account_id=?1 AND slot='head'),
+             (SELECT version FROM shop_avatar_equipment WHERE account_id=?1 AND slot='head')",
+            [&account_key], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        let after_source_count: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM usage_record WHERE event_key='reset-source-event'",
+            [], |row| row.get(0),
+        ).unwrap();
+
+        assert_eq!(ledger.planet_cycle_id().unwrap(), old_cycle_id);
+        assert_eq!(after_planet_settings, before_planet_settings);
+        assert_eq!(after_shop_state, before_shop_state);
+        assert_eq!(after_timeline, before_timeline);
+        assert_eq!(after_wallet, before_wallet);
+        assert_eq!(after_objects, before_objects);
+        assert_eq!(after_owned, before_owned);
+        assert_eq!(after_avatar, before_avatar);
+        assert_eq!(after_source_count, before_source_count);
+
+        ledger.connection.execute_batch("DROP TRIGGER fail_confirmed_reset_timeline;").unwrap();
+        ledger
+            .apply_confirmed_reset_result(
+                &reset_result,
+                &timeline,
+                &account_id,
+                &old_cycle_id,
+            )
+            .unwrap();
+
+        assert_eq!(ledger.planet_cycle_id().unwrap(), new_cycle_id);
+        assert_eq!(ledger.planet_cycle_started_at().unwrap(), reset_at);
+        assert_eq!(ledger.last_reset_at().unwrap().unwrap().to_rfc3339(), "2026-10-02T00:00:00+00:00");
+        assert_eq!(ledger.reset_available_at().unwrap().unwrap().to_rfc3339(), "2026-10-02T18:00:00+00:00");
+        assert_eq!(ledger.planet_profile().unwrap().unwrap().nickname, "Keep my avatar");
+        assert_eq!(ledger.planet_profile().unwrap().unwrap().avatar, PlanetAvatar::Masculine);
+        assert_eq!(ledger.planet_usage_totals().unwrap(), (BTreeMap::new(), 0, 50_000));
+        assert_eq!(ledger.planet_wallet_credits().unwrap(), reset_result.planet_state.wallet_credits);
+        assert_eq!(ledger.shop_state().unwrap().current_cycle_id, new_cycle_id);
+        assert!(ledger.shop_state().unwrap().placements.is_empty());
+        assert_eq!(ledger.shop_state().unwrap().landscape_instances.len(), 1);
+        assert_eq!(ledger.shop_state().unwrap().avatar_owned_skus, vec!["avatar_crown"]);
+        assert_eq!(ledger.shop_state().unwrap().avatar_equipment.head.sku.as_deref(), Some("avatar_crown"));
+        let object_rows: Vec<(String, i64, String)> = ledger.connection.prepare(
+            "SELECT cycle_id,ordinal,kind FROM planet_object ORDER BY cycle_id,ordinal",
+        ).unwrap().query_map([], |row| Ok((row.get(0)?,row.get(1)?,row.get(2)?))).unwrap()
+            .collect::<Result<_,_>>().unwrap();
+        assert_eq!(object_rows, vec![(new_cycle_id.into(),0,"forest".into())]);
+        let current_timeline: (String, i64) = ledger.connection.query_row(
+            "SELECT current_cycle_id,effect_revision FROM shop_effect_timeline_state WHERE account_id=?1",
+            [&account_key], |row| Ok((row.get(0)?,row.get(1)?)),
+        ).unwrap();
+        assert_eq!(current_timeline, (new_cycle_id.into(), 2));
+        let contribution = ledger.shop_device_contribution(false).unwrap();
+        assert_eq!(contribution.raw.current_planet_tokens, 0);
+        assert_eq!(contribution.raw.lifetime_tokens, 50_000);
+        assert_eq!(contribution.daily_segments.len(), 1);
+        assert_eq!(contribution.daily_segments[0].cycle_id, old_cycle_id);
+        assert_eq!(contribution.daily_segments[0].tokens, 50_000);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM usage_record WHERE event_key='reset-source-event'",
+            [], |row| row.get(0),
+        ).unwrap(), 1);
     }
 
     fn add_event(ledger: &mut Ledger, key: &str, at: &str, tokens: u64) {
