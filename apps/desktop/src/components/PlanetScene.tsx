@@ -40,7 +40,7 @@ export function objectName(kind: string) {
   return names[kind] ?? "행성 오브젝트";
 }
 
-export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false, interactive = false, publicOnly = false, incomplete = false, cycleId = "" }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean; interactive?: boolean; publicOnly?: boolean; incomplete?: boolean; cycleId?: string }) {
+export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false, interactive = false, publicOnly = false, incomplete = false, cycleId = "", highlightedCosmeticSku = null }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean; interactive?: boolean; publicOnly?: boolean; incomplete?: boolean; cycleId?: string; highlightedCosmeticSku?: string | null }) {
   const name = STAGE_NAMES[stage] ?? STAGE_NAMES[4];
   const clipId = `planet-clip-${useId().replace(/:/g, "")}`;
   const sceneRef = useRef<HTMLElement | null>(null);
@@ -81,6 +81,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   const hasCosmetic = (slotId: string, styleId: string) => equippedCosmetics.some(
     (item) => item.slot_id === slotId && styleIdForSku(item.sku) === styleId,
   );
+  const highlightedStyleId = highlightedCosmeticSku ? styleIdForSku(highlightedCosmeticSku) : null;
   const avatarPoint = WALK_POINTS[avatarPosition];
   const interactionStyle = {
     "--avatar-hit-left": `${(avatarPoint.x + 10) / 3.6}%`,
@@ -267,7 +268,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   return (
     <figure ref={sceneRef} className={`planet-figure ${compact ? "planet-figure--compact" : ""}`} data-motion={motionState}>
       <div className="planet-scene-canvas">
-        <svg className={`planet-svg${motionActive ? " planet-svg--floating" : ""}${motionActive && sceneEntering ? " planet-svg--entering" : ""}`} viewBox="0 0 360 320" role="img" aria-label={stage >= 4 ? `${name}, 최종 시대에서 발전이 계속됩니다` : `${name}, 다음 시대까지 ${Math.round(progress * 100)}%`} shapeRendering="crispEdges">
+        <svg className={`planet-svg${motionActive ? " planet-svg--floating" : ""}${motionActive && sceneEntering ? " planet-svg--entering" : ""}`} data-preview-style={highlightedStyleId ?? undefined} viewBox="0 0 360 320" role="img" aria-label={stage >= 4 ? `${name}, 최종 시대에서 발전이 계속됩니다` : `${name}, 다음 시대까지 ${Math.round(progress * 100)}%`} shapeRendering="crispEdges">
         <defs>
           <clipPath id={clipId}><circle cx="180" cy="157" r="107" /></clipPath>
         </defs>

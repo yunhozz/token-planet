@@ -14,12 +14,16 @@ type CosmeticShopProps = {
   onPurchase: (sku: string) => Promise<CosmeticPurchaseAction>;
   onEquip: (slotId: string, sku: string | null, cycleId: string, expectedVersion: number) => Promise<CosmeticEquipAction>;
   onPreviewChange: (equipped: EquippedCosmetic[] | null) => void;
+  onPreviewSelectionChange?: (product: CosmeticProduct | null) => void;
   onRefresh: () => Promise<CosmeticShopState>;
   initiallyOpen?: boolean;
   actionsDisabled?: boolean;
   showCollapseButton?: boolean;
   supportedSlots?: string[];
   supportedSkus?: string[];
+  initialTab?: "shop" | "inventory";
+  initialFocusSku?: string | null;
+  previewResetRevision?: number;
 };
 
 function formatTokens(value: number) {
@@ -56,15 +60,19 @@ export function CosmeticShop({
   onPurchase,
   onEquip,
   onPreviewChange,
+  onPreviewSelectionChange,
   onRefresh,
   initiallyOpen = false,
   actionsDisabled = false,
   showCollapseButton = true,
   supportedSlots = SUPPORTED_SLOTS,
   supportedSkus = SUPPORTED_SKUS,
+  initialTab = "shop",
+  initialFocusSku = null,
+  previewResetRevision = 0,
 }: CosmeticShopProps) {
   const [open, setOpen] = useState(initiallyOpen);
-  const [tab, setTab] = useState<"shop" | "inventory">("shop");
+  const [tab, setTab] = useState<"shop" | "inventory">(initialTab);
   const [confirmSku, setConfirmSku] = useState<string | null>(null);
   const [busySku, setBusySku] = useState<string | null>(null);
   const [busySlot, setBusySlot] = useState<string | null>(null);
@@ -72,6 +80,7 @@ export function CosmeticShop({
   const [notice, setNotice] = useState("");
   const [previewBySlot, setPreviewBySlot] = useState<Record<string, EquippedCosmetic>>({});
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
 
   const slots = useMemo(
     () => state.slots.filter((slot) => supportedSlots.includes(slot.slot_id)),
@@ -109,7 +118,18 @@ export function CosmeticShop({
   useEffect(() => {
     setPreviewBySlot({});
     onPreviewChange(null);
+    onPreviewSelectionChange?.(null);
   }, [equipmentSignature]);
+
+  useEffect(() => {
+    setPreviewBySlot({});
+  }, [previewResetRevision]);
+
+  useEffect(() => {
+    if (!initialFocusSku || tab !== "inventory") return;
+    const target = listRef.current?.querySelector<HTMLElement>(`[data-cosmetic-sku="${CSS.escape(initialFocusSku)}"]`);
+    target?.scrollIntoView?.({ block: "center" });
+  }, [initialFocusSku, tab]);
 
   function preview(product: CosmeticProduct) {
     if (actionsDisabled) return;
@@ -124,11 +144,13 @@ export function CosmeticShop({
       ...state.equipped.filter((equipped) => !(equipped.slot_id in next)),
       ...Object.values(next),
     ]);
+    onPreviewSelectionChange?.(product);
   }
 
   function clearPreview() {
     setPreviewBySlot({});
     onPreviewChange(null);
+    onPreviewSelectionChange?.(null);
   }
 
   async function confirmPurchase(product: CosmeticProduct) {
@@ -171,6 +193,7 @@ export function CosmeticShop({
       await onRefresh();
       setPreviewBySlot({});
       onPreviewChange(null);
+      onPreviewSelectionChange?.(null);
       setNotice("");
     } catch (cause) {
       setNotice(typeof cause === "string" ? cause : "상점 상태를 새로 확인하지 못했습니다.");
@@ -203,7 +226,7 @@ export function CosmeticShop({
         <button type="button" role="tab" aria-selected={tab === "inventory"} onClick={() => setTab("inventory")}>보관함 ({state.owned_skus.length})</button>
       </div>
 
-      <div className="cosmetic-list" role="tabpanel" aria-label={tab === "shop" ? "상점 상품" : "보유 장식"}>
+      <div ref={listRef} className="cosmetic-list" role="tabpanel" aria-label={tab === "shop" ? "상점 상품" : "보유 장식"}>
         {slots.map((slot) => {
           const slotProducts = products.filter((product) => product.slot_id === slot.slot_id);
           const visibleProducts = tab === "shop"
@@ -219,13 +242,13 @@ export function CosmeticShop({
                   const canBuy = product.purchasable && !owned.has(product.sku)
                     && availableBalance >= product.price && !slotUnavailableReason && !busySku && !actionsDisabled;
                   return (
-                    <li className="cosmetic-item" key={product.sku}>
+                    <li className="cosmetic-item" key={product.sku} data-cosmetic-sku={product.sku} data-cosmetic-previewing={previewBySlot[slot.slot_id]?.sku === product.sku || undefined}>
                       <div className="cosmetic-item-copy">
                         <strong>{product.display_name}{equipped && <span className="cosmetic-equipped">장착 중</span>}</strong>
                         <span><FormattedNumber value={product.price} /> 토큰</span>
                       </div>
                       <div className="cosmetic-item-actions">
-                        <button className="cosmetic-secondary" type="button" disabled={actionsDisabled} onClick={() => preview(product)} aria-label={`${product.display_name} 미리보기`}>미리보기</button>
+                        <button className="cosmetic-secondary" type="button" disabled={actionsDisabled} aria-pressed={previewBySlot[slot.slot_id]?.sku === product.sku} onClick={() => preview(product)} aria-label={`${product.display_name} 미리보기`}>{previewBySlot[slot.slot_id]?.sku === product.sku ? "미리보기 중" : "미리보기"}</button>
                         {tab === "shop" ? (
                           owned.has(product.sku)
                             ? <span className="cosmetic-owned">보유 중</span>

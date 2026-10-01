@@ -470,3 +470,182 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
   .planet-landscape-controls button { min-width: 40px; min-height: 40px; padding: 5px 7px; }
   .planet-landscape-object-list ol { grid-template-columns: minmax(0, 1fr); }
 }
+
+.feature-tool-menu { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; margin-left: auto; }
+.feature-tool-menu button { min-height: 44px; padding: 7px 12px; border: 1px solid #647589; color: var(--paper); background: #202a40; font-size: 15px; font-weight: 750; white-space: nowrap; }
+.feature-tool-menu button:hover:not(:disabled), .feature-tool-menu button[aria-current="page"] { border-color: var(--gold); color: var(--gold); background: #2d3444; }
+.feature-screen-secondary-nav { flex: none; padding: 5px 0 9px; border-bottom: 1px solid #536173; }
+.detail-navigation { grid-template-columns: minmax(150px, .75fr) minmax(260px, 1.25fr); align-items: center; gap: 14px; margin: 12px 0 18px; }
+.detail-return-button { min-height: 44px; justify-self: start; color: var(--water); font-weight: 700; }
+.detail-tabs { max-width: 520px; width: 100%; justify-self: end; }
+.detail-tabs button { min-height: 48px; border-bottom: 2px solid #536173; }
+.detail-tabs button[aria-selected="true"] { border-bottom-color: var(--mint); box-shadow: 0 3px 0 var(--mint); }
+.planet-feature-actions { display: none; }
+
+.planet-landscape { isolation: isolate; }
+.planet-landscape-viewport { border-top: 1px solid #586c79; border-bottom: 2px solid #354f55; background: #23445b; box-shadow: inset 0 -24px 0 rgb(20 25 46 / 12%), 0 10px 30px rgb(4 9 20 / 28%); }
+.planet-landscape-sky { filter: saturate(1.08); }
+.planet-landscape-far-hills { filter: drop-shadow(0 7px 0 rgb(26 48 57 / 22%)); }
+.planet-landscape-cloud { transform-box: fill-box; transform-origin: center; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-cloud--0 { animation: landscape-cloud-drift 21s ease-in-out infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-cloud--1 { animation: landscape-cloud-drift 27s ease-in-out -8s infinite alternate-reverse; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-cloud--2 { animation: landscape-cloud-drift 24s ease-in-out -15s infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-water-stream { animation: landscape-water-flow 2.8s linear infinite; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-water-glint { animation: landscape-water-flow 5.6s linear infinite reverse; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-star--0 { animation: landscape-star-twinkle 2.3s ease-in-out -0.4s infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-star--1 { animation: landscape-star-twinkle 3.1s ease-in-out -1.2s infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-star--2 { animation: landscape-star-twinkle 2.7s ease-in-out -1.8s infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-star--3 { animation: landscape-star-twinkle 3.6s ease-in-out -0.8s infinite alternate; }
+.planet-landscape[data-motion-active="true"] [data-landscape-dressing="grass"] { transform-box: fill-box; transform-origin: center bottom; animation: landscape-grass-sway 2.7s ease-in-out infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-grass--1 { animation-delay: -1.1s; animation-duration: 3.4s; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-grass--2 { animation-delay: -2s; animation-duration: 2.9s; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-aurora-ribbon { stroke-dasharray: 42 28; animation: landscape-aurora-flow 8s linear infinite; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-aurora-ribbon--lower { animation-duration: 11s; animation-direction: reverse; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-meteor--0,
+.planet-landscape[data-motion-active="true"] .planet-landscape-meteor-trail--0 { transform-box: fill-box; animation: landscape-meteor-cross 5.8s ease-in infinite; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-meteor--1,
+.planet-landscape[data-motion-active="true"] .planet-landscape-meteor-trail--1 { transform-box: fill-box; animation: landscape-meteor-cross 7.4s ease-in 2.9s infinite; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-moonlets-orbit { transform-box: fill-box; transform-origin: center; animation: landscape-moonlet-orbit 16s linear infinite; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-flag-cloth { transform-box: fill-box; transform-origin: left center; animation: landscape-flag-flutter 1.8s ease-in-out infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-crystal-facet { animation: landscape-facet-glow 3.4s ease-in-out infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-flower--0 { transform-box: fill-box; transform-origin: bottom center; animation: landscape-flower-sway 2.2s ease-in-out infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-flower--1 { transform-box: fill-box; transform-origin: bottom center; animation: landscape-flower-sway 2.8s ease-in-out -1.1s infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-flower--2 { transform-box: fill-box; transform-origin: bottom center; animation: landscape-flower-sway 2.5s ease-in-out -1.7s infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-pond-glint { animation: landscape-pond-shimmer 2.1s ease-in-out infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-lantern-glow { animation: landscape-lantern-glow 2s ease-in-out infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-rover-beacon { animation: landscape-lantern-glow 1.4s steps(2, end) infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-greenhouse-glass { animation: landscape-facet-glow 4s ease-in-out infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-object-motion--plant { transform-box: fill-box; transform-origin: center bottom; animation: planet-object-plant-sway var(--object-motion-duration) ease-in-out var(--object-motion-delay) infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-object-motion--creature { transform-box: fill-box; transform-origin: center; animation: planet-object-creature-idle var(--object-motion-duration) ease-in-out var(--object-motion-delay) infinite; }
+.planet-landscape[data-motion-active="true"] .planet-object-motion--water .planet-object-water-glint { transform-box: fill-box; animation: planet-object-water-shimmer var(--object-motion-duration) ease-in-out var(--object-motion-delay) infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-object-motion--structure .planet-object-window,
+.planet-landscape[data-motion-active="true"] .planet-object-motion--ground .planet-object-window { animation: planet-object-window-glow var(--object-motion-duration) ease-in-out var(--object-motion-delay) infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-object:nth-child(3n) .planet-object-window--late { animation-delay: calc(var(--object-motion-delay) - 1.1s); }
+.planet-landscape[data-motion-active="true"] .planet-object-motion--signal .planet-object-signal-light,
+.planet-landscape[data-motion-active="true"] .planet-object-motion--structure .planet-object-signal-light { animation: landscape-lantern-glow var(--object-motion-duration) steps(2, end) var(--object-motion-delay) infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-object-motion--rock .planet-object-rock-glint { animation: planet-object-rock-glimmer var(--object-motion-duration) ease-in-out var(--object-motion-delay) infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-avatar { transition: transform var(--avatar-step-ms, 380ms) linear; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-avatar .avatar-leg { transform-box: fill-box; transform-origin: center; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-avatar.is-walking .avatar-leg--left { animation: avatar-step-left .34s steps(2, end) infinite alternate; }
+.planet-landscape[data-motion-active="true"] .planet-landscape-avatar.is-walking .avatar-leg--right { animation: avatar-step-right .34s steps(2, end) infinite alternate; }
+.planet-landscape [data-cosmetic-selected="true"] { filter: drop-shadow(0 0 5px #fff0ad) drop-shadow(0 0 10px #f1cf89); }
+.planet-landscape[data-motion-active="true"] [data-cosmetic-selected="true"] { animation: landscape-cosmetic-glint 1.7s ease-in-out infinite alternate; }
+.planet-landscape-object.is-selected { filter: drop-shadow(0 0 5px #f1cf89) drop-shadow(0 0 9px #a6d9a2); }
+.planet-landscape-object.is-selected .planet-landscape-selection-highlight { fill-opacity: .28; stroke-width: 3; }
+.planet-landscape-selection { backdrop-filter: blur(6px); }
+
+@keyframes landscape-cloud-drift { from { transform: translateX(-34px); } to { transform: translateX(42px); } }
+@keyframes landscape-water-flow { to { stroke-dashoffset: -70px; } }
+@keyframes landscape-cosmetic-glint { from { opacity: .78; } to { opacity: 1; } }
+@keyframes landscape-star-twinkle { from { opacity: .38; } to { opacity: 1; } }
+@keyframes landscape-grass-sway { from { transform: rotate(-4deg); } to { transform: rotate(5deg); } }
+@keyframes landscape-aurora-flow { to { stroke-dashoffset: -140px; opacity: .42; } }
+@keyframes landscape-meteor-cross { 0%, 18% { opacity: 0; transform: translate(0, 0); } 25% { opacity: 1; } 70% { opacity: .95; transform: translate(-38px, 30px); } 100% { opacity: 0; transform: translate(-52px, 42px); } }
+@keyframes landscape-moonlet-orbit { to { transform: rotate(360deg); } }
+@keyframes landscape-flag-flutter { from { transform: rotate(-3deg); } to { transform: rotate(4deg); } }
+@keyframes landscape-facet-glow { from { opacity: .65; } to { opacity: 1; } }
+@keyframes landscape-flower-sway { from { transform: rotate(-5deg); } to { transform: rotate(5deg); } }
+@keyframes landscape-pond-shimmer { from { opacity: .45; transform: translateX(-3px); } to { opacity: 1; transform: translateX(3px); } }
+@keyframes landscape-lantern-glow { from { opacity: .5; } to { opacity: 1; } }
+@keyframes planet-object-plant-sway { from { transform: rotate(-2deg); } to { transform: rotate(2deg); } }
+@keyframes planet-object-creature-idle { 0%, 100% { transform: translateY(0); } 45% { transform: translateY(-2px); } 55% { transform: translateY(-3px); } }
+@keyframes planet-object-water-shimmer { from { opacity: .55; transform: translateX(-2px); } to { opacity: 1; transform: translateX(3px); } }
+@keyframes planet-object-window-glow { from { opacity: .42; } to { opacity: 1; } }
+@keyframes planet-object-rock-glimmer { from { opacity: .32; } to { opacity: .9; } }
+
+.planet-cosmetic-organizer { width: min(100%, 1180px); margin: 0 auto 10px; border: 1px solid #566b75; border-top: 3px solid var(--water); background: #1b2437; box-shadow: 0 7px 22px rgb(4 9 20 / 18%); }
+.planet-cosmetic-toggle { display: flex; align-items: center; justify-content: space-between; width: 100%; min-height: 58px; padding: 8px 15px; border: 0; color: var(--paper); background: linear-gradient(100deg, #263a47, #22283c 62%); text-align: left; }
+.planet-cosmetic-toggle > span:first-child, .planet-cosmetic-toggle-copy { display: flex; align-items: center; gap: 10px; }
+.planet-cosmetic-toggle strong { color: var(--mint); font-size: 17px; }
+.planet-cosmetic-count { color: var(--muted); font-size: 14px; }
+.planet-cosmetic-toggle-copy { color: var(--gold); font-size: 14px; font-weight: 700; }
+.planet-cosmetic-toggle-copy span { font-size: 20px; }
+.planet-cosmetic-content { padding: 12px; border-top: 1px solid #465c68; }
+.planet-cosmetic-tools { display: flex; align-items: end; justify-content: space-between; gap: 12px; padding-bottom: 12px; }
+.planet-cosmetic-search { display: grid; gap: 5px; width: min(100%, 280px); color: var(--muted); font-size: 13px; }
+.planet-cosmetic-search input { width: 100%; min-width: 0; min-height: 44px; padding: 7px 10px; border: 1px solid #627487; color: var(--paper); background: #141c30; }
+.planet-cosmetic-categories { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 5px; }
+.planet-cosmetic-categories button { min-height: 44px; padding: 6px 11px; border: 1px solid #536679; color: var(--muted); background: #222d40; font-size: 14px; }
+.planet-cosmetic-categories button[aria-pressed="true"] { border-color: var(--water); color: #14192e; background: var(--water); font-weight: 800; }
+.planet-cosmetic-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 160px), 1fr)); gap: 9px; max-height: 340px; overflow: auto; padding: 2px 3px 8px; margin: 0; list-style: none; overscroll-behavior: contain; scrollbar-color: #627487 transparent; scrollbar-width: thin; }
+.planet-cosmetic-grid li { min-width: 0; }
+.planet-cosmetic-tile { position: relative; display: grid; grid-template-rows: 88px auto auto; align-content: start; width: 100%; min-height: 160px; padding: 6px; border: 1px solid #536577; color: var(--paper); background: #222d40; text-align: left; transition: border-color .18s ease, background .18s ease, transform .18s ease; }
+.planet-cosmetic-tile:hover { border-color: var(--gold); background: #2b3749; transform: translateY(-2px); }
+.planet-cosmetic-tile.is-selected, .planet-cosmetic-tile[aria-pressed="true"] { border: 2px solid var(--mint); background: #293b43; box-shadow: 0 0 0 2px rgb(166 217 162 / 14%); }
+.cosmetic-art { display: block; width: 100%; height: 88px; border: 1px solid #3f5367; background: #1d2d43; image-rendering: pixelated; }
+.planet-cosmetic-tile-copy { display: grid; gap: 2px; min-width: 0; padding: 5px 2px 0; }
+.planet-cosmetic-tile-copy strong { color: var(--paper); font-size: 14px; overflow-wrap: anywhere; }
+.planet-cosmetic-tile-copy small { color: var(--muted); font-size: 12px; }
+.planet-cosmetic-equipped, .planet-cosmetic-unequipped { justify-self: start; margin: 5px 2px 0; padding: 2px 6px; font-size: 12px; font-weight: 800; }
+.planet-cosmetic-equipped { color: #14232e; background: var(--mint); }
+.planet-cosmetic-unequipped { color: var(--gold); background: #443c34; }
+.planet-cosmetic-status, .planet-cosmetic-empty { padding: 12px 2px; color: var(--muted); font-size: 14px; line-height: 1.5; }
+.planet-cosmetic-empty { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px; }
+.planet-cosmetic-empty p { margin: 0; }
+.planet-cosmetic-empty button, .planet-cosmetic-selection > button { min-height: 44px; padding: 7px 11px; border: 1px solid var(--mint); color: #172735; background: var(--mint); font-weight: 800; }
+.planet-cosmetic-selection { display: grid; grid-template-columns: minmax(120px, 180px) minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-top: 9px; padding: 10px; border: 1px solid #637988; background: #202c40; }
+.planet-cosmetic-selection-art { width: 100%; height: 100px; }
+.planet-cosmetic-selection > div { min-width: 0; }
+.planet-cosmetic-selection strong { color: var(--gold); }
+.planet-cosmetic-selection p { margin: 4px 0 0; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.planet-cosmetic-selection .planet-cosmetic-selection-kicker { color: var(--water); }
+
+.shop-window-content { display: block; }
+.shop-planet-preview { grid-template-columns: minmax(160px, min(36vw, 250px)) minmax(0, 1fr); align-items: center; gap: 13px; padding: 8px 2px 11px; }
+.shop-planet-preview .planet-scene-canvas { width: min(100%, 250px); }
+.shop-selected-preview { display: grid; grid-template-columns: minmax(100px, 145px) minmax(0, 1fr); align-items: center; gap: 9px; margin-top: 10px; padding: 8px; border: 1px solid var(--gold); background: #283143; }
+.shop-selected-preview-art { width: 100%; height: 85px; }
+.shop-selected-preview > div { display: grid; gap: 3px; min-width: 0; }
+.shop-selected-preview span { color: var(--water); font-size: 12px; }
+.shop-selected-preview b { color: var(--gold); font-size: 14px; }
+.shop-selected-preview small { color: var(--muted); font-size: 12px; line-height: 1.35; }
+.shop-selected-preview button { grid-column: 1 / -1; min-height: 44px; padding: 6px 10px; border: 1px solid var(--gold); color: var(--gold); background: transparent; font-weight: 700; }
+.cosmetic-item[data-cosmetic-previewing="true"] { border-left-color: var(--gold); background: #30374a; box-shadow: inset 3px 0 var(--gold); }
+.cosmetic-item[data-cosmetic-previewing="true"] .cosmetic-item-copy > strong { color: var(--gold); }
+.planet-svg[data-preview-style="star_cluster"] [data-cosmetic="star_cluster"],
+.planet-svg[data-preview-style="aurora"] [data-cosmetic="aurora"],
+.planet-svg[data-preview-style="meteor_shower"] [data-cosmetic="meteor_shower"],
+.planet-svg[data-preview-style="thin_ring"] [data-cosmetic="thin_ring"],
+.planet-svg[data-preview-style="double_ring"] [data-cosmetic="double_ring"],
+.planet-svg[data-preview-style="moonlets"] [data-cosmetic="moonlets"],
+.planet-svg[data-preview-style="flag"] [data-cosmetic="flag"],
+.planet-svg[data-preview-style="crystal_tower"] [data-cosmetic="crystal_tower"],
+.planet-svg[data-preview-style="flower_garden"] [data-cosmetic="flower_garden"],
+.planet-svg[data-preview-style="observatory"] [data-cosmetic="observatory"],
+.planet-svg[data-preview-style="pond"] [data-cosmetic="pond"],
+.planet-svg[data-preview-style="lantern"] [data-cosmetic="lantern"],
+.planet-svg[data-preview-style="rover"] [data-cosmetic="rover"],
+.planet-svg[data-preview-style="greenhouse"] [data-cosmetic="greenhouse"] { filter: drop-shadow(0 0 4px #fff0ad) drop-shadow(0 0 8px #f1cf89); animation: landscape-cosmetic-glint 1.4s ease-in-out infinite alternate; }
+
+@media (min-width: 760px) {
+  .shop-window-content { display: grid; grid-template-columns: minmax(300px, .95fr) minmax(0, 1.05fr); align-items: start; gap: 16px; }
+  .shop-planet-preview { position: sticky; top: 0; grid-template-columns: minmax(0, 1fr); align-self: start; justify-items: center; border: 1px solid #536173; }
+  .shop-planet-preview .planet-scene-canvas { width: min(100%, 420px); }
+  .shop-planet-preview-copy { width: min(100%, 420px); }
+  .shop-window-store { min-width: 0; }
+  .shop-window-store .cosmetic-list { max-height: min(68vh, 700px); }
+}
+
+@media (max-width: 760px) {
+  .app-shell--detail .topbar, .feature-screen-topbar { flex-wrap: wrap; row-gap: 7px; }
+  .app-shell--detail .topbar .brand, .feature-screen-topbar .brand { order: 1; }
+  .app-shell--detail .topbar .icon-button, .feature-screen-topbar .icon-button { order: 2; margin-left: auto; }
+  .app-shell--detail .topbar .feature-tool-menu, .feature-screen-topbar .feature-tool-menu { order: 3; flex: 1 0 100%; justify-content: stretch; margin: 0; }
+  .feature-tool-menu button { flex: 1; white-space: normal; }
+  .feature-screen-topbar .feature-screen-title { order: 4; flex: 1 0 100%; text-align: left; }
+  .detail-navigation { grid-template-columns: 1fr; gap: 7px; }
+  .detail-tabs { max-width: none; justify-self: stretch; }
+  .planet-cosmetic-tools { align-items: stretch; flex-direction: column; }
+  .planet-cosmetic-search { width: 100%; }
+  .planet-cosmetic-categories { justify-content: flex-start; }
+  .planet-cosmetic-grid { max-height: 280px; grid-template-columns: repeat(auto-fill, minmax(min(100%, 145px), 1fr)); }
+  .planet-cosmetic-selection { grid-template-columns: minmax(90px, 120px) minmax(0, 1fr); }
+  .planet-cosmetic-selection > button { grid-column: 1 / -1; }
+}
+
+@media (max-width: 420px) {
+  .shop-planet-preview { grid-template-columns: minmax(125px, 155px) minmax(0, 1fr); gap: 7px; }
+  .shop-planet-preview .planet-scene-canvas { width: min(100%, 155px); }
+  .shop-selected-preview { grid-template-columns: minmax(80px, 100px) minmax(0, 1fr); gap: 7px; padding: 6px; }
+  .shop-selected-preview-art { height: 68px; }
+}

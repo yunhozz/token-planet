@@ -6,7 +6,7 @@ export type LandscapeCamera = { centerX: number; centerY: number; zoom: number }
 const DEFAULT_BOUNDS: LandscapeBounds = { x: 0, y: 0, width: 600, height: 320 };
 const DEFAULT_VIEWPORT: LandscapeViewport = { width: 1200, height: 420 };
 const MIN_ZOOM = 1;
-const SPRITE_FOOTPRINT = 24;
+const SPRITE_FOOTPRINT = 36;
 const MAX_SPRITE_VIEW_FRACTION = 0.65;
 const FOCUS_TARGET_FRACTION = 0.45;
 
@@ -69,6 +69,17 @@ export function fitLandscape(bounds: LandscapeBounds): LandscapeCamera {
     centerY: safeBounds.y + safeBounds.height / 2,
     zoom: MIN_ZOOM,
   };
+}
+
+export function initialLandscapeCamera(bounds: LandscapeBounds): LandscapeCamera {
+  const safeBounds = normalizeBounds(bounds);
+  const fit = fitSize(safeBounds, DEFAULT_VIEWPORT);
+  const readableViewHeight = 500;
+  return clampLandscapeCamera(safeBounds, DEFAULT_VIEWPORT, {
+    centerX: safeBounds.x + safeBounds.width / 2,
+    centerY: Math.min(safeBounds.y + safeBounds.height / 2, 185),
+    zoom: Math.max(MIN_ZOOM, fit.height / readableViewHeight),
+  });
 }
 
 export function clampLandscapeCamera(

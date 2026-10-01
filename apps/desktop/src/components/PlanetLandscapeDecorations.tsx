@@ -1,13 +1,14 @@
 import type { JSX } from "react";
 import type { EquippedCosmetic } from "../types/usage";
 import { styleIdForSku } from "./cosmeticStyles";
-import type { LandscapeBounds } from "./planetLandscapeLayout";
+import { cosmeticLandscapeBounds, type LandscapeBounds } from "./planetLandscapeLayout";
 
 type Props = {
   stage: number;
   bounds: LandscapeBounds;
   viewBox: LandscapeBounds;
   equippedCosmetics: EquippedCosmetic[];
+  selectedCosmeticSku?: string | null;
 };
 
 const SKY_COLORS = ["#23445b", "#28475a", "#304456", "#343b50", "#263c59"];
@@ -32,35 +33,65 @@ function visibleCells(viewBox: LandscapeBounds, spacing: number): number[] {
   return Array.from({ length: cellCount }, (_, index) => firstCell + index);
 }
 
-export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCosmetics }: Props): JSX.Element {
+export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCosmetics, selectedCosmeticSku = null }: Props): JSX.Element {
   const era = eraIndex(stage);
   const groundTop = bounds.y;
   const groundBottom = Math.max(groundTop + bounds.height, viewBox.y + viewBox.height);
   const roadY = groundTop + Math.floor(bounds.height * 0.68);
-  const surfaceX = bounds.x + bounds.width - 140;
-  const forecourtX = bounds.x + bounds.width - 84;
-  const emblemX = bounds.x + bounds.width - 82;
-  const emblemY = groundTop - 134;
+  const surfacePlacement = cosmeticLandscapeBounds(bounds, "surface", "flag");
+  const forecourtPlacement = cosmeticLandscapeBounds(bounds, "forecourt", "pond");
+  const ringPlacement = cosmeticLandscapeBounds(bounds, "ring", "thin_ring");
+  const meteorPlacement = cosmeticLandscapeBounds(bounds, "sky", "meteor_shower");
+  const surfaceX = surfacePlacement.x;
+  const forecourtX = forecourtPlacement.x + 14;
+  const emblemX = ringPlacement.x + ringPlacement.width / 2;
+  const emblemY = ringPlacement.y + ringPlacement.height / 2;
   const distantCells = visibleCells(viewBox, 360);
   const starCells = visibleCells(viewBox, 145);
   const grassCells = visibleCells(viewBox, 116);
-  const skyCosmeticX = bounds.x + bounds.width * 0.18;
+  const cloudCells = visibleCells(viewBox, 390);
+  const skyCosmeticX = cosmeticLandscapeBounds(bounds, "sky", "star_cluster").x;
   const hasCosmetic = (slotId: string, styleId: string) => equippedCosmetics.some((item) =>
     item.slot_id === slotId
       && styleIdForSku(item.sku) === styleId
       && RECOGNIZED_COSMETICS.has(styleId),
   );
+  const selectedStyleId = selectedCosmeticSku ? styleIdForSku(selectedCosmeticSku) : null;
+  const isSelected = (slotId: string, styleId: string) => selectedStyleId === styleId
+    && equippedCosmetics.some((item) => item.slot_id === slotId && styleIdForSku(item.sku) === styleId)
+    ? "true"
+    : undefined;
   const hasRingEmblem = ["thin_ring", "double_ring", "moonlets"].some((styleId) => hasCosmetic("ring", styleId));
 
   return (
     <g aria-hidden="true">
       <rect className="planet-landscape-sky" x={viewBox.x} y={viewBox.y} width={viewBox.width} height={viewBox.height} fill={SKY_COLORS[era]} />
+      <rect x={viewBox.x} y={groundTop - 76} width={viewBox.width} height="76" fill="#f1cf89" opacity=".08" />
       <g className="planet-landscape-stars" fill="#e8d59d">
         {starCells.map((cell) => {
           const x = cell * 145 + 27;
           const y = groundTop - 116 + positiveModulo(cell * 47, 93);
           const size = positiveModulo(cell, 3) === 0 ? 4 : 3;
-          return <rect key={cell} x={x} y={y} width={size} height={size} />;
+          return <rect key={cell} className={`planet-landscape-star planet-landscape-star--${positiveModulo(cell, 4)}`} x={x} y={y} width={size} height={size} />;
+        })}
+      </g>
+      <g className="planet-landscape-clouds" fill="#b7d4ce" opacity=".3">
+        {cloudCells.map((cell) => {
+          const x = cell * 390 + 30;
+          const y = groundTop - 175 + positiveModulo(cell * 31, 43);
+          return <g key={cell} transform={`translate(${x} ${y})`}>
+            <g className={`planet-landscape-cloud planet-landscape-cloud--${positiveModulo(cell, 3)}`}>
+              <path d="M0 12h20V7h10V2h19v5h12v5h14v8H0Z" />
+              <path d="M13 21h49v3H13Z" fill="#f6eed3" opacity=".38" />
+            </g>
+          </g>;
+        })}
+      </g>
+      <g className="planet-landscape-far-hills" fill="#496a70" opacity=".42">
+        {visibleCells(viewBox, 500).map((cell) => {
+          const x = cell * 500;
+          const rise = 45 + positiveModulo(cell * 19, 35);
+          return <path key={cell} d={`M ${x} ${groundTop} l 95 -${rise} l 58 ${rise * 0.42} l 88 -${rise * 0.72} l 92 ${rise * 0.46} l 82 -${rise * 0.31} l 85 ${rise * 0.6} V ${groundTop} Z`} />;
         })}
       </g>
       <g className="planet-landscape-distant-ground" fill={DISTANT_COLORS[era]}>
@@ -93,7 +124,8 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
       </g>}
       {era === 0 ? (
         <g data-landscape-decoration="natural-stream" fill="none" stroke="#5db4b2" strokeWidth="10" shapeRendering="crispEdges">
-          <path d={`M ${viewBox.x} ${groundTop + 172} h 90 v 8 h 110 v -12 h 85 v 12 h 80 v -9 h 85 v 8 h ${viewBox.width}`} />
+          <path className="planet-landscape-water-stream" d={`M ${viewBox.x} ${groundTop + 172} h 90 v 8 h 110 v -12 h 85 v 12 h 80 v -9 h 85 v 8 h ${viewBox.width}`} strokeDasharray="20 15" />
+          <path className="planet-landscape-water-glint" d={`M ${viewBox.x} ${groundTop + 166} h ${viewBox.width}`} stroke="#d2eee0" strokeWidth="2" strokeDasharray="9 22" opacity=".62" />
         </g>
       ) : (
         <g data-landscape-decoration="era-road" shapeRendering="crispEdges">
@@ -111,69 +143,73 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
           const x = cell * 116 + 31;
           const y = groundTop + 94 + positiveModulo(cell * 53, Math.max(80, Math.floor(bounds.height * 0.43)));
           const width = 6 + positiveModulo(cell * 7, 4);
-          return <g key={cell} data-landscape-dressing="grass"><rect x={x} y={y} width={width} height="3" /><rect x={x + 5} y={y - 4} width="3" height="4" /></g>;
+          return <g key={cell} className={`planet-landscape-grass--${positiveModulo(cell, 3)}`} data-landscape-dressing="grass"><rect x={x} y={y} width={width} height="3" /><rect x={x + 5} y={y - 4} width="3" height="4" /></g>;
         })}
       </g>
       <g data-landscape-slot="sky" shapeRendering="crispEdges">
-        {hasCosmetic("sky", "star_cluster") && <g data-cosmetic="star_cluster" fill="#fff0ad">
+        {hasCosmetic("sky", "star_cluster") && <g data-cosmetic="star_cluster" data-cosmetic-selected={isSelected("sky", "star_cluster") || undefined} fill="#fff0ad">
           <rect x={skyCosmeticX} y={groundTop - 168} width="7" height="7" />
           <rect x={skyCosmeticX + 24} y={groundTop - 143} width="4" height="4" />
           <rect x={skyCosmeticX + 57} y={groundTop - 181} width="5" height="5" />
           <rect x={skyCosmeticX + 89} y={groundTop - 157} width="3" height="3" />
           <rect x={skyCosmeticX + 113} y={groundTop - 172} width="6" height="6" />
         </g>}
-        {hasCosmetic("sky", "aurora") && <g data-cosmetic="aurora" fill="none" stroke="#9fe2ce" opacity=".75">
-          <path d={`M ${skyCosmeticX} ${groundTop - 112} h 48 v -13 h 72 v 10 h 66 v -17 h 60`} strokeWidth="6" />
-          <path d={`M ${skyCosmeticX + 28} ${groundTop - 91} h 48 v -9 h 72 v 8 h 54`} stroke="#73cbca" strokeWidth="3" />
+        {hasCosmetic("sky", "aurora") && <g data-cosmetic="aurora" data-cosmetic-selected={isSelected("sky", "aurora") || undefined} fill="none" stroke="#9fe2ce" opacity=".75">
+          <path className="planet-landscape-aurora-ribbon" d={`M ${skyCosmeticX} ${groundTop - 112} h 48 v -13 h 72 v 10 h 66 v -17 h 60`} strokeWidth="6" />
+          <path className="planet-landscape-aurora-ribbon planet-landscape-aurora-ribbon--lower" d={`M ${skyCosmeticX + 28} ${groundTop - 91} h 48 v -9 h 72 v 8 h 54`} stroke="#73cbca" strokeWidth="3" />
         </g>}
-        {hasCosmetic("sky", "meteor_shower") && <g data-cosmetic="meteor_shower">
-          <path d={`M ${bounds.x + bounds.width * 0.72} ${groundTop - 177} l 28 -22 h 5 l -26 25 Z M ${bounds.x + bounds.width * 0.52} ${groundTop - 123} l 19 -15 h 4 l -18 18 Z`} fill="#f3d38e" />
-          <path d={`M ${bounds.x + bounds.width * 0.73} ${groundTop - 174} l 15 -12 M ${bounds.x + bounds.width * 0.53} ${groundTop - 120} l 10 -8`} stroke="#fff0ad" strokeWidth="2" />
+        {hasCosmetic("sky", "meteor_shower") && <g data-cosmetic="meteor_shower" data-cosmetic-selected={isSelected("sky", "meteor_shower") || undefined}>
+          <path className="planet-landscape-meteor--0" d={`M ${meteorPlacement.x + meteorPlacement.width} ${groundTop - 177} l 28 -22 h 5 l -26 25 Z`} fill="#f3d38e" />
+          <path className="planet-landscape-meteor--1" d={`M ${meteorPlacement.x} ${groundTop - 123} l 19 -15 h 4 l -18 18 Z`} fill="#f3d38e" />
+          <path className="planet-landscape-meteor-trail--0" d={`M ${meteorPlacement.x + meteorPlacement.width + bounds.width * 0.01} ${groundTop - 174} l 15 -12`} stroke="#fff0ad" strokeWidth="2" />
+          <path className="planet-landscape-meteor-trail--1" d={`M ${meteorPlacement.x + bounds.width * 0.01} ${groundTop - 120} l 10 -8`} stroke="#fff0ad" strokeWidth="2" />
         </g>}
       </g>
       <g data-landscape-slot="ring" shapeRendering="crispEdges">
-        {hasRingEmblem && <g className="planet-landscape-ring-emblem">
+        {hasRingEmblem && <g className="planet-landscape-ring-emblem" data-cosmetic-selected={selectedStyleId && isSelected("ring", selectedStyleId) ? "true" : undefined}>
           <circle cx={emblemX} cy={emblemY} r="22" fill="#3d7d82" stroke="#a6d9a2" strokeWidth="3" />
           <path d={`M ${emblemX - 14} ${emblemY + 12} a 20 20 0 0 0 28 -25 c -4 10 -14 18 -28 25 Z`} fill="#274b64" opacity=".65" />
-          {hasCosmetic("ring", "thin_ring") && <g data-cosmetic="thin_ring" fill="none" stroke="#f1cf89" strokeWidth="3">
+          {hasCosmetic("ring", "thin_ring") && <g data-cosmetic="thin_ring" data-cosmetic-selected={isSelected("ring", "thin_ring") || undefined} fill="none" stroke="#f1cf89" strokeWidth="3">
             <ellipse cx={emblemX} cy={emblemY} rx="35" ry="10" transform={`rotate(-18 ${emblemX} ${emblemY})`} />
           </g>}
-          {hasCosmetic("ring", "double_ring") && <g data-cosmetic="double_ring" fill="none" stroke="#a6d9a2">
+          {hasCosmetic("ring", "double_ring") && <g data-cosmetic="double_ring" data-cosmetic-selected={isSelected("ring", "double_ring") || undefined} fill="none" stroke="#a6d9a2">
             <ellipse cx={emblemX} cy={emblemY} rx="39" ry="14" transform={`rotate(-18 ${emblemX} ${emblemY})`} strokeWidth="3" />
             <ellipse cx={emblemX} cy={emblemY} rx="31" ry="8" transform={`rotate(-18 ${emblemX} ${emblemY})`} strokeWidth="2" />
           </g>}
-          {hasCosmetic("ring", "moonlets") && <g data-cosmetic="moonlets" fill="#d7d5bd" stroke="#7e9a9a" strokeWidth="2">
+          {hasCosmetic("ring", "moonlets") && <g data-cosmetic="moonlets" data-cosmetic-selected={isSelected("ring", "moonlets") || undefined} fill="#d7d5bd" stroke="#7e9a9a" strokeWidth="2">
             <ellipse cx={emblemX} cy={emblemY} rx="44" ry="17" transform={`rotate(-18 ${emblemX} ${emblemY})`} fill="none" strokeWidth="1.5" />
-            <rect x={emblemX - 37} y={emblemY - 3} width="7" height="7" />
-            <rect x={emblemX + 27} y={emblemY + 9} width="9" height="9" />
-            <rect x={emblemX + 12} y={emblemY - 18} width="5" height="5" fill="#f0d28b" />
+            <g className="planet-landscape-moonlets-orbit">
+              <rect x={emblemX - 37} y={emblemY - 3} width="7" height="7" />
+              <rect x={emblemX + 27} y={emblemY + 9} width="9" height="9" />
+              <rect x={emblemX + 12} y={emblemY - 18} width="5" height="5" fill="#f0d28b" />
+            </g>
           </g>}
         </g>}
       </g>
       <g data-landscape-slot="surface" shapeRendering="crispEdges">
-        {hasCosmetic("surface", "flag") && <g data-cosmetic="flag" transform={`translate(${surfaceX} ${groundTop + 60})`}>
+        {hasCosmetic("surface", "flag") && <g data-cosmetic="flag" data-cosmetic-selected={isSelected("surface", "flag") || undefined} transform={`translate(${surfaceX} ${groundTop + 60})`}>
           <rect x="7" y="0" width="4" height="40" fill="#8c6655" />
-          <path d="M 11 2 h 32 v 16 h -18 l -14 9 Z" fill="#ec8c78" stroke="#572f4b" strokeWidth="2" />
+          <path className="planet-landscape-flag-cloth" d="M 11 2 h 32 v 16 h -18 l -14 9 Z" fill="#ec8c78" stroke="#572f4b" strokeWidth="2" />
           <rect x="2" y="39" width="25" height="5" fill="#926e58" />
         </g>}
-        {hasCosmetic("surface", "crystal_tower") && <g data-cosmetic="crystal_tower" transform={`translate(${surfaceX} ${groundTop + 55})`}>
+        {hasCosmetic("surface", "crystal_tower") && <g data-cosmetic="crystal_tower" data-cosmetic-selected={isSelected("surface", "crystal_tower") || undefined} transform={`translate(${surfaceX} ${groundTop + 55})`}>
           <rect x="4" y="39" width="42" height="13" fill="#536c91" stroke="#c2c6cf" strokeWidth="2" />
-          <path d="M 12 39 V 14 L 27 0 L 42 14 V 39 Z" fill="#a6d9e2" stroke="#e3f0de" strokeWidth="2" />
+          <path className="planet-landscape-crystal-facet" d="M 12 39 V 14 L 27 0 L 42 14 V 39 Z" fill="#a6d9e2" stroke="#e3f0de" strokeWidth="2" />
           <path d="M 27 4 V 37 M 16 24 H 38" stroke="#6ba9bb" strokeWidth="3" />
           <rect x="22" y="43" width="10" height="9" fill="#455471" />
         </g>}
-        {hasCosmetic("surface", "flower_garden") && <g data-cosmetic="flower_garden" transform={`translate(${surfaceX} ${groundTop + 102})`}>
+        {hasCosmetic("surface", "flower_garden") && <g data-cosmetic="flower_garden" data-cosmetic-selected={isSelected("surface", "flower_garden") || undefined} transform={`translate(${surfaceX} ${groundTop + 102})`}>
           <path d="M 0 31 h 72 v 7 H 0 Z" fill="#8c7653" />
           <path d="M 7 27 h 58 v 4 H 7 Z" fill="#5d9561" />
           <path d="M 16 26 v -11 m 18 11 V 8 m 21 18 V 13" stroke="#4d875a" strokeWidth="2" />
-          <rect x="12" y="10" width="7" height="7" fill="#efad7a" />
-          <rect x="31" y="5" width="8" height="8" fill="#f1d27f" />
-          <rect x="52" y="9" width="7" height="7" fill="#d992b1" />
+          <g className="planet-landscape-flower--0"><rect x="12" y="10" width="7" height="7" fill="#efad7a" /></g>
+          <g className="planet-landscape-flower--1"><rect x="31" y="5" width="8" height="8" fill="#f1d27f" /></g>
+          <g className="planet-landscape-flower--2"><rect x="52" y="9" width="7" height="7" fill="#d992b1" /></g>
           <rect x="14" y="12" width="2" height="2" fill="#fff0ad" />
           <rect x="34" y="8" width="2" height="2" fill="#fff0ad" />
           <rect x="54" y="11" width="2" height="2" fill="#fff0ad" />
         </g>}
-        {hasCosmetic("surface", "observatory") && <g data-cosmetic="observatory" transform={`translate(${surfaceX} ${groundTop + 55})`}>
+        {hasCosmetic("surface", "observatory") && <g data-cosmetic="observatory" data-cosmetic-selected={isSelected("surface", "observatory") || undefined} transform={`translate(${surfaceX} ${groundTop + 55})`}>
           <rect x="1" y="28" width="52" height="35" fill="#596c82" stroke="#d6c58d" strokeWidth="2" />
           <path d="M 0 29 a 27 19 0 0 1 54 0 Z" fill="#8ec7c5" stroke="#f0d28b" strokeWidth="2" />
           <path d="M 23 5 h 8 v 23 h -8 Z M 18 14 h 18 v 5 H 18 Z" fill="#d7e6cd" />
@@ -183,30 +219,30 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
         </g>}
       </g>
       <g data-landscape-slot="forecourt" shapeRendering="crispEdges">
-        {hasCosmetic("forecourt", "pond") && <g data-cosmetic="pond" transform={`translate(${forecourtX} ${groundTop + 198})`}>
+        {hasCosmetic("forecourt", "pond") && <g data-cosmetic="pond" data-cosmetic-selected={isSelected("forecourt", "pond") || undefined} transform={`translate(${forecourtX} ${groundTop + 198})`}>
           <path d="M 0 8 h 62 v 22 H 0 Z" fill="#8d7757" stroke="#d9c288" strokeWidth="2" />
           <path d="M 6 12 h 50 v 13 H 6 Z" fill="#4c9f9e" />
-          <path d="M 13 14 h 13 v 3 H 13 Z M 37 20 h 13 v 3 H 37 Z" fill="#b6e3ca" />
+          <path className="planet-landscape-pond-glint" d="M 13 14 h 13 v 3 H 13 Z M 37 20 h 13 v 3 H 37 Z" fill="#b6e3ca" />
           <rect x="-5" y="30" width="72" height="5" fill="#677b63" />
         </g>}
-        {hasCosmetic("forecourt", "lantern") && <g data-cosmetic="lantern" transform={`translate(${forecourtX} ${groundTop + 176})`}>
+        {hasCosmetic("forecourt", "lantern") && <g data-cosmetic="lantern" data-cosmetic-selected={isSelected("forecourt", "lantern") || undefined} transform={`translate(${forecourtX} ${groundTop + 176})`}>
           <rect x="-3" y="55" width="34" height="5" fill="#677b63" />
           <rect x="12" y="20" width="4" height="35" fill="#8f6b4e" />
           <rect x="5" y="5" width="18" height="18" fill="#e8c67d" stroke="#754e52" strokeWidth="2" />
-          <rect x="9" y="9" width="10" height="10" fill="#fff0ad" />
+          <rect className="planet-landscape-lantern-glow" x="9" y="9" width="10" height="10" fill="#fff0ad" />
           <path d="M 3 5 h 22 M 7 0 h 14" stroke="#754e52" strokeWidth="2" />
         </g>}
-        {hasCosmetic("forecourt", "rover") && <g data-cosmetic="rover" transform={`translate(${forecourtX} ${groundTop + 204})`}>
+        {hasCosmetic("forecourt", "rover") && <g data-cosmetic="rover" data-cosmetic-selected={isSelected("forecourt", "rover") || undefined} transform={`translate(${forecourtX} ${groundTop + 204})`}>
           <rect x="2" y="10" width="50" height="18" fill="#ce9b68" stroke="#564d58" strokeWidth="2" />
           <rect x="12" y="0" width="21" height="12" fill="#8ac8c4" stroke="#564d58" strokeWidth="2" />
-          <rect x="21" y="-7" width="4" height="8" fill="#e8d58f" />
+          <rect className="planet-landscape-rover-beacon" x="21" y="-7" width="4" height="8" fill="#e8d58f" />
           <circle cx="14" cy="29" r="6" fill="#34475a" stroke="#e2d59d" strokeWidth="2" />
           <circle cx="42" cy="29" r="6" fill="#34475a" stroke="#e2d59d" strokeWidth="2" />
           <rect x="4" y="16" width="8" height="5" fill="#f2d287" />
           <path d="M 34 13 h 14 v 4 H 34 Z" fill="#a3ddd1" />
         </g>}
-        {hasCosmetic("forecourt", "greenhouse") && <g data-cosmetic="greenhouse" transform={`translate(${forecourtX - 14} ${groundTop + 194})`}>
-          <path d="M 1 38 V 13 L 34 1 L 67 13 V 38 Z" fill="#84c8bd" fillOpacity=".78" stroke="#d8e6bd" strokeWidth="2" />
+        {hasCosmetic("forecourt", "greenhouse") && <g data-cosmetic="greenhouse" data-cosmetic-selected={isSelected("forecourt", "greenhouse") || undefined} transform={`translate(${forecourtX - 14} ${groundTop + 194})`}>
+          <path className="planet-landscape-greenhouse-glass" d="M 1 38 V 13 L 34 1 L 67 13 V 38 Z" fill="#84c8bd" fillOpacity=".78" stroke="#d8e6bd" strokeWidth="2" />
           <path d="M 5 15 h 58 M 13 12 v 26 m 21 -30 v 30 m 22 -26 v 26" stroke="#607e79" strokeWidth="2" />
           <rect x="27" y="25" width="14" height="13" fill="#8eb76c" />
           <path d="M 34 25 v -9 m -5 9 l 5 -5 l 5 5" fill="#79a966" stroke="#477451" strokeWidth="2" />

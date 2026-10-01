@@ -7,8 +7,10 @@ import { FormattedNumber } from "./components/FormattedNumber";
 import { LoadingStatus } from "./components/LoadingStatus";
 import { PlanetProfileSetup } from "./components/PlanetProfileSetup";
 import { objectName, objectProgress, PlanetScene, STAGE_NAMES } from "./components/PlanetScene";
-import { fitLandscape } from "./components/planetLandscapeCamera";
+import { initialLandscapeCamera } from "./components/planetLandscapeCamera";
 import { PlanetLandscape, planetLandscapeBounds, type PlanetExplorationState } from "./components/PlanetLandscape";
+import { PlanetCosmeticOrganizer, type PlanetCosmeticOrganizerView } from "./components/PlanetCosmeticOrganizer";
+import { CosmeticThumbnail } from "./components/CosmeticThumbnail";
 import { SharingSetup } from "./components/SharingSetup";
 import { SourceStatus } from "./components/SourceStatus";
 import { SyncStatus } from "./components/SyncStatus";
@@ -16,10 +18,25 @@ import { UsageSummary } from "./components/UsageSummary";
 import { WorldCommunity } from "./components/WorldCommunity";
 import { CosmeticShop } from "./components/CosmeticShop";
 import { sharing, type SharingState, type WorldMember } from "./lib/sharing";
-import type { Agent, CosmeticEquipAction, CosmeticPurchaseAction, CosmeticShopState, EquippedCosmetic, GrowthJournal as GrowthJournalData, PlanetAvatar, WorldSnapshot } from "./types/usage";
+import type { Agent, CosmeticEquipAction, CosmeticProduct, CosmeticPurchaseAction, CosmeticShopState, EquippedCosmetic, GrowthJournal as GrowthJournalData, PlanetAvatar, WorldSnapshot } from "./types/usage";
 import "./App.css";
 
 type FeatureScreen = "planet" | "cosmetic-shop" | "growth-journal";
+
+function FeatureToolMenu({
+  active,
+  disabled,
+  onNavigate,
+}: {
+  active: Exclude<FeatureScreen, "planet"> | "planet";
+  disabled: boolean;
+  onNavigate: (screen: Exclude<FeatureScreen, "planet">) => void;
+}) {
+  return <nav className="feature-tool-menu" aria-label="행성 도구">
+    <button type="button" data-feature-screen-trigger="cosmetic-shop" aria-current={active === "cosmetic-shop" ? "page" : undefined} disabled={disabled} onClick={() => onNavigate("cosmetic-shop")}>행성 꾸미기</button>
+    <button type="button" data-feature-screen-trigger="growth-journal" aria-current={active === "growth-journal" ? "page" : undefined} disabled={disabled} onClick={() => onNavigate("growth-journal")}>성장 일지 보기</button>
+  </nav>;
+}
 
 const EMPTY_SNAPSHOT: WorldSnapshot = {
   usage: {
@@ -124,11 +141,21 @@ function App() {
   const [cosmeticShopEntry, setCosmeticShopEntry] = useState<{ context: string; state: CosmeticShopState } | null>(null);
   const cosmeticShop = cosmeticShopEntry?.context === cosmeticShopContext ? cosmeticShopEntry.state : null;
   const [cosmeticPreview, setCosmeticPreview] = useState<EquippedCosmetic[] | null>(null);
+  const [cosmeticPreviewResetRevision, setCosmeticPreviewResetRevision] = useState(0);
+  const [cosmeticPreviewSelection, setCosmeticPreviewSelection] = useState<{ context: string; product: CosmeticProduct } | null>(null);
+  const [selectedCosmeticEntry, setSelectedCosmeticEntry] = useState<{ context: string; sku: string } | null>(null);
+  const [cosmeticOrganizerEntry, setCosmeticOrganizerEntry] = useState<{ context: string; view: PlanetCosmeticOrganizerView } | null>(null);
+  const [shopFocusEntry, setShopFocusEntry] = useState<{ context: string; sku: string } | null>(null);
   const [cosmeticShopError, setCosmeticShopError] = useState("");
   const [cosmeticActionError, setCosmeticActionError] = useState<{ context: string; message: string } | null>(null);
   const cosmeticActionErrorMessage = cosmeticActionError?.context === cosmeticShopContext ? cosmeticActionError.message : "";
   const [cosmeticShopLoadingContext, setCosmeticShopLoadingContext] = useState<string | null>(null);
   const featureActionsBlocked = sharedLoading || sharedContextLockedRef.current;
+  const selectedCosmeticSku = selectedCosmeticEntry?.context === cosmeticShopContext ? selectedCosmeticEntry.sku : null;
+  const cosmeticOrganizerView = cosmeticOrganizerEntry?.context === cosmeticShopContext
+    ? cosmeticOrganizerEntry.view
+    : { open: false, category: "all", query: "" };
+  const shopFocusSku = shopFocusEntry?.context === cosmeticShopContext ? shopFocusEntry.sku : null;
 
   function cosmeticShopLoad(context: string) {
     let load = cosmeticShopLoads.current.get(context);
@@ -163,6 +190,10 @@ function App() {
     setSharedLoading(true);
     setCosmeticShopEntry(null);
     setCosmeticPreview(null);
+    setCosmeticPreviewSelection(null);
+    setSelectedCosmeticEntry(null);
+    setCosmeticOrganizerEntry(null);
+    setShopFocusEntry(null);
     setPlanetExplorationEntry(null);
     setCosmeticShopError("");
     setCosmeticActionError(null);
@@ -370,6 +401,10 @@ function App() {
     let active = true;
     setCosmeticShopEntry(null);
     setCosmeticPreview(null);
+    setCosmeticPreviewSelection(null);
+    setSelectedCosmeticEntry(null);
+    setCosmeticOrganizerEntry({ context, view: { open: false, category: "all", query: "" } });
+    setShopFocusEntry(null);
     setCosmeticShopError("");
     setCosmeticActionError((current) => current?.context === context ? current : null);
     void loadCosmeticShop(context).catch((cause) => {
@@ -604,8 +639,22 @@ function App() {
     setCosmeticPreview(preview);
   }
 
-  function launchFeatureScreen(feature: Exclude<FeatureScreen, "planet">) {
+  function updateCosmeticPreviewSelection(
+    product: CosmeticProduct | null,
+    context: string,
+    epoch: number,
+    screenEpoch: number,
+  ) {
+    if (sharedContextLockedRef.current || featureScreenRef.current !== "cosmetic-shop"
+      || worldTransitionEpoch.current !== epoch || cosmeticShopContextRef.current !== context
+      || featureScreenEpoch.current !== screenEpoch) return;
+    setCosmeticPreviewSelection(product ? { context, product } : null);
+  }
+
+  function launchFeatureScreen(feature: Exclude<FeatureScreen, "planet">, focusSku?: string) {
     if (sharedContextLockedRef.current) return;
+    if (featureScreenRef.current === feature) return;
+    setShopFocusEntry(feature === "cosmetic-shop" && focusSku ? { context: cosmeticShopContext, sku: focusSku } : null);
     featureReturnFocusRef.current = feature;
     featureScreenRef.current = feature;
     featureScreenEpoch.current += 1;
@@ -614,6 +663,8 @@ function App() {
 
   function returnToPlanetDetail() {
     setCosmeticPreview(null);
+    setCosmeticPreviewSelection(null);
+    setShopFocusEntry(null);
     setDetail(true);
     setDetailTab("planet");
     featureScreenRef.current = "planet";
@@ -700,7 +751,7 @@ function App() {
   const explorationContext = worldContext(shared, snapshot);
   const sceneBounds = useMemo(() => planetLandscapeBounds(planet.objects), [planet.objects]);
   const initialExploration = useMemo<PlanetExplorationState>(() => ({
-    camera: fitLandscape(sceneBounds),
+    camera: initialLandscapeCamera(sceneBounds),
     selectedObjectId: null,
   }), [sceneBounds]);
   const planetExploration = !sharedContextLockedRef.current && planetExplorationEntry?.context === explorationContext
@@ -731,6 +782,7 @@ function App() {
     ? cosmeticShop.equipped
     : [];
   const sceneCosmetics = cosmeticPreview ?? confirmedCosmetics;
+  const previewProduct = cosmeticPreviewSelection?.context === cosmeticShopContext ? cosmeticPreviewSelection.product : null;
   const availableWalletBalance = cosmeticShop?.available_balance ?? planet.wallet_balance;
   useEffect(() => {
     if (planet.can_reset || !planet.reset_available_at_utc) return;
@@ -786,17 +838,28 @@ function App() {
     return (
       <main className="app-shell app-shell--feature-screen">
         <header className="topbar feature-screen-topbar">
-          <button type="button" className="feature-screen-back" onClick={returnToPlanetDetail}>← 내 행성으로 돌아가기</button>
+          <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>Token Planet</span></div>
+          <FeatureToolMenu active={featureScreen} disabled={featureActionsBlocked} onNavigate={launchFeatureScreen} />
           <h1 ref={featureScreenHeadingRef} className="feature-screen-title" tabIndex={-1}>행성 꾸미기</h1>
           <button className="icon-button" type="button" onClick={refresh} disabled={refreshing || sourceBusy !== null || planetBusy} aria-busy={refreshing || undefined} aria-label={refreshing ? "사용량을 갱신하는 중" : "사용량 새로고침"} title="사용량 새로고침">↻</button>
         </header>
+        <div className="feature-screen-secondary-nav"><button type="button" className="feature-screen-back" onClick={returnToPlanetDetail}>← 행성으로 돌아가기</button></div>
         <div className="feature-window-content shop-window-content">
           <section className="shop-planet-preview" aria-label="행성 미리보기">
-            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} animate incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
+            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} highlightedCosmeticSku={previewProduct?.sku ?? null} animate incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
             <div className="shop-planet-preview-copy">
               <h2>{profile!.nickname}의 행성</h2>
-              <p>장식 미리보기를 눌러 행성 모습을 확인하세요.</p>
+              <p>{previewProduct ? `${previewProduct.display_name} 미리보기 중` : "장식 미리보기를 눌러 행성 모습을 확인하세요."}</p>
               <strong>{STAGE_NAMES[planet.stage] ?? STAGE_NAMES[4]}</strong>
+              {previewProduct && <div className="shop-selected-preview" aria-live="polite">
+                <CosmeticThumbnail sku={previewProduct.sku} slotId={previewProduct.slot_id} className="shop-selected-preview-art" />
+                <div><span>현재 미리보기</span><b>{previewProduct.display_name}</b><small>구매나 장착을 눌러야 행성에 저장됩니다.</small></div>
+                <button type="button" onClick={() => {
+                  setCosmeticPreviewResetRevision((revision) => revision + 1);
+                  updateCosmeticPreview(null, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch);
+                  updateCosmeticPreviewSelection(null, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch);
+                }}>원래 모습</button>
+              </div>}
             </div>
           </section>
           <section className="shop-window-store" aria-label="행성 꾸미기 상점">
@@ -808,9 +871,15 @@ function App() {
               onPreviewChange={(preview) => updateCosmeticPreview(
                 preview, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch,
               )}
+              onPreviewSelectionChange={(product) => updateCosmeticPreviewSelection(
+                product, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch,
+              )}
               onRefresh={refreshCosmeticShop}
               actionsDisabled={featureActionsBlocked}
               showCollapseButton={false}
+              initialTab={shopFocusSku ? "inventory" : "shop"}
+              initialFocusSku={shopFocusSku}
+              previewResetRevision={cosmeticPreviewResetRevision}
               initiallyOpen
             />}
             {featureActionsBlocked
@@ -834,10 +903,12 @@ function App() {
     return (
       <main className="app-shell app-shell--feature-screen">
         <header className="topbar feature-screen-topbar">
-          <button type="button" className="feature-screen-back" onClick={returnToPlanetDetail}>← 내 행성으로 돌아가기</button>
+          <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>Token Planet</span></div>
+          <FeatureToolMenu active={featureScreen} disabled={featureActionsBlocked} onNavigate={launchFeatureScreen} />
           <h1 ref={featureScreenHeadingRef} className="feature-screen-title" tabIndex={-1}>성장 일지</h1>
           <button className="icon-button" type="button" onClick={() => sharedContextLockedRef.current ? void refresh() : void loadGrowthJournal()} disabled={refreshing || (journalBusy && !featureActionsBlocked)} aria-busy={refreshing || journalBusy || undefined} aria-label={featureActionsBlocked ? "계정 상태 다시 확인" : "성장 일지 새로고침"} title={featureActionsBlocked ? "계정 상태 다시 확인" : "성장 일지 새로고침"}>↻</button>
         </header>
+        <div className="feature-screen-secondary-nav"><button type="button" className="feature-screen-back" onClick={returnToPlanetDetail}>← 행성으로 돌아가기</button></div>
         <div className="feature-window-content growth-journal-window-content">
           {featureActionsBlocked && <LoadingStatus label="계정과 행성 상태를 확인하고 있습니다." />}
           {journalBusy && <LoadingStatus label={journal ? "기록 동기화를 기다리며 성장 일지를 갱신하고 있습니다." : "기록 동기화를 기다리며 성장 일지를 불러오고 있습니다."} />}
@@ -860,6 +931,7 @@ function App() {
     <main className={`app-shell ${detail ? "app-shell--detail" : "app-shell--popover"}`} aria-label={detail ? undefined : "행성 팝오버"}>
       <header className="topbar">
         <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>Token Planet</span></div>
+        {detail && <FeatureToolMenu active="planet" disabled={featureActionsBlocked} onNavigate={launchFeatureScreen} />}
         <button className="icon-button" type="button" onClick={refresh} disabled={refreshing || sourceBusy !== null || planetBusy} aria-busy={refreshing || undefined} aria-label={refreshing ? "사용량을 갱신하는 중" : "사용량 새로고침"} title="사용량 새로고침">↻</button>
       </header>
       {refreshing && <LoadingStatus className="loading-status--refresh" label="사용량 기록을 갱신하고 있습니다." />}
@@ -890,7 +962,7 @@ function App() {
           </div>
         </> : <>
           <div className="detail-navigation">
-            <button className="text-button" type="button" onClick={() => void changeView()}>행성으로 돌아가기</button>
+            <button className="text-button detail-return-button" type="button" onClick={() => void changeView()}>← 행성으로 돌아가기</button>
             <div className="detail-tabs" role="tablist" aria-label="행성 자세히 보기" onKeyDown={handleDetailTabKeyDown}>
               <button ref={(node) => { detailTabRefs.current[0] = node; }} id="tab-personal" type="button" role="tab" aria-controls="panel-personal" aria-selected={detailTab === "planet"} tabIndex={detailTab === "planet" ? 0 : -1} onClick={() => selectDetailTab("planet")}>내 행성</button>
               <button ref={(node) => { detailTabRefs.current[1] = node; }} id="tab-group" type="button" role="tab" aria-controls="panel-group" aria-selected={detailTab === "group"} tabIndex={detailTab === "group" ? 0 : -1} onClick={() => selectDetailTab("group")}>그룹</button>
@@ -908,6 +980,7 @@ function App() {
                 cycleId={planet.current_cycle_id}
                 exploration={planetExploration}
                 onExplorationChange={updatePlanetExploration}
+                selectedCosmeticSku={selectedCosmeticSku}
               />
               <div className="personal-quick-facts">
                 <h1>{profile!.nickname}의 행성</h1>
@@ -922,6 +995,17 @@ function App() {
                 </div>
               </div>
             </div>
+            <PlanetCosmeticOrganizer
+              state={cosmeticShop}
+              loading={cosmeticShopLoadingContext === cosmeticShopContext}
+              error={cosmeticShopError}
+              selectedSku={selectedCosmeticSku}
+              view={cosmeticOrganizerView}
+              equipped={confirmedCosmetics}
+              onViewChange={(view) => setCosmeticOrganizerEntry({ context: cosmeticShopContext, view })}
+              onSelect={(product) => setSelectedCosmeticEntry({ context: cosmeticShopContext, sku: product.sku })}
+              onOpenShop={(sku) => launchFeatureScreen("cosmetic-shop", sku)}
+            />
             <div className="personal-information">
               <section className="planet-action-panel" aria-label="행성 기록">
                 <h2>행성 기록</h2>
@@ -936,10 +1020,6 @@ function App() {
                 </div>
               </section>
               <UsageSummary snapshot={view} />
-              <div className="planet-feature-actions" aria-label="행성 도구">
-                <button type="button" data-feature-screen-trigger="cosmetic-shop" disabled={featureActionsBlocked} onClick={() => launchFeatureScreen("cosmetic-shop")}>행성 꾸미기</button>
-                <button type="button" data-feature-screen-trigger="growth-journal" disabled={featureActionsBlocked} onClick={() => launchFeatureScreen("growth-journal")}>성장 일지 보기</button>
-              </div>
               <div className="source-list" aria-label="수집 상태">
                 <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "codex"} error={sourceError?.agent === "codex" ? sourceError.message : undefined} />
                 <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "claude_code"} error={sourceError?.agent === "claude_code" ? sourceError.message : undefined} />
