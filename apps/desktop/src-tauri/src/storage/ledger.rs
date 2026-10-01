@@ -540,6 +540,15 @@ impl Ledger {
         }
     }
 
+    pub fn reset_available_at(&self) -> Result<Option<DateTime<Utc>>, ScanError> {
+        if let Some(value) = setting_value(&self.connection, "planet_reset_available_at_utc")? {
+            return DateTime::parse_from_rfc3339(&value)
+                .map(|date| Some(date.with_timezone(&Utc)))
+                .map_err(|_| ScanError::Database);
+        }
+        Ok(self.last_reset_at()?.map(|last| last + Duration::hours(24)))
+    }
+
     pub fn planet_wallet_credits(&self) -> Result<Vec<PlanetWalletCredit>, ScanError> {
         let mut statement = self.connection.prepare(
             "SELECT previous_cycle_id,amount,created_at_utc FROM planet_wallet_credit
@@ -564,10 +573,7 @@ impl Ledger {
     }
 
     pub fn reset_planet(&mut self, now: DateTime<Utc>) -> Result<u64, ScanError> {
-        if self
-            .last_reset_at()?
-            .is_some_and(|last| now < last + Duration::hours(24))
-        {
+        if self.reset_available_at()?.is_some_and(|available| now < available) {
             return Err(ScanError::ResetCooldown);
         }
         let previous_cycle_id = self.planet_cycle_id()?;
@@ -577,34 +583,12 @@ impl Ledger {
             .filter(|(cycle_id, _, _, _)| cycle_id == &previous_cycle_id)
             .map(|(_, remote_tokens, _, _)| local_current_tokens.max(remote_tokens))
             .unwrap_or(local_current_tokens);
-        let new_cycle_id = uuid::Uuid::new_v4().to_string();
-        let tx = self.connection.transaction()?;
-        tx.execute(
-            "INSERT OR IGNORE INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
-             VALUES (?1,?2,?3)",
-            params![previous_cycle_id, as_i64(current_tokens)?, now.to_rfc3339()],
-        )?;
-        for (key, value) in [
-            ("planet_last_reset_at_utc", now.to_rfc3339()),
-            ("planet_cycle_started_at_utc", now.to_rfc3339()),
-            ("planet_current_cycle_id", new_cycle_id),
-        ] {
-            tx.execute(
-                "INSERT INTO setting(key,value) VALUES (?1,?2)
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![key, value],
-            )?;
+        let reset = self.reset_guest_planet(&format!("legacy-reset:{previous_cycle_id}"),&previous_cycle_id,now)?;
+        match reset.status {
+            crate::domain::cosmetic_shop::ShopActionStatus::Reset => Ok(current_tokens),
+            crate::domain::cosmetic_shop::ShopActionStatus::CycleMismatch => Err(ScanError::ResetCooldown),
+            _ => Err(ScanError::InvalidShopState),
         }
-        tx.execute("DELETE FROM setting WHERE key IN ('planet_remote_cycle_id','planet_remote_current_tokens','planet_remote_growth_credit','planet_remote_incomplete')", [])?;
-        tx.execute("DELETE FROM planet_object", [])?;
-        tx.execute(
-            "DELETE FROM cosmetic_equipment
-             WHERE account_id=(SELECT value FROM setting WHERE key='planet_account_id')
-               AND cycle_id=?1",
-            [&previous_cycle_id],
-        )?;
-        tx.commit()?;
-        Ok(current_tokens)
     }
 
     pub fn synced_planet_metrics(&self) -> Result<Option<(String, u64, f64, bool)>, ScanError> {
@@ -1044,7 +1028,19 @@ mod tests {
                 .lifetime_tokens,
             42
         );
-        ledger.reset_planet(chrono::Utc::now()).unwrap();
+        let alice_cycle_before_reset = ledger.planet_cycle_id().unwrap();
+        assert!(matches!(
+            ledger.reset_planet(chrono::Utc::now()),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        ));
+        assert_eq!(ledger.planet_cycle_id().unwrap(), alice_cycle_before_reset);
+        assert!(ledger.planet_wallet_credits().unwrap().is_empty());
+        // Model a server-confirmed wallet snapshot while testing account persistence.
+        ledger.connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES (?1,42,'2026-10-01T00:00:00Z')",
+            [&alice_cycle_before_reset],
+        ).unwrap();
         ledger
             .ensure_planet_object(0, 0, "tree", 20, 30, 12)
             .unwrap();

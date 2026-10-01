@@ -179,6 +179,7 @@ export type ShopState = {
   products: ShopProduct[];
   landscape_instances: LandscapeInstance[];
   placements: LandscapePlacement[];
+  removed_natural_keys: NaturalObjectKey[];
   avatar_owned_skus: string[];
   avatar_equipment: AvatarEquipment;
   effects: ActiveEffects;
@@ -202,9 +203,10 @@ export type ShopRequest =
   | { kind: "place"; request_id: string; cycle_id: string; instance_id: string; expected_version: number; x: number; y: number }
   | { kind: "retrieve"; request_id: string; cycle_id: string; instance_id: string; expected_version: number }
   | { kind: "equip_avatar"; request_id: string; slot: AvatarSlot; sku: string | null; expected_version: number }
-  | { kind: "remove_natural"; request_id: string; key: NaturalObjectKey; expected_version: number; quote: ShopQuote };
+  | { kind: "remove_natural"; request_id: string; key: NaturalObjectKey; expected_version: number; quote: ShopQuote }
+  | { kind: "reset_planet"; request_id: string; cycle_id: string };
 export type ShopActionStatus =
-  | "purchased" | "placed" | "retrieved" | "equipped" | "unequipped" | "removed"
+  | "purchased" | "placed" | "retrieved" | "equipped" | "unequipped" | "removed" | "reset"
   | "limit_reached" | "already_owned" | "insufficient_balance" | "quote_changed"
   | "catalog_mismatch" | "version_conflict" | "cycle_mismatch" | "not_owned"
   | "already_removed" | "request_conflict" | "invalid_placement" | "unavailable";
@@ -268,6 +270,7 @@ export type PlanetState = {
   can_reset: boolean;
   reset_available_at_utc: string | null;
   objects: PlanetObject[];
+  removed_natural_keys: NaturalObjectKey[];
 };
 export type WorldPlanet = {
   nickname: string;

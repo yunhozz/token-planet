@@ -77,7 +77,7 @@ pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapsh
     let wallet_balance = ledger.cosmetic_shop_state()?.available_balance;
     let now = chrono::Utc::now();
     let last_reset = ledger.last_reset_at()?;
-    let reset_available = last_reset.map(|last| last + chrono::Duration::hours(24));
+    let reset_available = ledger.reset_available_at()?;
     let can_reset = reset_available.is_none_or(|available| now >= available);
     let planet = PlanetState {
         version: 1,
@@ -97,6 +97,7 @@ pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapsh
         can_reset,
         reset_available_at_utc: reset_available.map(|value| value.to_rfc3339()),
         objects: ledger.planet_objects()?,
+        removed_natural_keys: ledger.planet_removed_natural_keys()?,
     };
     Ok(WorldSnapshot {
         usage,

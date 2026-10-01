@@ -15,7 +15,7 @@ use crate::domain::landscape_geometry::{
 use crate::domain::planet::{PlanetObject, PlanetWalletCredit};
 use super::shop_effects::load_shop_reward_state;
 use chrono::Utc;
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 fn active_account_id(connection: &Connection) -> Result<String, ScanError> {
     connection
@@ -81,9 +81,14 @@ fn shop_available_balance(connection: &Connection, account_id: &str) -> Result<u
            + (SELECT coalesce(sum(price),0) FROM cosmetic_purchase WHERE account_id=?1)",
         [account_id], |row| row.get(0),
     )?;
+    let natural_removal_debits: i64 = connection.query_row(
+        "SELECT coalesce(sum(amount),0) FROM shop_natural_removal_debit WHERE account_id=?1",
+        [account_id], |row| row.get(0),
+    )?;
     let available = credits
         .checked_add(game_credits)
         .and_then(|value| value.checked_sub(purchases))
+        .and_then(|value| value.checked_sub(natural_removal_debits))
         .filter(|value| *value >= 0)
         .ok_or(ScanError::InvalidCount)?;
     u64::try_from(available).map_err(|_| ScanError::InvalidCount)
@@ -218,6 +223,13 @@ impl Ledger {
                 removed_at_utc TEXT NOT NULL,
                 PRIMARY KEY(account_id,cycle_id,stage,ordinal)
              );
+             CREATE TABLE IF NOT EXISTS shop_natural_removal_debit (
+                account_id TEXT NOT NULL,
+                request_id TEXT NOT NULL,
+                amount INTEGER NOT NULL CHECK(amount >= 0),
+                created_at_utc TEXT NOT NULL,
+                PRIMARY KEY(account_id,request_id)
+             );
              CREATE TABLE IF NOT EXISTS shop_remote_state (
                 account_id TEXT PRIMARY KEY,
                 state_json TEXT NOT NULL,
@@ -345,7 +357,7 @@ impl Ledger {
         Ok(CosmeticShopState {
             slots,
             products,
-            current_cycle_id,
+            current_cycle_id: current_cycle_id.clone(),
             available_balance: if actions_require_online {
                 0
             } else {
@@ -381,6 +393,7 @@ impl Ledger {
                     state.current_cycle_id = current_cycle_id;
                     state.placements.clear();
                     state.effects = ActiveEffects::default();
+                    state.removed_natural_keys.clear();
                 }
                 state.guest_import_pending = guest_import_pending;
                 return Ok(state);
@@ -455,13 +468,14 @@ impl Ledger {
         let reward_state = self.shop_reward_state(&account_id, &current_cycle_id)?;
         Ok(ShopState {
             account_id: account_id.clone(),
-            current_cycle_id,
+            current_cycle_id: current_cycle_id.clone(),
             catalog_revision: 1,
             state_revision: u64::try_from(state_revision.unwrap_or(0)).map_err(|_| ScanError::InvalidCount)?,
             available_balance: if actions_require_online { 0 } else { shop_available_balance(&self.connection, &account_id)? },
             products,
             landscape_instances,
             placements,
+            removed_natural_keys: removed_natural_keys(&self.connection, &account_id, &current_cycle_id)?,
             avatar_owned_skus,
             avatar_equipment,
             effects,
@@ -476,6 +490,200 @@ impl Ledger {
         quote_for_state(&self.connection, target, &self.shop_state()?)
     }
 
+    pub fn planet_removed_natural_keys(&self) -> Result<Vec<crate::domain::cosmetic_shop::NaturalObjectKey>, ScanError> {
+        let account_id = active_account_id(&self.connection)?;
+        let cycle_id = active_cycle_id(&self.connection)?;
+        removed_natural_keys(&self.connection, &account_id, &cycle_id)
+    }
+
+    pub fn reset_guest_planet(
+        &mut self,
+        request_id: &str,
+        cycle_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ShopActionResult, ScanError> {
+        self.apply_guest_shop_request(
+            &ShopRequest::ResetPlanet {
+                request_id: request_id.to_owned(),
+                cycle_id: cycle_id.to_owned(),
+            },
+            now,
+        )
+    }
+
+    fn apply_guest_reset_request(
+        &mut self,
+        request: &ShopRequest,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ShopActionResult, ScanError> {
+        let ShopRequest::ResetPlanet { request_id, cycle_id } = request else {
+            return Err(ScanError::InvalidShopState);
+        };
+        let account_id = active_account_id(&self.connection)?;
+        if account_id.starts_with("account:") || request_id.trim().is_empty() {
+            return Err(ScanError::InvalidShopState);
+        }
+        let payload_json = serde_json::to_string(request).map_err(|_| ScanError::InvalidShopState)?;
+        if let Some(result) = replayed_guest_shop_action(&self.connection,&account_id,request_id,&payload_json)? {
+            return Ok(result);
+        }
+        let current_cycle = active_cycle_id(&self.connection)?;
+        if cycle_id != &current_cycle {
+            return self.record_guest_reset_status(request_id,&payload_json,
+                ShopActionStatus::CycleMismatch,now);
+        }
+        if self.reset_available_at()?.is_some_and(|available| now < available) {
+            return Err(ScanError::ResetCooldown);
+        }
+
+        self.settle_guest_rewards(now)?;
+        self.settle_guest_cycle_tokens(cycle_id,now)?;
+        let state_before_reset = self.shop_state()?;
+        let current_tokens = self.current_guest_cycle_tokens(cycle_id)?;
+        let reset_bps = state_before_reset.effects.reset_cooldown_bps.min(2_500);
+        let cooldown_seconds = (86_400_i64 * i64::from(10_000 - reset_bps)) / 10_000;
+        let reset_available_at = now + chrono::Duration::seconds(cooldown_seconds.max(64_800));
+
+        let transaction = self.connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let account_id = active_account_id(&transaction)?;
+        if let Some(result) = replayed_guest_shop_action(&transaction,&account_id,request_id,&payload_json)? {
+            return Ok(result);
+        }
+        if active_cycle_id(&transaction)? != *cycle_id {
+            let result = ShopActionResult {
+                status: ShopActionStatus::CycleMismatch,
+                request_id: request_id.clone(),
+                confirmed_quote: None,
+                state: guest_shop_state(&transaction)?,
+            };
+            let result_json = serde_json::to_string(&result).map_err(|_|ScanError::Database)?;
+            transaction.execute(
+                "INSERT INTO shop_action_request(account_id,request_id,payload_json,result_json,created_at_utc)
+                 VALUES (?1,?2,?3,?4,?5)",
+                params![account_id,request_id,payload_json,result_json,now.to_rfc3339()],
+            )?;
+            transaction.commit()?;
+            return Ok(result);
+        }
+        if reset_available_at_from(&transaction)?.is_some_and(|available| now < available) {
+            return Err(ScanError::ResetCooldown);
+        }
+
+        let new_cycle_id = uuid::Uuid::new_v4().to_string();
+        transaction.execute(
+            "INSERT OR IGNORE INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES (?1,?2,?3)",
+            params![cycle_id,to_i64(current_tokens)?,now.to_rfc3339()],
+        )?;
+        transaction.execute(
+            "UPDATE shop_effect_history SET ended_at_utc=?3
+             WHERE account_id=?1 AND cycle_id=?2 AND ended_at_utc IS NULL",
+            params![account_id,cycle_id,now.to_rfc3339()],
+        )?;
+        let next_effect_revision: i64 = transaction.query_row(
+            "SELECT coalesce(max(revision),0)+1 FROM shop_effect_history WHERE account_id=?1",
+            [&account_id],|row|row.get(0),
+        )?;
+        let baseline_effects = serde_json::to_string(&ActiveEffects::default())
+            .map_err(|_|ScanError::Database)?;
+        transaction.execute(
+            "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+             active_instance_ids_json,effects_json) VALUES (?1,?2,?3,?4,'[]',?5)",
+            params![account_id,new_cycle_id,next_effect_revision,now.to_rfc3339(),baseline_effects],
+        )?;
+        transaction.execute(
+            "INSERT OR IGNORE INTO shop_landscape_edit_version(account_id,instance_id,version)
+             SELECT account_id,instance_id,0 FROM shop_landscape_placement
+             WHERE account_id=?1 AND cycle_id=?2",
+            params![account_id,cycle_id],
+        )?;
+        transaction.execute(
+            "UPDATE shop_landscape_edit_version SET version=version+1
+             WHERE account_id=?1 AND instance_id IN (
+               SELECT instance_id FROM shop_landscape_placement WHERE account_id=?1 AND cycle_id=?2
+             )",
+            params![account_id,cycle_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM shop_landscape_placement WHERE account_id=?1 AND cycle_id=?2",
+            params![account_id,cycle_id],
+        )?;
+        transaction.execute("DELETE FROM planet_object WHERE cycle_id=?1",[cycle_id])?;
+        transaction.execute(
+            "DELETE FROM cosmetic_equipment WHERE account_id=?1 AND cycle_id=?2",
+            params![account_id,cycle_id],
+        )?;
+        for (key,value) in [
+            ("planet_last_reset_at_utc",now.to_rfc3339()),
+            ("planet_reset_available_at_utc",reset_available_at.to_rfc3339()),
+            ("planet_cycle_started_at_utc",now.to_rfc3339()),
+            ("planet_current_cycle_id",new_cycle_id),
+        ] {
+            transaction.execute(
+                "INSERT INTO setting(key,value) VALUES (?1,?2)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                params![key,value],
+            )?;
+        }
+        transaction.execute(
+            "DELETE FROM setting WHERE key IN ('planet_remote_cycle_id','planet_remote_current_tokens',
+             'planet_remote_growth_credit','planet_remote_incomplete')",
+            [],
+        )?;
+        increment_state_revision(&transaction,&account_id)?;
+        let state = guest_shop_state(&transaction)?;
+        let result = ShopActionResult {
+            status: ShopActionStatus::Reset,
+            request_id: request_id.clone(),
+            confirmed_quote: None,
+            state,
+        };
+        let result_json = serde_json::to_string(&result).map_err(|_|ScanError::Database)?;
+        transaction.execute(
+            "INSERT INTO shop_action_request(account_id,request_id,payload_json,result_json,created_at_utc)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![account_id,request_id,payload_json,result_json,now.to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
+    fn current_guest_cycle_tokens(&self, cycle_id: &str) -> Result<u64,ScanError> {
+        let (_,local_tokens,_) = self.planet_usage_totals()?;
+        Ok(self.synced_planet_metrics()?
+            .filter(|(remote_cycle,_,_,_)| remote_cycle == cycle_id)
+            .map(|(_,remote_tokens,_,_)| local_tokens.max(remote_tokens))
+            .unwrap_or(local_tokens))
+    }
+
+    fn record_guest_reset_status(
+        &mut self,
+        request_id: &str,
+        payload_json: &str,
+        status: ShopActionStatus,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ShopActionResult,ScanError> {
+        let transaction = self.connection.transaction()?;
+        let account_id = active_account_id(&transaction)?;
+        if let Some(result) = replayed_guest_shop_action(&transaction,&account_id,request_id,payload_json)? {
+            return Ok(result);
+        }
+        let result = ShopActionResult {
+            status,
+            request_id: request_id.to_owned(),
+            confirmed_quote: None,
+            state: guest_shop_state(&transaction)?,
+        };
+        let result_json = serde_json::to_string(&result).map_err(|_|ScanError::Database)?;
+        transaction.execute(
+            "INSERT INTO shop_action_request(account_id,request_id,payload_json,result_json,created_at_utc)
+             VALUES (?1,?2,?3,?4,?5)",
+            params![account_id,request_id,payload_json,result_json,now.to_rfc3339()],
+        )?;
+        transaction.commit()?;
+        Ok(result)
+    }
+
     pub fn apply_guest_shop_request(
         &mut self,
         request: &ShopRequest,
@@ -487,6 +695,9 @@ impl Ledger {
         let request_id = request_id(request).to_owned();
         if request_id.trim().is_empty() {
             return Err(ScanError::InvalidShopState);
+        }
+        if matches!(request, ShopRequest::ResetPlanet { .. }) {
+            return self.apply_guest_reset_request(request, now);
         }
         let payload_json = serde_json::to_string(request).map_err(|_| ScanError::InvalidShopState)?;
         let transaction = self.connection.transaction()?;
@@ -517,7 +728,18 @@ impl Ledger {
             ShopRequest::EquipAvatar { slot, sku, expected_version, .. } => {
                 apply_guest_avatar(&transaction, &account_id, *slot, sku.as_deref(), *expected_version)?
             }
-            ShopRequest::RemoveNatural { .. } => ShopActionStatus::Unavailable,
+            ShopRequest::RemoveNatural { key, expected_version, quote, .. } => {
+                apply_guest_natural_removal(
+                    &transaction,
+                    &account_id,
+                    key,
+                    *expected_version,
+                    quote,
+                    &request_id,
+                    now,
+                )?
+            }
+            ShopRequest::ResetPlanet { .. } => ShopActionStatus::Unavailable,
         };
         let state = guest_shop_state(&transaction)?;
         let confirmed_quote = match request {
@@ -853,26 +1075,65 @@ fn quote_for_state(
     target: &QuoteTarget,
     state: &ShopState,
 ) -> Result<ShopQuote, ScanError> {
-    let QuoteTarget::Purchase { sku } = target else {
-        return Err(ScanError::InvalidShopState);
-    };
-    let product = state.products.iter().find(|product| &product.sku == sku)
-        .ok_or(ScanError::InvalidShopState)?;
-    if !product.purchasable {
-        return Err(ScanError::InvalidShopState);
-    }
     let effect_revision: i64 = connection.query_row(
-        "SELECT coalesce(max(revision),0) FROM shop_effect_history WHERE account_id=?1 AND cycle_id=?2",
-        params![state.account_id,state.current_cycle_id], |row| row.get(0),
+        "SELECT coalesce(max(revision),0) FROM shop_effect_history WHERE account_id=?1",
+        [&state.account_id], |row| row.get(0),
     )?;
-    let price = discounted_price(product.price, state.effects.shop_discount_bps)
-        .map_err(|_| ScanError::InvalidShopState)?;
+    let price = match target {
+        QuoteTarget::Purchase { sku } => {
+            let product = state.products.iter().find(|product| &product.sku == sku)
+                .ok_or(ScanError::InvalidShopState)?;
+            if !product.purchasable {
+                return Err(ScanError::InvalidShopState);
+            }
+            discounted_price(product.price, state.effects.shop_discount_bps)
+                .map_err(|_| ScanError::InvalidShopState)?
+        }
+        QuoteTarget::RemoveNatural { key } => {
+            if key.cycle_id != state.current_cycle_id || key.stage > 4 {
+                return Err(ScanError::InvalidShopState);
+            }
+            let object_exists: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM planet_object WHERE cycle_id=?1 AND stage=?2 AND ordinal=?3)",
+                params![key.cycle_id,key.stage,key.ordinal], |row| row.get(0),
+            )?;
+            let removed: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM shop_natural_removal WHERE account_id=?1 AND cycle_id=?2 AND stage=?3 AND ordinal=?4)",
+                params![state.account_id,key.cycle_id,key.stage,key.ordinal], |row| row.get(0),
+            )?;
+            if !object_exists || removed {
+                return Err(ScanError::InvalidShopState);
+            }
+            const STAGE_PRICES: [u64; 5] = [100_000, 250_000, 500_000, 1_000_000, 2_000_000];
+            discounted_price(STAGE_PRICES[usize::from(key.stage)], state.effects.natural_removal_discount_bps)
+                .map_err(|_| ScanError::InvalidShopState)?
+        }
+    };
     Ok(ShopQuote {
         target: target.clone(),
         catalog_revision: state.catalog_revision,
         effect_revision: u32::try_from(effect_revision).map_err(|_| ScanError::InvalidCount)? as u64,
         price,
     })
+}
+
+fn removed_natural_keys(
+    connection: &Connection,
+    account_id: &str,
+    cycle_id: &str,
+) -> Result<Vec<crate::domain::cosmetic_shop::NaturalObjectKey>, ScanError> {
+    let mut statement = connection.prepare(
+        "SELECT cycle_id,stage,ordinal FROM shop_natural_removal
+         WHERE account_id=?1 AND cycle_id=?2 ORDER BY stage,ordinal",
+    )?;
+    let rows = statement.query_map(params![account_id,cycle_id], |row| {
+        Ok(crate::domain::cosmetic_shop::NaturalObjectKey {
+            cycle_id: row.get(0)?,
+            stage: row.get(1)?,
+            ordinal: row.get(2)?,
+        })
+    })?.collect::<Result<Vec<_>,_>>().map_err(Into::into);
+    rows
 }
 
 fn guest_shop_state(connection: &Connection) -> Result<ShopState, ScanError> {
@@ -959,6 +1220,7 @@ fn guest_shop_state(connection: &Connection) -> Result<ShopState, ScanError> {
         products,
         landscape_instances,
         placements,
+        removed_natural_keys: removed_natural_keys(connection, &account_id, &current_cycle_id)?,
         avatar_owned_skus,
         avatar_equipment,
         effects,
@@ -975,8 +1237,54 @@ fn request_id(request: &ShopRequest) -> &str {
         | ShopRequest::Place { request_id, .. }
         | ShopRequest::Retrieve { request_id, .. }
         | ShopRequest::EquipAvatar { request_id, .. }
-        | ShopRequest::RemoveNatural { request_id, .. } => request_id,
+        | ShopRequest::RemoveNatural { request_id, .. }
+        | ShopRequest::ResetPlanet { request_id, .. } => request_id,
     }
+}
+
+fn replayed_guest_shop_action(
+    connection: &Connection,
+    account_id: &str,
+    request_id: &str,
+    payload_json: &str,
+) -> Result<Option<ShopActionResult>,ScanError> {
+    let prior: Option<(String,Option<String>)> = connection.query_row(
+        "SELECT payload_json,result_json FROM shop_action_request WHERE account_id=?1 AND request_id=?2",
+        params![account_id,request_id],
+        |row| Ok((row.get(0)?,row.get(1)?)),
+    ).optional()?;
+    let Some((prior_payload,prior_result)) = prior else { return Ok(None); };
+    if prior_payload != payload_json {
+        return Ok(Some(ShopActionResult {
+            status: ShopActionStatus::RequestConflict,
+            request_id: request_id.to_owned(),
+            confirmed_quote: None,
+            state: guest_shop_state(connection)?,
+        }));
+    }
+    let mut result: ShopActionResult = serde_json::from_str(
+        &prior_result.ok_or(ScanError::InvalidShopState)?,
+    ).map_err(|_|ScanError::Database)?;
+    result.state = guest_shop_state(connection)?;
+    Ok(Some(result))
+}
+
+fn reset_available_at_from(connection: &Connection) -> Result<Option<chrono::DateTime<chrono::Utc>>,ScanError> {
+    let frozen: Option<String> = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_reset_available_at_utc'",[],|row|row.get(0),
+    ).optional()?;
+    if let Some(value) = frozen {
+        return chrono::DateTime::parse_from_rfc3339(&value)
+            .map(|time|Some(time.with_timezone(&chrono::Utc))).map_err(|_|ScanError::Database);
+    }
+    let last: Option<String> = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_last_reset_at_utc'",[],|row|row.get(0),
+    ).optional()?;
+    last.map(|value| {
+        chrono::DateTime::parse_from_rfc3339(&value)
+            .map(|time|time.with_timezone(&chrono::Utc)+chrono::Duration::hours(24))
+            .map_err(|_|ScanError::Database)
+    }).transpose()
 }
 
 fn increment_state_revision(connection: &Connection, account_id: &str) -> Result<(), ScanError> {
@@ -988,6 +1296,63 @@ fn increment_state_revision(connection: &Connection, account_id: &str) -> Result
         return Err(ScanError::InvalidShopState);
     }
     Ok(())
+}
+
+fn apply_guest_natural_removal(
+    connection: &Connection,
+    account_id: &str,
+    key: &crate::domain::cosmetic_shop::NaturalObjectKey,
+    expected_version: u64,
+    quoted: &ShopQuote,
+    request_id: &str,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<ShopActionStatus, ScanError> {
+    let state = guest_shop_state(connection)?;
+    if key.cycle_id != state.current_cycle_id {
+        return Ok(ShopActionStatus::CycleMismatch);
+    }
+    let QuoteTarget::RemoveNatural { key: quoted_key } = &quoted.target else {
+        return Ok(ShopActionStatus::QuoteChanged);
+    };
+    if quoted_key != key {
+        return Ok(ShopActionStatus::QuoteChanged);
+    }
+    if state.removed_natural_keys.contains(key) {
+        return Ok(ShopActionStatus::AlreadyRemoved);
+    }
+    if expected_version != 0 {
+        return Ok(ShopActionStatus::VersionConflict);
+    }
+    let object_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM planet_object WHERE cycle_id=?1 AND stage=?2 AND ordinal=?3)",
+        params![key.cycle_id,key.stage,key.ordinal], |row| row.get(0),
+    )?;
+    if !object_exists {
+        return Ok(ShopActionStatus::NotOwned);
+    }
+    let current_quote = quote_for_state(connection, &quoted.target, &state)?;
+    if quoted.catalog_revision != state.catalog_revision {
+        return Ok(ShopActionStatus::CatalogMismatch);
+    }
+    if *quoted != current_quote {
+        return Ok(ShopActionStatus::QuoteChanged);
+    }
+    let balance = shop_available_balance(connection, account_id)?;
+    if balance < quoted.price {
+        return Ok(ShopActionStatus::InsufficientBalance);
+    }
+    connection.execute(
+        "INSERT INTO shop_natural_removal(account_id,cycle_id,stage,ordinal,version,removed_at_utc)
+         VALUES (?1,?2,?3,?4,1,?5)",
+        params![account_id,key.cycle_id,key.stage,key.ordinal,now.to_rfc3339()],
+    )?;
+    connection.execute(
+        "INSERT INTO shop_natural_removal_debit(account_id,request_id,amount,created_at_utc)
+         VALUES (?1,?2,?3,?4)",
+        params![account_id,request_id,to_i64(quoted.price)?,now.to_rfc3339()],
+    )?;
+    increment_state_revision(connection, account_id)?;
+    Ok(ShopActionStatus::Removed)
 }
 
 fn apply_guest_purchase(
@@ -1127,8 +1492,8 @@ fn record_effect_change(
     }
     let state = guest_shop_state(connection)?;
     let revision: i64 = connection.query_row(
-        "SELECT coalesce(max(revision),0)+1 FROM shop_effect_history WHERE account_id=?1 AND cycle_id=?2",
-        params![account_id,cycle_id], |row| row.get(0),
+        "SELECT coalesce(max(revision),0)+1 FROM shop_effect_history WHERE account_id=?1",
+        [account_id], |row| row.get(0),
     )?;
     let effects_json = serde_json::to_string(&state.effects).map_err(|_| ScanError::Database)?;
     connection.execute(
@@ -1836,6 +2201,395 @@ mod tests {
     }
 
     #[test]
+    fn natural_removal_quotes_use_generation_stage_cost_and_the_discount_cap() {
+        let ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let account = super::active_account_id(&ledger.connection).unwrap();
+        let cycle = ledger.planet_cycle_id().unwrap();
+        for stage in 0..5 {
+            ledger.ensure_planet_object(stage, 0, "tree", 50, 50, u64::from(stage)).unwrap();
+        }
+        for sku in ["land_recycler", "land_cutter", "land_excavator"] {
+            for variation in 0..5 {
+                let instance_id = format!("{sku}-{variation}");
+                ledger.connection.execute(
+                    "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,
+                     seed,variation_version,acquired_at_utc) VALUES (?1,?2,?3,?4,?5,1,'2026-10-01T00:00:00Z')",
+                    rusqlite::params![account,instance_id,sku,variation,format!("seed-{instance_id}")],
+                ).unwrap();
+                ledger.connection.execute(
+                    "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+                     VALUES (?1,?2,?3,200,200,1)",
+                    rusqlite::params![account,instance_id,cycle],
+                ).unwrap();
+            }
+        }
+
+        let targets = (0..5).map(|stage| crate::domain::cosmetic_shop::QuoteTarget::RemoveNatural {
+            key: crate::domain::cosmetic_shop::NaturalObjectKey {
+                cycle_id: cycle.clone(), stage, ordinal: 0,
+            },
+        });
+        let actual = targets.map(|target| ledger.quote_shop(&target).map(|quote| quote.price))
+            .collect::<Result<Vec<_>,_>>();
+
+        assert_eq!(actual, Ok(vec![70_000,175_000,350_000,700_000,1_400_000]));
+    }
+
+    #[test]
+    fn guest_natural_removal_debits_once_and_keeps_the_generated_object_as_a_tombstone() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let account = super::active_account_id(&ledger.connection).unwrap();
+        let cycle = ledger.planet_cycle_id().unwrap();
+        ledger.ensure_planet_object(0, 0, "tree", 50, 50, 17).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES ('seed-wallet',500000,'2026-10-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        let key = crate::domain::cosmetic_shop::NaturalObjectKey {
+            cycle_id: cycle.clone(), stage: 0, ordinal: 0,
+        };
+        let quote = ledger.quote_shop(&QuoteTarget::RemoveNatural { key: key.clone() }).unwrap();
+        let request = ShopRequest::RemoveNatural {
+            request_id: "remove-first-tree".into(), key: key.clone(), expected_version: 0, quote: quote.clone(),
+        };
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+
+        let removed = ledger.apply_guest_shop_request(&request, now).unwrap();
+        assert_eq!(removed.status, ShopActionStatus::Removed);
+        assert_eq!(removed.confirmed_quote, Some(quote.clone()));
+        assert_eq!(removed.state.available_balance, 400_000);
+        assert_eq!(removed.state.removed_natural_keys, vec![key.clone()]);
+        assert_eq!(ledger.planet_objects().unwrap().len(), 1);
+
+        // A replay preserves its confirmed outcome but returns the latest canonical state.
+        let replay = ledger.apply_guest_shop_request(&request, now).unwrap();
+        assert_eq!(replay.status, ShopActionStatus::Removed);
+        assert_eq!(replay.confirmed_quote, Some(quote.clone()));
+        assert_eq!(replay.state.available_balance, 400_000);
+        assert_eq!(replay.state.removed_natural_keys, vec![key.clone()]);
+
+        let already_removed = ledger.apply_guest_shop_request(&ShopRequest::RemoveNatural {
+            request_id: "remove-same-tree-again".into(), key, expected_version: 0, quote,
+        }, now).unwrap();
+        assert_eq!(already_removed.status, ShopActionStatus::AlreadyRemoved);
+        assert_eq!(already_removed.state.available_balance, 400_000);
+        assert_eq!(ledger.connection.query_row(
+            "SELECT count(*) FROM shop_natural_removal WHERE account_id=?1 AND cycle_id=?2",
+            rusqlite::params![account, cycle], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        assert_eq!(ledger.connection.query_row(
+            "SELECT count(*) FROM shop_natural_removal_debit WHERE account_id=?1",
+            [&account], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+    }
+
+    #[test]
+    fn guest_natural_removal_rejects_stale_versions_and_insufficient_balance_without_tombstones() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle = ledger.planet_cycle_id().unwrap();
+        ledger.ensure_planet_object(1, 2, "rock", 64, 20, 29).unwrap();
+        let key = crate::domain::cosmetic_shop::NaturalObjectKey {
+            cycle_id: cycle.clone(), stage: 1, ordinal: 2,
+        };
+        let quote = ledger.quote_shop(&QuoteTarget::RemoveNatural { key: key.clone() }).unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+
+        let stale = ledger.apply_guest_shop_request(&ShopRequest::RemoveNatural {
+            request_id: "stale-natural-version".into(), key: key.clone(), expected_version: 1, quote: quote.clone(),
+        }, now).unwrap();
+        assert_eq!(stale.status, ShopActionStatus::VersionConflict);
+        assert!(stale.state.removed_natural_keys.is_empty());
+
+        let unfunded = ledger.apply_guest_shop_request(&ShopRequest::RemoveNatural {
+            request_id: "unfunded-natural-removal".into(), key, expected_version: 0, quote,
+        }, now).unwrap();
+        assert_eq!(unfunded.status, ShopActionStatus::InsufficientBalance);
+        assert!(unfunded.state.removed_natural_keys.is_empty());
+        assert_eq!(unfunded.state.available_balance, 0);
+        assert_eq!(ledger.planet_objects().unwrap().len(), 1);
+        assert_eq!(ledger.connection.query_row(
+            "SELECT count(*) FROM shop_natural_removal",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+        assert_eq!(ledger.connection.query_row(
+            "SELECT count(*) FROM shop_natural_removal_debit",
+            [], |row| row.get::<_, i64>(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
+    fn guest_reset_settles_once_freezes_the_maximum_cooldown_and_returns_placements_to_inventory() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let account = super::active_account_id(&ledger.connection).unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        ledger.connection.execute(
+            "UPDATE setting SET value='2026-09-29T00:00:00Z'
+             WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
+            [],
+        ).unwrap();
+        let effects = crate::domain::cosmetic_shop::ActiveEffects {
+            token_earning_bps: 100,
+            reset_cooldown_bps: 2_500,
+            ..Default::default()
+        };
+        ledger.connection.execute(
+            "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+             active_instance_ids_json,effects_json) VALUES (?1,?2,1,'2026-09-29T00:00:00Z','[]',?3)",
+            rusqlite::params![account, old_cycle, serde_json::to_string(&effects).unwrap()],
+        ).unwrap();
+        ledger.insert(&crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: "reset-cycle-token-event".into(),
+            occurred_at_utc: chrono::DateTime::parse_from_rfc3339("2026-09-30T10:00:00Z")
+                .unwrap().with_timezone(&chrono::Utc),
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(100),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }).unwrap();
+
+        for (sku, effect_bps) in [("land_portal", 300), ("land_launchpad", 200)] {
+            for variation in 0..5 {
+                let instance_id = format!("reset-{sku}-{variation}");
+                ledger.connection.execute(
+                    "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,
+                     seed,variation_version,acquired_at_utc) VALUES (?1,?2,?3,?4,?5,1,'2026-10-01T00:00:00Z')",
+                    rusqlite::params![account,instance_id,sku,variation,format!("seed-{instance_id}")],
+                ).unwrap();
+                ledger.connection.execute(
+                    "INSERT INTO shop_landscape_edit_version(account_id,instance_id,version)
+                     VALUES (?1,?2,3)",
+                    rusqlite::params![account,instance_id],
+                ).unwrap();
+                ledger.connection.execute(
+                    "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+                     VALUES (?1,?2,?3,150,150,1)",
+                    rusqlite::params![account,instance_id,old_cycle],
+                ).unwrap();
+            }
+            assert!(effect_bps > 0);
+        }
+        ledger.connection.execute(
+            "INSERT INTO shop_avatar_owned(account_id,sku,purchase_id,price,acquired_at_utc)
+             VALUES (?1,'avatar_explorer_hat','avatar-purchase',100000000,'2026-10-01T00:00:00Z')",
+            [&account],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_avatar_equipment(account_id,slot,sku,version)
+             VALUES (?1,'head','avatar_explorer_hat',2)",
+            [&account],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO cosmetic_equipment(account_id,cycle_id,slot_id,sku,version)
+             VALUES (?1,?2,'forecourt','pond',3)",
+            rusqlite::params![account,old_cycle],
+        ).unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+        ledger.settle_guest_rewards(now).unwrap();
+
+        let result = ledger.apply_guest_shop_request(&ShopRequest::ResetPlanet {
+            request_id: "reset-cycle-one".into(), cycle_id: old_cycle.clone(),
+        }, now).unwrap();
+
+        assert_eq!(result.status, ShopActionStatus::Reset);
+        assert_ne!(result.state.current_cycle_id, old_cycle);
+        assert!(result.state.placements.is_empty());
+        assert_eq!(result.state.landscape_instances.len(), 10);
+        assert!(result.state.landscape_instances.iter().all(|instance| instance.placement_version == 4));
+        assert_eq!(result.state.effects.reset_cooldown_bps, 0);
+        assert_eq!(result.state.available_balance, 101);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM cosmetic_equipment WHERE account_id=?1 AND cycle_id=?2",
+            rusqlite::params![account,old_cycle],|row|row.get(0),
+        ).unwrap(),0);
+        assert_eq!(ledger.planet_usage_totals().unwrap().1, 0);
+        assert_eq!(ledger.planet_usage_totals().unwrap().2, 100);
+        assert_eq!(ledger.reset_available_at().unwrap(), Some(now + chrono::Duration::hours(18)));
+        assert_eq!(ledger.shop_state().unwrap().avatar_equipment.head.sku.as_deref(), Some("avatar_explorer_hat"));
+        assert!(ledger.shop_state().unwrap().avatar_owned_skus.contains(&"avatar_explorer_hat".into()));
+        assert_eq!(ledger.connection.query_row(
+            "SELECT count(*) FROM shop_activity_day WHERE account_id=?1",
+            [&account], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        assert_eq!(ledger.connection.query_row(
+            "SELECT count(*) FROM shop_cycle_settlement WHERE account_id=?1 AND cycle_id=?2 AND amount=1",
+            rusqlite::params![account,old_cycle], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT amount FROM planet_wallet_credit WHERE previous_cycle_id=?1",
+            [&old_cycle], |row| row.get(0),
+        ).unwrap(), 100);
+
+        // The event arrives after reset but occurred in the closed cycle.
+        ledger.insert(&crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: "late-old-cycle-activity".into(),
+            occurred_at_utc: chrono::DateTime::parse_from_rfc3339("2026-10-01T10:00:00Z")
+                .unwrap().with_timezone(&chrono::Utc),
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(10),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }).unwrap();
+        ledger.rebuild_shop_contributions().unwrap();
+        assert_eq!(ledger.connection.query_row::<String,_,_>(
+            "SELECT cycle_id FROM shop_activity_day WHERE account_id=?1 AND reward_date='2026-10-01'",
+            [&account], |row| row.get(0),
+        ).unwrap(), old_cycle);
+        ledger.settle_guest_rewards(now + chrono::Duration::minutes(1)).unwrap();
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_game_reward WHERE account_id=?1 AND kind='streak'",
+            [&account], |row| row.get(0),
+        ).unwrap(), 0);
+
+        // A current-cycle activity day may use the closed-cycle previous day for continuity.
+        let current_effects = crate::domain::cosmetic_shop::ActiveEffects {
+            streak_reward_tokens: 1_000,
+            ..Default::default()
+        };
+        let current_effect_revision: i64 = ledger.connection.query_row(
+            "SELECT coalesce(max(revision),0)+1 FROM shop_effect_history WHERE account_id=?1",
+            [&account], |row| row.get(0),
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+             active_instance_ids_json,effects_json) VALUES (?1,?2,?3,?4,'[]',?5)",
+            rusqlite::params![account,result.state.current_cycle_id,current_effect_revision,
+                now.to_rfc3339(),serde_json::to_string(&current_effects).unwrap()],
+        ).unwrap();
+        ledger.insert(&crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: "current-cycle-activity".into(),
+            occurred_at_utc: now + chrono::Duration::hours(1),
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(20),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }).unwrap();
+        ledger.settle_guest_rewards(now + chrono::Duration::hours(2)).unwrap();
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT coalesce(sum(amount),0) FROM shop_game_reward WHERE account_id=?1 AND kind='streak'",
+            [&account], |row| row.get(0),
+        ).unwrap(), 1_000);
+
+        let replay = ledger.apply_guest_shop_request(&ShopRequest::ResetPlanet {
+            request_id: "reset-cycle-one".into(), cycle_id: old_cycle.clone(),
+        }, now + chrono::Duration::minutes(1)).unwrap();
+        assert_eq!(replay.status, ShopActionStatus::Reset);
+        assert_eq!(replay.state.current_cycle_id, result.state.current_cycle_id);
+        assert_eq!(replay.state.available_balance, 1_101);
+        assert_eq!(ledger.reset_available_at().unwrap(), Some(now + chrono::Duration::hours(18)));
+        assert_eq!(ledger.connection.query_row(
+            "SELECT count(*) FROM planet_wallet_credit WHERE previous_cycle_id=?1",
+            [&old_cycle], |row| row.get::<_, i64>(0),
+        ).unwrap(), 1);
+    }
+
+    #[test]
+    fn purchase_quote_revision_does_not_restart_when_the_planet_cycle_changes() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let account = super::active_account_id(&ledger.connection).unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        let effects = crate::domain::cosmetic_shop::ActiveEffects::default();
+        ledger.connection.execute(
+            "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+             active_instance_ids_json,effects_json) VALUES (?1,?2,1,'2026-10-01T00:00:00Z','[]',?3)",
+            rusqlite::params![account,old_cycle,serde_json::to_string(&effects).unwrap()],
+        ).unwrap();
+        let stale_quote = ledger.quote_shop(&QuoteTarget::Purchase { sku: "land_market".into() }).unwrap();
+        assert_eq!(stale_quote.effect_revision,1);
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+        let reset = ledger.reset_guest_planet("reset-for-quote-revision",&old_cycle,now).unwrap();
+        assert_eq!(reset.status,ShopActionStatus::Reset);
+
+        // The first effect snapshot in a new cycle must not reuse the old cycle's revision.
+        super::record_effect_change(
+            &ledger.connection,&account,&reset.state.current_cycle_id,now + chrono::Duration::seconds(1),
+        ).unwrap();
+        let current_quote = ledger.quote_shop(&QuoteTarget::Purchase { sku: "land_market".into() }).unwrap();
+        assert!(current_quote.effect_revision > stale_quote.effect_revision);
+        let before_stale_purchase = ledger.shop_state().unwrap();
+        let stale_purchase = ledger.apply_guest_shop_request(&ShopRequest::Purchase {
+            request_id: "purchase-with-pre-reset-quote".into(), quote: stale_quote,
+        },now + chrono::Duration::seconds(2)).unwrap();
+        assert_eq!(stale_purchase.status,ShopActionStatus::QuoteChanged);
+        assert_eq!(stale_purchase.state.landscape_instances,before_stale_purchase.landscape_instances);
+        assert_eq!(stale_purchase.state.avatar_owned_skus,before_stale_purchase.avatar_owned_skus);
+        assert_eq!(stale_purchase.state.available_balance,before_stale_purchase.available_balance);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_purchase WHERE account_id=?1 AND sku='land_market'",
+            [&account],|row|row.get(0),
+        ).unwrap(),0);
+    }
+
+    #[test]
+    fn guest_reset_cooldown_failure_can_retry_with_the_same_request_id() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let first_cycle = ledger.planet_cycle_id().unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+        let first = ledger.reset_guest_planet("first-reset", &first_cycle, now).unwrap();
+        assert_eq!(first.status, ShopActionStatus::Reset);
+
+        let next_cycle = first.state.current_cycle_id.clone();
+        let retry_at = ledger.reset_available_at().unwrap().unwrap();
+        assert_eq!(retry_at, now + chrono::Duration::hours(24));
+        assert!(matches!(
+            ledger.reset_guest_planet("second-reset", &next_cycle, retry_at - chrono::Duration::seconds(1)),
+            Err(crate::storage::ledger::ScanError::ResetCooldown),
+        ));
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_action_request WHERE request_id='second-reset'",
+            [], |row| row.get(0),
+        ).unwrap(), 0);
+
+        let retried = ledger.reset_guest_planet("second-reset", &next_cycle, retry_at).unwrap();
+        assert_eq!(retried.status, ShopActionStatus::Reset);
+        assert_ne!(retried.state.current_cycle_id, next_cycle);
+    }
+
+    #[test]
+    fn guest_reset_rejects_authenticated_accounts_without_mutation() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger.ensure_planet_account("alice").unwrap();
+        let before_cycle = ledger.planet_cycle_id().unwrap();
+        let before = ledger.shop_state().unwrap();
+        let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+
+        assert!(matches!(
+            ledger.reset_guest_planet("signed-reset", &before_cycle, now),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        ));
+        assert_eq!(ledger.planet_cycle_id().unwrap(), before_cycle);
+        assert_eq!(ledger.shop_state().unwrap().available_balance, before.available_balance);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_action_request WHERE request_id='signed-reset'",
+            [], |row| row.get(0),
+        ).unwrap(), 0);
+    }
+
+    #[test]
     fn guest_shop_rejects_an_instance_owned_by_another_account() {
         let directory = tempfile::tempdir().unwrap();
         let mut ledger = Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
@@ -1981,7 +2735,7 @@ mod tests {
     }
 
     #[test]
-    fn equipment_is_cycle_scoped_and_account_scoped() {
+    fn equipment_is_account_scoped_and_signed_reset_is_rejected() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("ledger.sqlite3");
         let mut ledger = Ledger::open(&path, chrono_tz::UTC).unwrap();
@@ -2014,12 +2768,15 @@ mod tests {
         assert!(state.equipped.iter().any(|item| item.slot_id == "sky" && item.sku == "star_cluster_v2"));
         assert!(state.equipped.iter().any(|item| item.slot_id == "forecourt" && item.sku == "pond"));
 
-        ledger.reset_planet(chrono::DateTime::parse_from_rfc3339("2026-09-28T01:00:00Z").unwrap().to_utc()).unwrap();
+        assert!(matches!(
+            ledger.reset_planet(chrono::DateTime::parse_from_rfc3339("2026-09-28T01:00:00Z").unwrap().to_utc()),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        ));
         let state = ledger.cosmetic_shop_state().unwrap();
         assert_eq!(state.current_cycle_id, ledger.planet_cycle_id().unwrap());
-        assert_ne!(state.current_cycle_id, equipped_cycle);
+        assert_eq!(state.current_cycle_id, equipped_cycle);
         assert_eq!(state.owned_skus, vec!["pond", "star_cluster_v2"]);
-        assert!(state.equipped.is_empty());
+        assert_eq!(state.equipped.len(), 2);
     }
 
     #[test]

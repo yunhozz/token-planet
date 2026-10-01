@@ -205,6 +205,9 @@ impl Ledger {
         let days = activity_snapshot(&transaction,&account_id)?;
         let active_dates = days.iter().map(|day|day.reward_date.clone()).collect::<std::collections::BTreeSet<_>>();
         for day in days {
+            if day.cycle_id != current_cycle {
+                continue;
+            }
             let date = NaiveDate::parse_from_str(&day.reward_date,"%Y-%m-%d")
                 .map_err(|_|ScanError::Database)?;
             let previous_date = (date - chrono::Duration::days(1)).format("%Y-%m-%d").to_string();
@@ -878,6 +881,52 @@ mod tests {
             [],|row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
         ).unwrap();
         assert_eq!((settlements,rewards,credits),(1,1,1));
+    }
+
+    #[test]
+    fn late_closed_cycle_activity_does_not_award_streak_but_can_precede_a_current_cycle_day() {
+        let mut ledger = ledger();
+        add_effect_history(&ledger,1,"2026-09-24T00:00:00Z",ActiveEffects {
+            streak_reward_tokens: 70_000,
+            ..ActiveEffects::default()
+        });
+        add_event(&mut ledger,"old-cycle-day-one","2026-09-30T10:00:00Z",10);
+        ledger.settle_guest_rewards(DateTime::parse_from_rfc3339("2026-10-01T00:00:00Z").unwrap().with_timezone(&Utc)).unwrap();
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_game_reward WHERE kind='streak'",[],|row|row.get(0),
+        ).unwrap(),0);
+
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        ledger.reset_planet(DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z").unwrap().with_timezone(&Utc)).unwrap();
+        let new_cycle = ledger.planet_cycle_id().unwrap();
+        assert_ne!(old_cycle,new_cycle);
+
+        // A new raw event arrives after reset but its occurrence belongs to yesterday in the old cycle.
+        add_event(&mut ledger,"late-old-cycle-day-two","2026-10-01T10:00:00Z",10);
+        ledger.rebuild_shop_contributions().unwrap();
+        let late_cycle: String = ledger.connection.query_row(
+            "SELECT cycle_id FROM shop_activity_day WHERE reward_date='2026-10-01'",[],|row|row.get(0),
+        ).unwrap();
+        assert_eq!(late_cycle,old_cycle);
+        ledger.settle_guest_rewards(DateTime::parse_from_rfc3339("2026-10-02T00:01:00Z").unwrap().with_timezone(&Utc)).unwrap();
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_game_reward WHERE kind='streak'",[],|row|row.get(0),
+        ).unwrap(),0);
+
+        // The previous old-cycle day may establish continuity for an active day in the new cycle.
+        add_effect_history(&ledger,3,"2026-10-02T00:00:00Z",ActiveEffects {
+            streak_reward_tokens: 70_000,
+            ..ActiveEffects::default()
+        });
+        add_event(&mut ledger,"new-cycle-day-three","2026-10-02T10:00:00Z",10);
+        ledger.settle_guest_rewards(DateTime::parse_from_rfc3339("2026-10-03T00:00:00Z").unwrap().with_timezone(&Utc)).unwrap();
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT coalesce(sum(amount),0) FROM shop_game_reward WHERE kind='streak'",[],|row|row.get(0),
+        ).unwrap(),70_000);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_game_reward WHERE kind='streak' AND cycle_id=?1",
+            [&new_cycle],|row|row.get(0),
+        ).unwrap(),1);
     }
 
     #[test]

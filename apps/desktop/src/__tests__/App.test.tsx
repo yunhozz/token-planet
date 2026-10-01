@@ -27,7 +27,7 @@ const localSnapshot: WorldSnapshot = {
   planet: {
     version: 1, profile: { nickname: "Orbit", avatar: "masculine" }, timezone: "Asia/Seoul", current_cycle_id: "cycle-1", cycle_started_at_utc: "2026-09-26T00:00:00Z", last_reset_at_utc: null,
     wallet_balance: 0, wallet_credits: [], current_planet_tokens: 42, lifetime_tokens: 42, growth_credit: 0, stage: 0, progress_to_next: 0, incomplete: true,
-    can_reset: true, reset_available_at_utc: null, objects: [],
+    can_reset: true, reset_available_at_utc: null, objects: [], removed_natural_keys: [],
   },
 };
 

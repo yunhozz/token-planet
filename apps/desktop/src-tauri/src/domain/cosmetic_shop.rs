@@ -136,6 +136,8 @@ pub struct ShopState {
     pub products: Vec<ShopProduct>,
     pub landscape_instances: Vec<LandscapeInstance>,
     pub placements: Vec<LandscapePlacement>,
+    #[serde(default)]
+    pub removed_natural_keys: Vec<NaturalObjectKey>,
     pub avatar_owned_skus: Vec<String>,
     pub avatar_equipment: AvatarEquipment,
     pub effects: ActiveEffects,
@@ -202,6 +204,10 @@ pub enum ShopRequest {
         expected_version: u64,
         quote: ShopQuote,
     },
+    ResetPlanet {
+        request_id: String,
+        cycle_id: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -213,6 +219,7 @@ pub enum ShopActionStatus {
     Equipped,
     Unequipped,
     Removed,
+    Reset,
     LimitReached,
     AlreadyOwned,
     InsufficientBalance,

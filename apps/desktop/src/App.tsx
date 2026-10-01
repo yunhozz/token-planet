@@ -50,7 +50,7 @@ const EMPTY_SNAPSHOT: WorldSnapshot = {
     version: 1, profile: null, timezone: "", current_cycle_id: "", cycle_started_at_utc: "", last_reset_at_utc: null,
     wallet_balance: 0, wallet_credits: [], current_planet_tokens: 0, lifetime_tokens: 0,
     growth_credit: 0, stage: 0, progress_to_next: 0, incomplete: true,
-    can_reset: true, reset_available_at_utc: null, objects: [],
+    can_reset: true, reset_available_at_utc: null, objects: [], removed_natural_keys: [],
   },
 };
 

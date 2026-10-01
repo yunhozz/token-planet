@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
+use super::cosmetic_shop::NaturalObjectKey;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -51,6 +52,8 @@ pub struct PlanetState {
     pub can_reset: bool,
     pub reset_available_at_utc: Option<String>,
     pub objects: Vec<PlanetObject>,
+    #[serde(default)]
+    pub removed_natural_keys: Vec<NaturalObjectKey>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
