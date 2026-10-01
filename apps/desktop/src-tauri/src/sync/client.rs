@@ -5,10 +5,12 @@ use std::{sync::OnceLock, time::Duration};
 use crate::domain::cosmetic_shop::{
     CosmeticEquipResult, CosmeticPurchaseResult, CosmeticShopState, GuestCosmeticImport,
     GuestCosmeticImportResult, QuoteTarget, ResetShopResult, ShopActionResult, ShopActionStatus,
-    ShopQuote, ShopRequest, ShopState,
+    ShopEffectTimeline, ShopQuote, ShopRequest, ShopState,
 };
 use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
-use crate::domain::planet::{PlanetDeviceContribution, PlanetState, WorldPlanet};
+use crate::domain::planet::{
+    PlanetDeviceContribution, PlanetDeviceContributionSnapshot, PlanetState, WorldPlanet,
+};
 use crate::sync::aggregate::DailyUsageSnapshot;
 
 pub(crate) fn shared_http_client() -> Client {
@@ -72,6 +74,25 @@ fn reset_my_planet_rpc_body(request_id: uuid::Uuid, expected_cycle_id: &str) -> 
     serde_json::json!({
         "p_request_id": request_id.to_string(),
         "p_cycle_id": expected_cycle_id,
+    })
+}
+
+fn get_my_shop_effect_timeline_rpc_body() -> serde_json::Value {
+    serde_json::json!({})
+}
+
+fn upload_planet_state_with_effects_rpc_body(
+    state: &PlanetState,
+    contribution: &PlanetDeviceContributionSnapshot,
+) -> serde_json::Value {
+    let mut state = state.clone();
+    // The server owns wallet credits. Send the legacy fields required by the
+    // existing RPC with empty values so this upload makes no wallet claim.
+    state.wallet_balance = 0;
+    state.wallet_credits.clear();
+    serde_json::json!({
+        "p_state": state,
+        "p_device_contribution": contribution,
     })
 }
 
@@ -200,6 +221,18 @@ impl SupabaseSyncClient {
         .await
     }
 
+    pub async fn get_my_shop_effect_timeline(
+        &self,
+        access_token: &str,
+    ) -> Result<ShopEffectTimeline, SyncError> {
+        self.post_rpc(
+            access_token,
+            "get_my_shop_effect_timeline",
+            &get_my_shop_effect_timeline_rpc_body(),
+        )
+        .await
+    }
+
     pub async fn reset_my_planet(
         &self,
         access_token: &str,
@@ -279,6 +312,20 @@ impl SupabaseSyncClient {
             access_token,
             "upsert_my_planet_state",
             &serde_json::json!({ "p_state": state, "p_device_contribution": contribution }),
+        )
+        .await
+    }
+
+    pub async fn upload_planet_state_with_effects(
+        &self,
+        access_token: &str,
+        state: &PlanetState,
+        contribution: &PlanetDeviceContributionSnapshot,
+    ) -> Result<PlanetState, SyncError> {
+        self.post_rpc(
+            access_token,
+            "upsert_my_planet_state",
+            &upload_planet_state_with_effects_rpc_body(state, contribution),
         )
         .await
     }
@@ -542,15 +589,21 @@ fn one_row<T>(mut rows: Vec<T>) -> Result<T, SyncError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        guest_import_rpc_body, one_row, reset_my_planet_rpc_body, validate_reset_shop_result,
-        MySyncPolicy, SupabaseSyncClient, SyncError, UploadBody, WorldSummary,
+        get_my_shop_effect_timeline_rpc_body, guest_import_rpc_body, one_row,
+        reset_my_planet_rpc_body, upload_planet_state_with_effects_rpc_body,
+        validate_reset_shop_result, MySyncPolicy, SupabaseSyncClient, SyncError, UploadBody,
+        WorldSummary,
     };
     use crate::domain::cosmetic_shop::{
         ActiveEffects, AvatarEquipment, AvatarEquipmentItem, GuestCosmeticImport,
         GuestCosmeticPurchase, QuoteTarget, ResetShopResult, RewardState, ShopActionResult,
-        ShopActionStatus, ShopQuote, ShopRequest, ShopState,
+        ShopActionStatus, ShopEffectTimeline, ShopQuote, ShopRequest, ShopState,
     };
-    use crate::domain::planet::{PlanetAvatar, PlanetProfile, PlanetState, PlanetWalletCredit};
+    use crate::domain::planet::{
+        PlanetActivityDayContribution, PlanetAvatar, PlanetDeviceContribution,
+        PlanetDeviceContributionSnapshot, PlanetEffectContributionSegment, PlanetProfile,
+        PlanetState, PlanetWalletCredit,
+    };
     use crate::domain::usage::{Agent, UsageCoverage};
     use crate::sync::aggregate::DailyUsageSnapshot;
     use std::io::{Read, Write};
@@ -892,6 +945,110 @@ mod tests {
             Err(SyncError::Transport),
         );
         assert_account_request(&server.join().unwrap(), "/rest/v1/rpc/get_my_shop_state");
+    }
+
+    #[test]
+    fn personal_effect_sync_exposes_typed_timeline_and_contribution_methods() {
+        let _timeline_method = SupabaseSyncClient::get_my_shop_effect_timeline;
+        let _contribution_method = SupabaseSyncClient::upload_planet_state_with_effects;
+    }
+
+    #[test]
+    fn personal_effect_timeline_uses_empty_rpc_body_and_strict_typed_response() {
+        let response = serde_json::json!({
+            "account_id": "00000000-0000-0000-0000-000000000021",
+            "current_cycle_id": "cycle-1",
+            "effect_revision": 7,
+            "server_time_utc": "2026-10-02T00:00:00Z",
+            "reward_timezone": "UTC",
+            "cycle_bounds": [{
+                "cycle_id": "cycle-1",
+                "started_at_utc": "2026-10-01T00:00:00Z",
+                "ended_at_utc": null
+            }],
+            "intervals": [{
+                "cycle_id": "cycle-1",
+                "revision": 7,
+                "started_at_utc": "2026-10-01T00:00:00Z",
+                "ended_at_utc": null,
+                "active_instance_ids": [],
+                "effects": {
+                    "token_earning_bps": 100,
+                    "civilization_growth_bps": 0,
+                    "shop_discount_bps": 0,
+                    "reset_cooldown_bps": 0,
+                    "natural_removal_discount_bps": 0,
+                    "era_reward_tokens": 0,
+                    "streak_reward_tokens": 0
+                }
+            }]
+        });
+        let timeline: ShopEffectTimeline = serde_json::from_value(response.clone()).unwrap();
+
+        assert_eq!(serde_json::to_value(timeline).unwrap(), response);
+        assert_eq!(get_my_shop_effect_timeline_rpc_body(), serde_json::json!({}));
+        let _method = SupabaseSyncClient::get_my_shop_effect_timeline;
+    }
+
+    #[test]
+    fn effect_contribution_rpc_body_is_flat_canonical_and_has_no_wallet_claims() {
+        let mut state = empty_planet_state("cycle-1");
+        state.wallet_balance = 99_000;
+        state.wallet_credits = vec![PlanetWalletCredit {
+            previous_cycle_id: "old-cycle".into(),
+            amount: 99_000,
+            created_at_utc: "2026-10-01T00:00:00Z".into(),
+        }];
+        let contribution = PlanetDeviceContributionSnapshot {
+            raw: PlanetDeviceContribution {
+                device_id: "00000000-0000-0000-0000-000000000022".into(),
+                current_cycle_id: "cycle-1".into(),
+                lifetime_tokens: 150,
+                current_planet_tokens: 100,
+                daily_tokens: std::collections::BTreeMap::from([("2026-10-01".into(), 100)]),
+                incomplete: false,
+            },
+            canonical_version: 8,
+            daily_segments: vec![PlanetEffectContributionSegment {
+                cycle_id: "cycle-1".into(),
+                date: "2026-10-01".into(),
+                effect_revision: 7,
+                tokens: 100,
+            }],
+            activity_days: vec![PlanetActivityDayContribution {
+                reward_date: "2026-10-01".into(),
+                cycle_id: "cycle-1".into(),
+                first_occurred_at_utc: "2026-10-01T00:00:00Z".into(),
+                tokens: 100,
+            }],
+        };
+
+        let body = upload_planet_state_with_effects_rpc_body(&state, &contribution);
+
+        assert_eq!(body["p_state"]["wallet_balance"], 0);
+        assert_eq!(body["p_state"]["wallet_credits"], serde_json::json!([]));
+        assert_eq!(body["p_device_contribution"], serde_json::json!({
+            "device_id": "00000000-0000-0000-0000-000000000022",
+            "current_cycle_id": "cycle-1",
+            "lifetime_tokens": 150,
+            "current_planet_tokens": 100,
+            "daily_tokens": {"2026-10-01": 100},
+            "incomplete": false,
+            "canonical_version": 8,
+            "daily_segments": [{
+                "cycle_id": "cycle-1",
+                "date": "2026-10-01",
+                "effect_revision": 7,
+                "tokens": 100
+            }],
+            "activity_days": [{
+                "reward_date": "2026-10-01",
+                "cycle_id": "cycle-1",
+                "first_occurred_at_utc": "2026-10-01T00:00:00Z",
+                "tokens": 100
+            }]
+        }));
+        let _method = SupabaseSyncClient::upload_planet_state_with_effects;
     }
 
     #[test]
