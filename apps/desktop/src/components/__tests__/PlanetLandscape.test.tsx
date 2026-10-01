@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlanetLandscape, planetLandscapeBounds, type PlanetExplorationState } from "../PlanetLandscape";
 import { PlanetLandscapeDecorations } from "../PlanetLandscapeDecorations";
 import { fitLandscape } from "../planetLandscapeCamera";
-import type { PlanetObject } from "../../types/usage";
+import type { AvatarEquipment, LandscapeInstance, PlanetObject, ShopActionResult, ShopProduct, ShopRequest, ShopState } from "../../types/usage";
 
 class TestResizeObserver {
   static latest: TestResizeObserver | null = null;
@@ -41,15 +41,35 @@ function ControlledLandscape({
   objects = selectableObjects,
   stage = 2,
   avatar = "masculine",
+  avatarEquipment,
   equippedCosmetics = [],
+  cycleId = "cycle-1",
+  shopState,
+  shopAccountId = null,
+  terrainObjects,
+  selectedLandscapeInstanceId = null,
+  pendingShopAction = null,
+  onShopAction,
+  onSelectLandscapeInstance,
+  createShopRequestId,
 }: {
   objects?: PlanetObject[];
   stage?: number;
   avatar?: "masculine" | "feminine";
+  avatarEquipment?: AvatarEquipment;
   equippedCosmetics?: { slot_id: string; sku: string; version: number }[];
+  cycleId?: string;
+  shopState?: ShopState | null;
+  shopAccountId?: string | null;
+  terrainObjects?: PlanetObject[];
+  selectedLandscapeInstanceId?: string | null;
+  pendingShopAction?: { request: ShopRequest; status: "submitting" | "uncertain"; error: string | null } | null;
+  onShopAction?: (request: ShopRequest) => Promise<ShopActionResult | null>;
+  onSelectLandscapeInstance?: (instanceId: string | null) => void;
+  createShopRequestId?: () => string;
 }) {
   const [exploration, setExploration] = useState<PlanetExplorationState>(() => ({
-    camera: fitLandscape(planetLandscapeBounds(objects)),
+    camera: fitLandscape(planetLandscapeBounds(terrainObjects ?? objects)),
     selectedObjectId: null,
   }));
 
@@ -58,14 +78,96 @@ function ControlledLandscape({
       stage={stage}
       progress={0.35}
       avatar={avatar}
+      avatarEquipment={avatarEquipment}
       objects={objects}
       equippedCosmetics={equippedCosmetics}
       incomplete={false}
-      cycleId="cycle-1"
+      cycleId={cycleId}
       exploration={exploration}
       onExplorationChange={setExploration}
+      shopState={shopState}
+      shopAccountId={shopAccountId}
+      terrainObjects={terrainObjects}
+      selectedLandscapeInstanceId={selectedLandscapeInstanceId}
+      pendingShopAction={pendingShopAction}
+      onShopAction={onShopAction}
+      onSelectLandscapeInstance={onSelectLandscapeInstance}
+      createShopRequestId={createShopRequestId}
     />
   );
+}
+
+const landscapeProducts: ShopProduct[] = [
+  {
+    sku: "land_pond", category: "landscape", display_name: "연못", price: 5_000_000,
+    catalog_revision: 1, purchasable: true, placement_zone: "ground", avatar_slot: null, effect_type: null, effect_value: 0,
+  },
+  {
+    sku: "land_thin_ring", category: "landscape", display_name: "얇은 고리", price: 5_000_000,
+    catalog_revision: 1, purchasable: true, placement_zone: "sky", avatar_slot: null, effect_type: null, effect_value: 0,
+  },
+];
+
+function landscapeShopState(overrides: Partial<ShopState> = {}): ShopState {
+  return {
+    account_id: "local",
+    current_cycle_id: "cycle-1",
+    catalog_revision: 1,
+    state_revision: 1,
+    available_balance: 10_000_000,
+    products: landscapeProducts,
+    landscape_instances: [],
+    placements: [],
+    removed_natural_keys: [],
+    avatar_owned_skus: [],
+    avatar_equipment: {
+      head: { sku: null, version: 0 },
+      outfit: { sku: null, version: 0 },
+      face: { sku: null, version: 0 },
+      back: { sku: null, version: 0 },
+    },
+    effects: {
+      token_earning_bps: 0,
+      civilization_growth_bps: 0,
+      shop_discount_bps: 0,
+      reset_cooldown_bps: 0,
+      natural_removal_discount_bps: 0,
+      era_reward_tokens: 0,
+      streak_reward_tokens: 0,
+    },
+    reward_state: { reward_timezone: "UTC", settled_cycle_tokens: 0, era_reward_tokens: 0, streak_reward_tokens: 0 },
+    action_unavailable_reason: null,
+    guest_import_pending: false,
+    guest_import_error: null,
+    ...overrides,
+  };
+}
+
+function landscapeInstance(instance_id: string, sku = "land_pond", placement_version = 0, variation_index = 0): LandscapeInstance {
+  return { instance_id, sku, placement_version, variation_index, seed: `seed:${instance_id}`, variation_version: 1 };
+}
+
+function emptyAvatarEquipment(): AvatarEquipment {
+  return {
+    head: { sku: null, version: 0 },
+    outfit: { sku: null, version: 0 },
+    face: { sku: null, version: 0 },
+    back: { sku: null, version: 0 },
+  };
+}
+
+function screenPointForWorld(
+  svg: SVGSVGElement,
+  rect: { left: number; top: number; width: number; height: number },
+  x: number,
+  y: number,
+) {
+  const [viewX, viewY, viewWidth, viewHeight] = svg.getAttribute("viewBox")!.split(" ").map(Number);
+  const scale = Math.min(rect.width / viewWidth, rect.height / viewHeight);
+  return {
+    clientX: rect.left + (rect.width - viewWidth * scale) / 2 + (x - viewX) * scale,
+    clientY: rect.top + (rect.height - viewHeight * scale) / 2 + (y - viewY) * scale,
+  };
 }
 
 describe("planet landscape artwork", () => {
@@ -261,7 +363,7 @@ describe("planet landscape artwork", () => {
     expect(width / 360).toBeCloseTo(height / 500);
     expect(Number.isFinite(x) && Number.isFinite(y)).toBe(true);
     expect(Number(root.dataset.cameraCenterX)).toBeGreaterThanOrEqual(0);
-    expect(Number(root.dataset.cameraCenterX)).toBeLessThanOrEqual(600);
+    expect(Number(root.dataset.cameraCenterX)).toBeLessThanOrEqual(planetLandscapeBounds(selectableObjects).width);
     expect(Number(root.dataset.cameraZoom)).toBeGreaterThan(1);
   });
 
@@ -297,5 +399,533 @@ describe("planet landscape artwork", () => {
     expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
     expect(screen.getByRole("region", { name: "오브젝트 목록" }))
       .toHaveTextContent("아직 생성된 오브젝트가 없습니다.");
+  });
+});
+
+describe("canonical shop landscape integration", () => {
+  it("places the selected inventory instance at a pointer-mapped location with its canonical edit version", async () => {
+    const instance = landscapeInstance("pond-1", "land_pond", 4);
+    const state = landscapeShopState({ landscape_instances: [instance] });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "placed",
+      request_id: request.request_id,
+      confirmed_quote: null,
+      state,
+    }));
+    const { container } = render(
+      <ControlledLandscape
+        shopState={state}
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={onShopAction}
+        createShopRequestId={() => "place-request-1"}
+      />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+    const rect = { left: 37, top: 51, width: 900, height: 420 };
+    Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+    const [viewX, viewY, viewWidth, viewHeight] = svg.getAttribute("viewBox")!.split(" ").map(Number);
+    const scale = Math.min(rect.width / viewWidth, rect.height / viewHeight);
+    const letterboxX = (rect.width - viewWidth * scale) / 2;
+    const letterboxY = (rect.height - viewHeight * scale) / 2;
+    const screenPoint = (x: number, y: number) => ({
+      clientX: rect.left + letterboxX + (x - viewX) * scale,
+      clientY: rect.top + letterboxY + (y - viewY) * scale,
+    });
+    const from = screenPoint(760, 160);
+    const drop = screenPoint(832, 232);
+
+    await act(async () => {
+      fireEvent.pointerDown(viewport, { pointerId: 8, button: 0, ...from });
+      fireEvent.pointerMove(viewport, { pointerId: 8, ...drop });
+      fireEvent.pointerUp(viewport, { pointerId: 8, ...drop });
+      await Promise.resolve();
+    });
+
+    expect(onShopAction).toHaveBeenCalledTimes(1);
+    expect(onShopAction).toHaveBeenCalledWith({
+      kind: "place",
+      request_id: "place-request-1",
+      cycle_id: "cycle-1",
+      instance_id: "pond-1",
+      expected_version: 4,
+      x: 800,
+      y: 200,
+    });
+  });
+
+  it("uses the pointer-up coordinate when the browser omits a final pointer-move", async () => {
+    const instance = landscapeInstance("pond-pointerup");
+    const state = landscapeShopState({ landscape_instances: [instance] });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "placed", request_id: request.request_id, confirmed_quote: null, state,
+    }));
+    const { container } = render(
+      <ControlledLandscape
+        shopState={state}
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={onShopAction}
+        createShopRequestId={() => "pointerup-request-1"}
+      />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+    const rect = { left: 0, top: 0, width: 900, height: 420 };
+    Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+
+    await act(async () => {
+      fireEvent.pointerDown(viewport, { pointerId: 9, button: 0, ...screenPointForWorld(svg, rect, 760, 160) });
+      fireEvent.pointerUp(viewport, { pointerId: 9, ...screenPointForWorld(svg, rect, 832, 232) });
+      await Promise.resolve();
+    });
+    expect(onShopAction).toHaveBeenCalledWith(expect.objectContaining({ kind: "place", x: 800, y: 200 }));
+  });
+
+  it("renders current-cycle purchased placements in stable y and instance-id order", () => {
+    const placements = [
+      { instance_id: "z-low", cycle_id: "cycle-1", x: 380, y: 240, version: 2 },
+      { instance_id: "b-high", cycle_id: "cycle-1", x: 220, y: 120, version: 1 },
+      { instance_id: "a-low", cycle_id: "cycle-1", x: 160, y: 240, version: 3 },
+      { instance_id: "old-cycle", cycle_id: "cycle-0", x: 100, y: 100, version: 1 },
+    ];
+    const state = landscapeShopState({
+      landscape_instances: [
+        landscapeInstance("z-low"),
+        landscapeInstance("b-high"),
+        landscapeInstance("a-low"),
+        landscapeInstance("old-cycle"),
+      ],
+      placements,
+    });
+    const { container } = render(<ControlledLandscape shopState={state} />);
+
+    expect([...container.querySelectorAll("[data-shop-instance-id]")].map((node) => node.getAttribute("data-shop-instance-id")))
+      .toEqual(["b-high", "a-low", "z-low"]);
+    expect(container.querySelector('[data-shop-instance-id="b-high"]')).toHaveAttribute("transform", "translate(220 120)");
+    expect(container.querySelector('[data-shop-instance-id="a-low"] [data-landscape-sku="land_pond"]')).toBeInTheDocument();
+    expect(container.querySelector('[data-shop-instance-id="old-cycle"]')).not.toBeInTheDocument();
+  });
+
+  it("moves an existing purchased placement with its pointer offset and captured edit version", async () => {
+    const instance = landscapeInstance("pond-move", "land_pond", 3);
+    const state = landscapeShopState({
+      landscape_instances: [instance],
+      placements: [{ instance_id: instance.instance_id, cycle_id: "cycle-1", x: 800, y: 200, version: 3 }],
+    });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "placed", request_id: request.request_id, confirmed_quote: null, state,
+    }));
+    const { container } = render(
+      <ControlledLandscape shopState={state} onShopAction={onShopAction} createShopRequestId={() => "move-request-1"} />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+    const rect = { left: 40, top: 60, width: 900, height: 420 };
+    Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+    const object = container.querySelector<SVGGElement>('[data-shop-instance-id="pond-move"]')!;
+
+    await act(async () => {
+      fireEvent.pointerDown(object, { pointerId: 10, button: 0, ...screenPointForWorld(svg, rect, 820, 220) });
+      fireEvent.pointerMove(viewport, { pointerId: 10, ...screenPointForWorld(svg, rect, 920, 320) });
+      fireEvent.pointerUp(viewport, { pointerId: 10, ...screenPointForWorld(svg, rect, 920, 320) });
+      await Promise.resolve();
+    });
+
+    expect(onShopAction).toHaveBeenCalledWith({
+      kind: "place", request_id: "move-request-1", cycle_id: "cycle-1", instance_id: "pond-move",
+      expected_version: 3, x: 900, y: 300,
+    });
+  });
+
+  it("rejects a pointer drag if canonical placement version changes before drop", () => {
+    const original = landscapeInstance("pond-race", "land_pond", 3);
+    const updated = landscapeInstance("pond-race", "land_pond", 4);
+    const state3 = landscapeShopState({
+      landscape_instances: [original],
+      placements: [{ instance_id: original.instance_id, cycle_id: "cycle-1", x: 800, y: 200, version: 3 }],
+    });
+    const state4 = landscapeShopState({
+      landscape_instances: [updated],
+      placements: [{ instance_id: updated.instance_id, cycle_id: "cycle-1", x: 500, y: 200, version: 4 }],
+    });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "placed", request_id: request.request_id, confirmed_quote: null, state: state4,
+    }));
+    const { container, rerender } = render(
+      <ControlledLandscape shopState={state3} onShopAction={onShopAction} createShopRequestId={() => "stale-pointer-request"} />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+    const rect = { left: 0, top: 0, width: 900, height: 420 };
+    Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+    const object = container.querySelector<SVGGElement>('[data-shop-instance-id="pond-race"]')!;
+
+    fireEvent.pointerDown(object, { pointerId: 41, button: 0, ...screenPointForWorld(svg, rect, 820, 220) });
+    rerender(<ControlledLandscape shopState={state4} onShopAction={onShopAction} createShopRequestId={() => "stale-pointer-request"} />);
+    fireEvent.pointerMove(viewport, { pointerId: 41, ...screenPointForWorld(svg, rect, 920, 320) });
+    fireEvent.pointerUp(viewport, { pointerId: 41, ...screenPointForWorld(svg, rect, 920, 320) });
+
+    expect(onShopAction).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+    expect(container.querySelector('[data-shop-instance-id="pond-race"]')).toHaveAttribute("transform", "translate(500 200)");
+  });
+
+  it("cancels a keyboard draft when canonical placement version changes", () => {
+    const original = landscapeInstance("pond-key-race", "land_pond", 3);
+    const updated = landscapeInstance("pond-key-race", "land_pond", 4);
+    const state3 = landscapeShopState({ landscape_instances: [original] });
+    const state4 = landscapeShopState({ landscape_instances: [updated] });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "placed", request_id: request.request_id, confirmed_quote: null, state: state4,
+    }));
+    const { container, rerender } = render(
+      <ControlledLandscape
+        shopState={state3}
+        selectedLandscapeInstanceId={original.instance_id}
+        onShopAction={onShopAction}
+        createShopRequestId={() => "stale-keyboard-request"}
+      />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    viewport.focus();
+    fireEvent.keyDown(viewport, { key: " " });
+    rerender(
+      <ControlledLandscape
+        shopState={state4}
+        selectedLandscapeInstanceId={updated.instance_id}
+        onShopAction={onShopAction}
+        createShopRequestId={() => "stale-keyboard-request"}
+      />,
+    );
+    expect(onShopAction).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+  });
+
+  it("starts keyboard relocation at a placed instance and confirms only after explicit movement", async () => {
+    const instance = landscapeInstance("pond-key-move", "land_pond", 5);
+    const state = landscapeShopState({
+      landscape_instances: [instance],
+      placements: [{ instance_id: instance.instance_id, cycle_id: "cycle-1", x: 800, y: 200, version: 5 }],
+    });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "placed", request_id: request.request_id, confirmed_quote: null, state,
+    }));
+    const onSelectLandscapeInstance = vi.fn();
+    const { container, rerender } = render(
+      <ControlledLandscape shopState={state} onShopAction={onShopAction} onSelectLandscapeInstance={onSelectLandscapeInstance} />,
+    );
+    const object = container.querySelector<SVGGElement>('[data-shop-instance-id="pond-key-move"]')!;
+    fireEvent.click(object);
+    expect(onSelectLandscapeInstance).toHaveBeenCalledWith(instance.instance_id);
+    rerender(
+      <ControlledLandscape
+        shopState={state}
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={onShopAction}
+        onSelectLandscapeInstance={onSelectLandscapeInstance}
+        createShopRequestId={() => "keyboard-move-request"}
+      />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    viewport.focus();
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-x", "800");
+    expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-y", "200");
+    fireEvent.keyDown(viewport, { key: "ArrowRight" });
+    expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-x", "808");
+    fireEvent.keyDown(viewport, { key: "Escape" });
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+    expect(container.querySelector('[data-shop-instance-id="pond-key-move"]')).toHaveAttribute("transform", "translate(800 200)");
+    expect(onShopAction).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    fireEvent.keyDown(viewport, { key: "ArrowRight" });
+    await act(async () => {
+      fireEvent.keyDown(viewport, { key: "Enter" });
+      await Promise.resolve();
+    });
+    expect(onShopAction).toHaveBeenCalledWith({
+      kind: "place", request_id: "keyboard-move-request", cycle_id: "cycle-1", instance_id: instance.instance_id,
+      expected_version: 5, x: 808, y: 200,
+    });
+    expect(container.querySelector('[data-shop-instance-id="pond-key-move"]')).toHaveAttribute("transform", "translate(800 200)");
+  });
+
+  it("renders canonical avatar equipment layers in the live landscape avatar", () => {
+    const avatarEquipment = {
+      ...emptyAvatarEquipment(),
+      head: { sku: "avatar_space_helmet", version: 3 },
+      outfit: { sku: "avatar_spacesuit", version: 2 },
+      face: { sku: "avatar_goggles", version: 4 },
+      back: { sku: "avatar_wings", version: 1 },
+    } satisfies AvatarEquipment;
+    const state = landscapeShopState({
+      avatar_owned_skus: ["avatar_space_helmet", "avatar_spacesuit", "avatar_goggles", "avatar_wings"],
+      avatar_equipment: avatarEquipment,
+    });
+    const { container, rerender } = render(
+      <ControlledLandscape shopState={state} avatarEquipment={state.avatar_equipment} />,
+    );
+    const avatar = container.querySelector(".planet-landscape-avatar-sprite")!;
+    expect(avatar.querySelector("[data-avatar-equipment-layers='true']")).toHaveAttribute("data-avatar-style", "masculine");
+    expect([...avatar.querySelectorAll("[data-avatar-layer]")].map((layer) => layer.getAttribute("data-avatar-layer")))
+      .toEqual(["back", "base", "outfit", "face", "head"]);
+    for (const sku of state.avatar_owned_skus) {
+      expect(avatar.querySelector(`[data-avatar-equipment='${sku}']`)).toBeInTheDocument();
+    }
+
+    rerender(<ControlledLandscape avatar="feminine" shopState={state} avatarEquipment={state.avatar_equipment} />);
+    expect(container.querySelector(".planet-landscape-avatar-sprite [data-avatar-equipment-layers='true']"))
+      .toHaveAttribute("data-avatar-style", "feminine");
+  });
+
+  it("selects a placed object on click without submitting a no-op placement", () => {
+    const instance = landscapeInstance("pond-click", "land_pond", 2);
+    const state = landscapeShopState({
+      landscape_instances: [instance],
+      placements: [{ instance_id: instance.instance_id, cycle_id: "cycle-1", x: 800, y: 200, version: 2 }],
+    });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "placed", request_id: request.request_id, confirmed_quote: null, state,
+    }));
+    const onSelectLandscapeInstance = vi.fn();
+    const { container } = render(
+      <ControlledLandscape
+        shopState={state}
+        onShopAction={onShopAction}
+        onSelectLandscapeInstance={onSelectLandscapeInstance}
+      />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+    const rect = { left: 0, top: 0, width: 900, height: 420 };
+    Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+    const object = container.querySelector<SVGGElement>('[data-shop-instance-id="pond-click"]')!;
+    const point = screenPointForWorld(svg, rect, 820, 220);
+
+    fireEvent.pointerDown(object, { pointerId: 30, button: 0, ...point });
+    fireEvent.pointerUp(viewport, { pointerId: 30, ...point });
+    fireEvent.click(object);
+
+    expect(onSelectLandscapeInstance).toHaveBeenCalledWith("pond-click");
+    expect(onShopAction).not.toHaveBeenCalled();
+  });
+
+  it("clears invalid and canceled placement previews without changing canonical placements", () => {
+    const instance = landscapeInstance("pond-draft");
+    const state = landscapeShopState({ landscape_instances: [instance] });
+    const onShopAction = vi.fn(async (): Promise<ShopActionResult> => { throw new Error("should not submit"); });
+    const { container } = render(
+      <ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+    const rect = { left: 0, top: 0, width: 900, height: 420 };
+    Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+
+    fireEvent.pointerDown(viewport, { pointerId: 11, button: 0, ...screenPointForWorld(svg, rect, 760, 160) });
+    fireEvent.pointerMove(viewport, { pointerId: 11, ...screenPointForWorld(svg, rect, 100, 165) });
+    expect(container.querySelector("[data-shop-preview-valid='false']")).toBeInTheDocument();
+    fireEvent.pointerUp(viewport, { pointerId: 11, ...screenPointForWorld(svg, rect, 100, 165) });
+    expect(onShopAction).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+    expect(container.querySelectorAll("[data-shop-instance-id]")).toHaveLength(0);
+
+    fireEvent.pointerDown(viewport, { pointerId: 12, button: 0, ...screenPointForWorld(svg, rect, 760, 160) });
+    fireEvent.pointerMove(viewport, { pointerId: 12, ...screenPointForWorld(svg, rect, 832, 232) });
+    expect(container.querySelector("[data-shop-preview-valid='true']")).toBeInTheDocument();
+    fireEvent.pointerCancel(viewport, { pointerId: 12 });
+    expect(onShopAction).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+  });
+
+  it("uses keyboard placement with arrow movement, Enter submit, and Escape cancel", async () => {
+    const instance = landscapeInstance("pond-keyboard");
+    const state = landscapeShopState({ landscape_instances: [instance] });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "placed", request_id: request.request_id, confirmed_quote: null, state,
+    }));
+    const { container } = render(
+      <ControlledLandscape
+        shopState={state}
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={onShopAction}
+        createShopRequestId={() => "keyboard-request-1"}
+      />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    viewport.focus();
+    fireEvent.keyDown(viewport, { key: " " });
+    expect(container.querySelector("[data-shop-preview-valid='true']")).toBeInTheDocument();
+    fireEvent.keyDown(viewport, { key: "ArrowRight" });
+    const movedX = Number(container.querySelector<HTMLElement>("[data-shop-preview-instance-id]")?.dataset.shopPreviewX);
+    expect(movedX).toBe(8);
+    fireEvent.keyDown(viewport, { key: "Escape" });
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+    expect(onShopAction).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(viewport, { key: "Enter" });
+    await act(async () => {
+      fireEvent.keyDown(viewport, { key: "Enter" });
+      await Promise.resolve();
+    });
+    expect(onShopAction).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "place", request_id: "keyboard-request-1", instance_id: "pond-keyboard", expected_version: 0,
+    }));
+  });
+
+  it("sends retrieval with the current cycle and canonical instance version", async () => {
+    const instance = landscapeInstance("pond-retrieve", "land_pond", 7);
+    const state = landscapeShopState({
+      landscape_instances: [instance],
+      placements: [{ instance_id: instance.instance_id, cycle_id: "cycle-1", x: 240, y: 200, version: 7 }],
+    });
+    const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({
+      status: "retrieved", request_id: request.request_id, confirmed_quote: null, state,
+    }));
+    const onSelectLandscapeInstance = vi.fn();
+    const { container, rerender } = render(
+      <ControlledLandscape shopState={state} onShopAction={onShopAction} onSelectLandscapeInstance={onSelectLandscapeInstance} />,
+    );
+    fireEvent.click(container.querySelector('[data-shop-instance-id="pond-retrieve"]')!);
+    expect(onSelectLandscapeInstance).toHaveBeenCalledWith("pond-retrieve");
+    rerender(
+      <ControlledLandscape
+        shopState={state}
+        selectedLandscapeInstanceId="pond-retrieve"
+        onShopAction={onShopAction}
+        onSelectLandscapeInstance={onSelectLandscapeInstance}
+        createShopRequestId={() => "retrieve-request-1"}
+      />,
+    );
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "보관" }));
+      await Promise.resolve();
+    });
+    expect(onShopAction).toHaveBeenCalledWith({
+      kind: "retrieve", request_id: "retrieve-request-1", cycle_id: "cycle-1", instance_id: "pond-retrieve", expected_version: 7,
+    });
+  });
+
+  it("keeps natural layout positions when a removed natural object remains in the tombstone terrain basis", () => {
+    const { container: before } = render(<ControlledLandscape objects={selectableObjects} terrainObjects={selectableObjects} />);
+    const originalTransform = before.querySelector('[data-landscape-object-id="1-3"] .planet-object-sprite')?.getAttribute("transform");
+    before.remove();
+
+    const { container: after } = render(
+      <ControlledLandscape
+        objects={[selectableObjects[1]]}
+        terrainObjects={selectableObjects}
+        shopState={landscapeShopState({ removed_natural_keys: [{ cycle_id: "cycle-1", stage: 0, ordinal: 0 }] })}
+      />,
+    );
+    expect(after.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
+    expect(after.querySelector('[data-landscape-object-id="1-3"] .planet-object-sprite')).toHaveAttribute("transform", originalTransform);
+  });
+
+  it("does not turn natural scene objects into shop placement drags", () => {
+    const instance = landscapeInstance("pond-available");
+    const state = landscapeShopState({ landscape_instances: [instance] });
+    const onShopAction = vi.fn(async (): Promise<ShopActionResult> => { throw new Error("should not submit"); });
+    const { container } = render(
+      <ControlledLandscape
+        objects={[selectableObjects[0]]}
+        shopState={state}
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={onShopAction}
+      />,
+    );
+    const natural = container.querySelector<SVGGElement>('[data-landscape-hit-id="0-0"]')!;
+    fireEvent.pointerDown(natural, { pointerId: 13, button: 0, clientX: 10, clientY: 10 });
+    fireEvent.pointerMove(container.querySelector(".planet-landscape-viewport")!, { pointerId: 13, clientX: 200, clientY: 200 });
+    fireEvent.pointerUp(container.querySelector(".planet-landscape-viewport")!, { pointerId: 13, clientX: 200, clientY: 200 });
+    expect(onShopAction).not.toHaveBeenCalled();
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+  });
+
+  it("blocks duplicate requests and ignores an in-flight result after the cycle changes", async () => {
+    const instance = landscapeInstance("pond-context");
+    const state1 = landscapeShopState({ landscape_instances: [instance] });
+    const state2 = landscapeShopState({ current_cycle_id: "cycle-2", landscape_instances: [instance] });
+    let resolveAction!: (result: ShopActionResult) => void;
+    const pendingResult = new Promise<ShopActionResult>((resolve) => { resolveAction = resolve; });
+    const onShopAction = vi.fn(() => pendingResult);
+    const { container, rerender } = render(
+      <ControlledLandscape shopState={state1} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+    const rect = { left: 0, top: 0, width: 900, height: 420 };
+    Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+    const from = screenPointForWorld(svg, rect, 760, 160);
+    const drop = screenPointForWorld(svg, rect, 832, 232);
+
+    await act(async () => {
+      fireEvent.pointerDown(viewport, { pointerId: 20, button: 0, ...from });
+      fireEvent.pointerMove(viewport, { pointerId: 20, ...drop });
+      fireEvent.pointerUp(viewport, { pointerId: 20, ...drop });
+      await Promise.resolve();
+    });
+    expect(onShopAction).toHaveBeenCalledTimes(1);
+
+    fireEvent.pointerDown(viewport, { pointerId: 21, button: 0, ...from });
+    fireEvent.pointerMove(viewport, { pointerId: 21, ...drop });
+    fireEvent.pointerUp(viewport, { pointerId: 21, ...drop });
+    expect(onShopAction).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <ControlledLandscape
+        cycleId="cycle-2"
+        shopState={state2}
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={onShopAction}
+      />,
+    );
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+    await act(async () => {
+      resolveAction({ status: "placed", request_id: "old-response", confirmed_quote: null, state: state1 });
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-shop-instance-id="pond-context"]')).not.toBeInTheDocument();
+    expect(container.querySelector(".planet-landscape-shop-status")).not.toBeInTheDocument();
+  });
+
+  it("clears a preview when canonical shop state belongs to another account", () => {
+    const instance = landscapeInstance("pond-account");
+    const ownState = landscapeShopState({ account_id: "account-a", landscape_instances: [instance] });
+    const foreignState = landscapeShopState({ account_id: "account-b", landscape_instances: [instance] });
+    const { container, rerender } = render(
+      <ControlledLandscape
+        shopState={ownState}
+        shopAccountId="account-a"
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={vi.fn(async (): Promise<ShopActionResult> => { throw new Error("not used"); })}
+      />,
+    );
+    const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+    const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+    const rect = { left: 0, top: 0, width: 900, height: 420 };
+    Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+    fireEvent.pointerDown(viewport, { pointerId: 22, button: 0, ...screenPointForWorld(svg, rect, 832, 232) });
+    expect(container.querySelector("[data-shop-preview-instance-id]")).toBeInTheDocument();
+
+    rerender(
+      <ControlledLandscape
+        shopState={foreignState}
+        shopAccountId="account-a"
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={vi.fn(async (): Promise<ShopActionResult> => { throw new Error("not used"); })}
+      />,
+    );
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+    rerender(
+      <ControlledLandscape
+        shopState={ownState}
+        shopAccountId="account-a"
+        selectedLandscapeInstanceId={instance.instance_id}
+        onShopAction={vi.fn(async (): Promise<ShopActionResult> => { throw new Error("not used"); })}
+      />,
+    );
+    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
   });
 });
