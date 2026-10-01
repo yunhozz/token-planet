@@ -377,6 +377,9 @@ impl AppState {
         ledger
             .prepare_growth_journal()
             .map_err(|_| "growth journal unavailable")?;
+        ledger
+            .settle_guest_rewards(chrono::Utc::now())
+            .map_err(|_| "shop rewards unavailable")?;
         let snapshot = world_snapshot(&ledger, summary).map_err(|_| "world growth unavailable")?;
         *self.latest.lock().map_err(|_| "usage status unavailable")? = Some(snapshot.clone());
         Ok(snapshot)
@@ -400,6 +403,9 @@ impl AppState {
         ledger
             .prepare_growth_journal()
             .map_err(|_| "growth journal unavailable")?;
+        ledger
+            .settle_guest_rewards(chrono::Utc::now())
+            .map_err(|_| "shop rewards unavailable")?;
         let snapshot = world_snapshot(&ledger, usage).map_err(|_| "world growth unavailable")?;
         *self.latest.lock().map_err(|_| "usage status unavailable")? = Some(snapshot.clone());
         Ok(snapshot)

@@ -20,6 +20,7 @@ pub enum ScanError {
     TimezoneMismatch,
     ResetCooldown,
     InvalidProfile,
+    InvalidShopState,
 }
 
 impl fmt::Display for ScanError {
@@ -35,6 +36,7 @@ impl fmt::Display for ScanError {
                 Self::TimezoneMismatch => "world timezone differs from saved ledger",
                 Self::ResetCooldown => "planet reset is available 24 hours after the last reset",
                 Self::InvalidProfile => "planet profile is invalid",
+                Self::InvalidShopState => "shop state is invalid",
             }
         )
     }
@@ -281,6 +283,7 @@ impl Ledger {
         ledger.initialize_planet_accounts()?;
         ledger.initialize_growth_journal()?;
         ledger.initialize_cosmetic_shop()?;
+        ledger.initialize_shop_effect_storage()?;
         Ok(ledger)
     }
 

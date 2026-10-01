@@ -64,6 +64,11 @@ impl Ledger {
             return Ok(false);
         }
         if current == "local" {
+            let reward_timezone: String = self.connection.query_row(
+                "SELECT value FROM setting WHERE key='planet_timezone'",
+                [],
+                |row| row.get(0),
+            )?;
             let guest_wallet_credits = self.planet_wallet_credits()?;
             let guest_purchases = {
                 let mut statement = self.connection.prepare(
@@ -118,6 +123,11 @@ impl Ledger {
             tx.execute(
                 "UPDATE setting SET value=?1 WHERE key='planet_account_id'",
                 [&account_id],
+            )?;
+            tx.execute(
+                "INSERT OR IGNORE INTO shop_account_state(account_id,state_revision,reward_timezone)
+                 VALUES (?1,0,?2)",
+                params![account_id, reward_timezone],
             )?;
             for table in [
                 "growth_journal_state",
@@ -199,6 +209,11 @@ impl Ledger {
             .settings
             .get("planet_current_cycle_id")
             .ok_or(ScanError::Database)?;
+        let reward_timezone = next
+            .settings
+            .get("planet_timezone")
+            .cloned()
+            .unwrap_or_else(|| self.timezone.to_string());
         for object in &next.objects {
             tx.execute(
                 "INSERT INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed) VALUES (?1,?2,?3,?4,?5,?6,?7)",
@@ -214,6 +229,11 @@ impl Ledger {
         tx.execute(
             "UPDATE setting SET value=?1 WHERE key='planet_account_id'",
             [&account_id],
+        )?;
+        tx.execute(
+            "INSERT OR IGNORE INTO shop_account_state(account_id,state_revision,reward_timezone)
+             VALUES (?1,0,?2)",
+            params![account_id, reward_timezone],
         )?;
         tx.commit()?;
         Ok(true)

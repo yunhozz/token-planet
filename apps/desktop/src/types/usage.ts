@@ -104,6 +104,116 @@ export type CosmeticShopState = {
   guest_import_pending: boolean;
   guest_import_error: string | null;
 };
+
+export type ShopCategory = "landscape" | "avatar";
+export type PlacementZone = "ground" | "sky";
+export type AvatarSlot = "head" | "outfit" | "face" | "back";
+export type ShopEffectType =
+  | "token_earning"
+  | "civilization_growth"
+  | "shop_discount"
+  | "reset_cooldown"
+  | "natural_removal_discount"
+  | "era_reward"
+  | "streak_reward";
+export type ShopProduct = {
+  sku: string;
+  category: ShopCategory;
+  display_name: string;
+  price: number;
+  catalog_revision: number;
+  purchasable: boolean;
+  placement_zone: PlacementZone | null;
+  avatar_slot: AvatarSlot | null;
+  effect_type: ShopEffectType | null;
+  /** Percent effects use basis points; era and streak rewards use tokens. */
+  effect_value: number;
+};
+export type LandscapeInstance = {
+  instance_id: string;
+  sku: string;
+  variation_index: number;
+  seed: string;
+  variation_version: number;
+  placement_version: number;
+};
+export type LandscapePlacement = {
+  instance_id: string;
+  cycle_id: string;
+  x: number;
+  y: number;
+  version: number;
+};
+export type AvatarEquipmentItem = { sku: string | null; version: number };
+export type AvatarEquipment = Record<AvatarSlot, AvatarEquipmentItem>;
+export type ActiveEffects = {
+  token_earning_bps: number;
+  civilization_growth_bps: number;
+  shop_discount_bps: number;
+  reset_cooldown_bps: number;
+  natural_removal_discount_bps: number;
+  era_reward_tokens: number;
+  streak_reward_tokens: number;
+};
+export type EffectContribution = {
+  device_id: string;
+  cycle_id: string;
+  date: string;
+  effect_revision: number;
+  tokens: number;
+  growth_bps: number;
+  wallet_bps: number;
+};
+export type RewardState = {
+  reward_timezone: string;
+  settled_cycle_tokens: number;
+  era_reward_tokens: number;
+  streak_reward_tokens: number;
+};
+export type ShopState = {
+  account_id: string;
+  current_cycle_id: string;
+  catalog_revision: number;
+  state_revision: number;
+  available_balance: number;
+  products: ShopProduct[];
+  landscape_instances: LandscapeInstance[];
+  placements: LandscapePlacement[];
+  avatar_owned_skus: string[];
+  avatar_equipment: AvatarEquipment;
+  effects: ActiveEffects;
+  reward_state: RewardState;
+  action_unavailable_reason: string | null;
+  guest_import_pending: boolean;
+  guest_import_error: string | null;
+};
+export type NaturalObjectKey = { cycle_id: string; stage: number; ordinal: number };
+export type ShopQuoteTarget =
+  | { kind: "purchase"; sku: string }
+  | { kind: "remove_natural"; key: NaturalObjectKey };
+export type ShopQuote = {
+  target: ShopQuoteTarget;
+  catalog_revision: number;
+  effect_revision: number;
+  price: number;
+};
+export type ShopRequest =
+  | { kind: "purchase"; request_id: string; quote: ShopQuote }
+  | { kind: "place"; request_id: string; cycle_id: string; instance_id: string; expected_version: number; x: number; y: number }
+  | { kind: "retrieve"; request_id: string; cycle_id: string; instance_id: string; expected_version: number }
+  | { kind: "equip_avatar"; request_id: string; slot: AvatarSlot; sku: string | null; expected_version: number }
+  | { kind: "remove_natural"; request_id: string; key: NaturalObjectKey; expected_version: number; quote: ShopQuote };
+export type ShopActionStatus =
+  | "purchased" | "placed" | "retrieved" | "equipped" | "unequipped" | "removed"
+  | "limit_reached" | "already_owned" | "insufficient_balance" | "quote_changed"
+  | "catalog_mismatch" | "version_conflict" | "cycle_mismatch" | "not_owned"
+  | "already_removed" | "request_conflict" | "invalid_placement" | "unavailable";
+export type ShopActionResult = {
+  status: ShopActionStatus;
+  request_id: string;
+  confirmed_quote: ShopQuote | null;
+  state: ShopState;
+};
 export type CosmeticPurchaseAction = {
   result: CosmeticPurchaseResult | null;
   state: CosmeticShopState;
