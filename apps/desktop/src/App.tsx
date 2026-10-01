@@ -669,10 +669,10 @@ function App() {
   const activeNaturalRemovalError = activeNaturalRemovalPending?.status === "uncertain"
     ? `${activeNaturalRemovalPending.error ?? "요청 결과를 확인하지 못했습니다."} 제거 확인을 누르면 같은 요청 ID로 다시 확인합니다.`
     : naturalRemovalError;
-  const canRequestNaturalRemoval = shopAccount?.is_guest === true
-    && shopAccount.account_id === "local"
-    && currentShopState?.account_id === "local"
+  const canRequestNaturalRemoval = Boolean(shopAccount && currentShopState
+    && currentShopState.account_id === shopAccount.account_id
     && currentShopState.current_cycle_id === planet.current_cycle_id
+    && shopActions.canAct
     && shopActionsAvailable
     && (!shopActions.pending || (
       shopActions.pending.status === "uncertain"
@@ -680,7 +680,7 @@ function App() {
     ))
     && featureScreen === "planet"
     && detail
-    && detailTab === "planet";
+    && detailTab === "planet");
   const canRequestNaturalRemovalForKey = (key: NaturalObjectKey) => {
     const pending = shopActions.pending;
     return !pending || (pending.status === "uncertain"

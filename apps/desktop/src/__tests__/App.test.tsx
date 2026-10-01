@@ -1531,6 +1531,62 @@ function setupGuestNaturalRemoval(options: {
   };
 }
 
+function setupSignedNaturalRemoval(options: {
+  quote?: (target: ShopQuote["target"]) => Promise<ShopQuote>;
+  apply?: (request: ShopRequest, state: ShopState) => Promise<ShopActionResult>;
+  initialState?: ShopState;
+} = {}) {
+  let activeShared: SharingState = { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
+  let activeSnapshot = structuredClone(localSnapshot);
+  activeSnapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+  ];
+  let state: ShopState = options.initialState ?? { ...canonicalShopState(100_000), state_revision: 1 };
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(activeShared);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(activeSnapshot);
+    if (command === "get_shop_state") return structuredClone(state);
+    if (command === "quote_shop_action") {
+      const target = args?.target ?? { kind: "remove_natural", key: naturalRemovalKey };
+      return options.quote
+        ? options.quote(target)
+        : { target, catalog_revision: 1, effect_revision: 0, price: 100_000 } satisfies ShopQuote;
+    }
+    if (command === "apply_shop_action") {
+      const request = args?.request;
+      if (!request) throw new Error("missing removal request");
+      applied.push(request);
+      const result = options.apply
+        ? await options.apply(request, structuredClone(state))
+        : naturalRemovalResult(request, state);
+      state = structuredClone(result.state);
+      return result;
+    }
+    if (command === "list_world_members") return [];
+    return null;
+  });
+  return {
+    applied,
+    get state() { return state; },
+    get snapshot() { return activeSnapshot; },
+    setBalance(balance: number) { state = { ...state, available_balance: balance, state_revision: state.state_revision + 1 }; },
+    setCanonicalState(next: ShopState) { state = structuredClone(next); },
+    setSnapshot(next: WorldSnapshot) { activeSnapshot = structuredClone(next); },
+    setShared(next: SharingState) { activeShared = structuredClone(next); },
+  };
+}
+
+async function openNaturalRemoval(container: HTMLElement) {
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
+  fireEvent.click(within(selected).getByRole("button", { name: "자연물 제거" }));
+  return screen.findByRole("dialog", { name: "바위 제거 확인" });
+}
+
 async function openGuestNaturalRemoval(container: HTMLElement) {
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
@@ -1923,13 +1979,27 @@ it("does not surface an old guest removal error after switching accounts", async
   expect(screen.queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
 });
 
-it("disables natural removal for authenticated accounts", async () => {
+it("quotes and removes an authenticated user's natural object using canonical shop state", async () => {
   const snapshot = structuredClone(localSnapshot);
   snapshot.planet.objects = [{ stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 }];
-  invokeMock.mockImplementation(async (command: string) => {
+  const key = { cycle_id: "cycle-1", stage: 0, ordinal: 0 } as const;
+  let state: ShopState = { ...canonicalShopState(100_000), state_revision: 1 };
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
-    if (command === "get_shop_state") return canonicalShopState();
+    if (command === "get_shop_state") return structuredClone(state);
+    if (command === "quote_shop_action") return {
+      target: args?.target ?? { kind: "remove_natural", key },
+      catalog_revision: 1, effect_revision: 0, price: 100_000,
+    } satisfies ShopQuote;
+    if (command === "apply_shop_action") {
+      const request = args?.request;
+      if (!request) throw new Error("missing removal request");
+      applied.push(request);
+      state = { ...state, state_revision: 2, available_balance: 0, removed_natural_keys: [key] };
+      return { status: "removed", request_id: request.request_id, confirmed_quote: null, state: structuredClone(state) } satisfies ShopActionResult;
+    }
     if (command === "list_world_members") return [];
     return null;
   });
@@ -1939,7 +2009,144 @@ it("disables natural removal for authenticated accounts", async () => {
   await screen.findByRole("region", { name: "행성 풍경" });
   fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
 
-  expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
-  expect(screen.queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
+  const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
+  fireEvent.click(within(selection).getByRole("button", { name: "자연물 제거" }));
+  const dialog = await screen.findByRole("dialog", { name: "바위 제거 확인" });
+  expect(dialog).toHaveTextContent("현재 잔액 100,000 토큰");
+  expect(dialog).toHaveTextContent("최종 제거 비용 100,000 토큰");
+  expect(invokeMock).toHaveBeenCalledWith("quote_shop_action", {
+    target: { kind: "remove_natural", key },
+  });
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+
+  await waitFor(() => expect(applied).toHaveLength(1));
+  expect(applied[0]).toEqual({
+    kind: "remove_natural", request_id: expect.any(String), key, expected_version: 0,
+    quote: { target: { kind: "remove_natural", key }, catalog_revision: 1, effect_revision: 0, price: 100_000 },
+  });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
+  expect(snapshot.planet.objects).toHaveLength(1);
+  expect(snapshot.planet.removed_natural_keys).toEqual([]);
+});
+
+it("keeps signed receipt retry enabled after canonical refresh lowers the balance", async () => {
+  let attempts = 0;
+  const fixture = setupSignedNaturalRemoval({
+    apply: async (request, state) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("전송 결과를 확인할 수 없습니다.");
+      return naturalRemovalResult(request, state);
+    },
+  });
+  const { container } = render(<App />);
+  let dialog = await openNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("같은 요청 ID로 다시 확인합니다.");
+  const originalRequest = fixture.applied[0];
+
+  fixture.setBalance(50_000);
+  await act(async () => { listeners.get("cosmetic-shop-updated")?.({ payload: null }); });
+  dialog = screen.getByRole("dialog", { name: "바위 제거 확인" });
+  await waitFor(() => expect(dialog).toHaveTextContent("현재 잔액 50,000 토큰"));
+  const retry = within(dialog).getByRole("button", { name: "제거 확인" });
+  expect(retry).toBeEnabled();
+  fireEvent.click(retry);
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  expect(fixture.applied).toHaveLength(2);
+  expect(fixture.applied[1]).toBe(originalRequest);
+  expect(fixture.applied[1].request_id).toBe(fixture.applied[0].request_id);
+  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
+});
+
+it.each([
+  ["another account", { ...canonicalShopState(100_000), account_id: "account:other" }],
+  ["another cycle", { ...canonicalShopState(100_000), current_cycle_id: "cycle-old" }],
+] as const)("does not expose signed natural removal when canonical state belongs to %s", async (_label, state) => {
+  const fixture = setupSignedNaturalRemoval({ initialState: state });
+  const { container } = render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+
+  const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
+  expect(within(selection).queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
   expect(invokeMock).not.toHaveBeenCalledWith("quote_shop_action", expect.anything());
+  expect(fixture.applied).toHaveLength(0);
+});
+
+it("keeps a signed natural object visible and reports a canonical insufficient-balance result", async () => {
+  const fixture = setupSignedNaturalRemoval({
+    apply: async (request, state) => naturalRemovalResult(
+      request, state, "insufficient_balance", null, { available_balance: 50_000 },
+    ),
+  });
+  const { container } = render(<App />);
+  const dialog = await openNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("잔액이 부족해 자연물을 제거하지 못했습니다.");
+  expect(screen.getByRole("dialog", { name: "바위 제거 확인" })).toHaveTextContent("현재 잔액 50,000 토큰");
+  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(fixture.state.removed_natural_keys).toEqual([]);
+});
+
+it("discards a signed removal quote after switching to another account", async () => {
+  const pendingQuote = deferred<ShopQuote>();
+  const fixture = setupSignedNaturalRemoval({ quote: () => pendingQuote.promise });
+  const { container } = render(<App />);
+  await openNaturalRemoval(container);
+
+  const nextShared: SharingState = {
+    ...ownerState, phase: "signed_in", user_id: "next-account", world: null, sync_status: "synced",
+  };
+  const nextSnapshot = structuredClone(fixture.snapshot);
+  nextSnapshot.planet.profile = { nickname: "Next", avatar: "masculine" };
+  fixture.setSnapshot(nextSnapshot);
+  fixture.setShared(nextShared);
+  await act(async () => { listeners.get("world-context-changing")?.({ payload: "account" }); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  await act(async () => { listeners.get("world-state-updated")?.({ payload: null }); });
+  await screen.findByText("Next의 행성");
+
+  await act(async () => {
+    pendingQuote.resolve({
+      target: { kind: "remove_natural", key: naturalRemovalKey },
+      catalog_revision: 1, effect_revision: 0, price: 100_000,
+    });
+  });
+
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+  expect(invokeMock).not.toHaveBeenCalledWith("apply_shop_action", expect.anything());
+});
+
+it("ignores a signed removal result after the same account moves to a new cycle", async () => {
+  const pendingApply = deferred<ShopActionResult>();
+  const fixture = setupSignedNaturalRemoval({ apply: async () => pendingApply.promise });
+  const { container } = render(<App />);
+  const dialog = await openNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+  await waitFor(() => expect(fixture.applied).toHaveLength(1));
+
+  const nextSnapshot = structuredClone(fixture.snapshot);
+  nextSnapshot.planet.current_cycle_id = "cycle-2";
+  fixture.setSnapshot(nextSnapshot);
+  fixture.setCanonicalState({
+    ...fixture.state, current_cycle_id: "cycle-2", state_revision: fixture.state.state_revision + 1,
+    removed_natural_keys: [],
+  });
+  await act(async () => { listeners.get("usage-updated")?.({ payload: nextSnapshot }); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+
+  await act(async () => {
+    pendingApply.resolve(naturalRemovalResult(fixture.applied[0], {
+      ...canonicalShopState(100_000), state_revision: 1,
+    }));
+  });
+
+  expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-cycle-id", "cycle-2");
+  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
