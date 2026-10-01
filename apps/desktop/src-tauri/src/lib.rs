@@ -271,8 +271,86 @@ fn popup_monitor(
 #[cfg(test)]
 mod window_mode_tests {
     use super::{
-        initial_mode, initial_mode_after_scan, should_hide_on_blur, tray_target, WindowMode,
+        initial_mode, initial_mode_after_scan, with_guest_planet_reset_authority,
+        should_hide_on_blur, tray_target, WindowMode,
     };
+    use crate::storage::ledger::Ledger;
+    use std::path::Path;
+
+    #[test]
+    fn restored_authenticated_account_is_blocked_before_local_reset_mutation() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger
+            .ensure_planet_account("00000000-0000-0000-0000-000000000001")
+            .unwrap();
+        let account_id = ledger.cosmetic_account_id().unwrap();
+        let cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger.connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES (?1,42,'2026-10-01T00:00:00Z')",
+            [&cycle_id],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+             VALUES (?1,'saved-tree','land_tree',0,'saved-seed',1,'2026-10-01T00:00:00Z')",
+            [&account_id],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+             VALUES (?1,'saved-tree',?2,12.0,18.0,4)",
+            rusqlite::params![account_id, cycle_id],
+        ).unwrap();
+
+        let before_cycle = ledger.planet_cycle_id().unwrap();
+        let before_credits = ledger.planet_wallet_credits().unwrap();
+        let before_shop = ledger.shop_state().unwrap();
+        let before_reset_available_at = ledger.reset_available_at().unwrap();
+
+        let mut scan_or_reset_reached = false;
+        assert_eq!(
+            with_guest_planet_reset_authority(&account_id, || {
+                scan_or_reset_reached = true;
+                Ok(())
+            }),
+            Err("로그인된 행성은 서버에서 초기화해야 합니다".to_string()),
+        );
+        assert!(!scan_or_reset_reached);
+
+        assert_eq!(ledger.planet_cycle_id().unwrap(), before_cycle);
+        assert_eq!(ledger.planet_wallet_credits().unwrap(), before_credits);
+        assert_eq!(ledger.shop_state().unwrap(), before_shop);
+        assert_eq!(ledger.reset_available_at().unwrap(), before_reset_available_at);
+        let reset_requests: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM shop_action_request WHERE request_id LIKE 'legacy-reset:%'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(reset_requests, 0);
+    }
+
+    #[test]
+    fn guest_account_still_passes_local_reset_authority_guard() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let before_cycle = ledger.planet_cycle_id().unwrap();
+        let account_id = ledger.cosmetic_account_id().unwrap();
+        let mut guest_action_reached = false;
+        with_guest_planet_reset_authority(&account_id, || {
+            guest_action_reached = true;
+            Ok(())
+        })
+        .unwrap();
+        assert!(guest_action_reached);
+
+        ledger
+            .reset_planet(
+                chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+                    .unwrap()
+                    .to_utc(),
+            )
+            .unwrap();
+
+        assert_ne!(ledger.planet_cycle_id().unwrap(), before_cycle);
+    }
 
     #[test]
     fn initial_mode_depends_on_profile() {
@@ -473,10 +551,29 @@ fn set_planet_profile(
     Ok(snapshot)
 }
 
+fn with_guest_planet_reset_authority<T>(
+    account_id: &str,
+    action: impl FnOnce() -> Result<T, String>,
+) -> Result<T, String> {
+    if account_id.starts_with("account:") {
+        return Err("로그인된 행성은 서버에서 초기화해야 합니다".into());
+    }
+    action()
+}
+
 #[tauri::command]
 fn reset_planet(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnapshot, String> {
     restore_saved_planet_account(&state)?;
-    let _ = state.scan()?;
+    let account_id = {
+        let ledger = state
+            .ledger
+            .lock()
+            .map_err(|_| "local ledger unavailable")?;
+        ledger
+            .cosmetic_account_id()
+            .map_err(|_| "local ledger unavailable".to_string())?
+    };
+    let _ = with_guest_planet_reset_authority(&account_id, || state.scan())?;
     state
         .ledger
         .lock()
