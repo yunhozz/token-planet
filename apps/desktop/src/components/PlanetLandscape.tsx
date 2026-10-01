@@ -13,6 +13,7 @@ import type {
   EquippedCosmetic,
   LandscapeInstance,
   LandscapePlacement as ShopLandscapePlacement,
+  NaturalObjectKey,
   PlanetAvatar,
   PlanetObject,
   ShopActionResult,
@@ -84,6 +85,8 @@ export type PlanetLandscapeProps = {
   pendingShopAction?: PendingShopAction | null;
   onShopAction?: (request: ShopRequest) => Promise<ShopActionResult | null>;
   onSelectLandscapeInstance?: (instanceId: string | null) => void;
+  onRequestNaturalRemoval?: (key: NaturalObjectKey, label: string) => void;
+  canRequestNaturalRemoval?: (key: NaturalObjectKey) => boolean;
   createShopRequestId?: () => string;
 };
 
@@ -207,6 +210,8 @@ export function PlanetLandscape({
   pendingShopAction = null,
   onShopAction,
   onSelectLandscapeInstance,
+  onRequestNaturalRemoval,
+  canRequestNaturalRemoval,
   createShopRequestId = defaultShopRequestId,
 }: PlanetLandscapeProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -1044,6 +1049,19 @@ export function PlanetLandscape({
         <h2>{objectName(selected.object.kind)}</h2>
         <p>{STAGE_NAMES[selected.object.stage] ?? STAGE_NAMES[4]}</p>
         <p>{selected.object.ordinal + 1}번째 생성</p>
+        {onRequestNaturalRemoval && <button
+          type="button"
+          disabled={canRequestNaturalRemoval?.({
+            cycle_id: cycleId,
+            stage: selected.object.stage,
+            ordinal: selected.object.ordinal,
+          }) === false}
+          onClick={() => onRequestNaturalRemoval({
+            cycle_id: cycleId,
+            stage: selected.object.stage,
+            ordinal: selected.object.ordinal,
+          }, objectName(selected.object.kind))}
+        >자연물 제거</button>}
       </section>}
       {selectedShopPlacement && <div className="planet-landscape-shop-selection" role="group" aria-label="선택한 장식">
         <span>{selectedShopPlacement.product.display_name}</span>

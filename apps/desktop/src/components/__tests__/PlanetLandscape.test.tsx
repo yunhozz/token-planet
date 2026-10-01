@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlanetLandscape, planetLandscapeBounds, type PlanetExplorationState } from "../PlanetLandscape";
 import { PlanetLandscapeDecorations } from "../PlanetLandscapeDecorations";
 import { fitLandscape } from "../planetLandscapeCamera";
-import type { AvatarEquipment, LandscapeInstance, PlanetObject, ShopActionResult, ShopProduct, ShopRequest, ShopState } from "../../types/usage";
+import type { AvatarEquipment, LandscapeInstance, NaturalObjectKey, PlanetObject, ShopActionResult, ShopProduct, ShopRequest, ShopState } from "../../types/usage";
 
 class TestResizeObserver {
   static latest: TestResizeObserver | null = null;
@@ -51,6 +51,8 @@ function ControlledLandscape({
   pendingShopAction = null,
   onShopAction,
   onSelectLandscapeInstance,
+  onRequestNaturalRemoval,
+  canRequestNaturalRemoval,
   createShopRequestId,
 }: {
   objects?: PlanetObject[];
@@ -66,6 +68,8 @@ function ControlledLandscape({
   pendingShopAction?: { request: ShopRequest; status: "submitting" | "uncertain"; error: string | null } | null;
   onShopAction?: (request: ShopRequest) => Promise<ShopActionResult | null>;
   onSelectLandscapeInstance?: (instanceId: string | null) => void;
+  onRequestNaturalRemoval?: (key: NaturalObjectKey, label: string) => void;
+  canRequestNaturalRemoval?: (key: NaturalObjectKey) => boolean;
   createShopRequestId?: () => string;
 }) {
   const [exploration, setExploration] = useState<PlanetExplorationState>(() => ({
@@ -92,6 +96,8 @@ function ControlledLandscape({
       pendingShopAction={pendingShopAction}
       onShopAction={onShopAction}
       onSelectLandscapeInstance={onSelectLandscapeInstance}
+      onRequestNaturalRemoval={onRequestNaturalRemoval}
+      canRequestNaturalRemoval={canRequestNaturalRemoval}
       createShopRequestId={createShopRequestId}
     />
   );
@@ -289,6 +295,42 @@ describe("planet landscape artwork", () => {
     expect(within(screen.getByRole("region", { name: "오브젝트 목록" }))
       .getByRole("button", { name: /나무.*4번째/ })).toHaveAttribute("aria-pressed", "true");
     expect(svg.getAttribute("viewBox")).not.toBe(initialViewBox);
+  });
+
+  it("requests removal only for the selected natural object's current cycle key", () => {
+    const onRequestNaturalRemoval = vi.fn();
+    const { container } = render(
+      <ControlledLandscape
+        cycleId="cycle-7"
+        onRequestNaturalRemoval={onRequestNaturalRemoval}
+      />,
+    );
+    fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+
+    const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
+    fireEvent.click(within(selection).getByRole("button", { name: "자연물 제거" }));
+
+    expect(onRequestNaturalRemoval).toHaveBeenCalledWith(
+      { cycle_id: "cycle-7", stage: 1, ordinal: 3 },
+      "나무",
+    );
+  });
+
+  it("disables the removal action when its parent rejects the selected natural key", () => {
+    const onRequestNaturalRemoval = vi.fn();
+    const { container } = render(
+      <ControlledLandscape
+        onRequestNaturalRemoval={onRequestNaturalRemoval}
+        canRequestNaturalRemoval={() => false}
+      />,
+    );
+    fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+
+    const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
+    const remove = within(selection).getByRole("button", { name: "자연물 제거" });
+    expect(remove).toBeDisabled();
+    fireEvent.click(remove);
+    expect(onRequestNaturalRemoval).not.toHaveBeenCalled();
   });
 
   it("provides a separate keyboard-accessible scene target and list entry for every saved object", () => {

@@ -6,6 +6,7 @@ type NaturalRemovalDialogProps = {
   target: NaturalObjectKey;
   quote: ShopQuote | null;
   pending: boolean;
+  allowUnaffordableRetry?: boolean;
   confirmedWalletBalance: number;
   onConfirm: () => void;
   onCancel: () => void;
@@ -30,6 +31,7 @@ export function NaturalRemovalDialog({
   target,
   quote,
   pending,
+  allowUnaffordableRetry = false,
   confirmedWalletBalance,
   onConfirm,
   onCancel,
@@ -59,7 +61,7 @@ export function NaturalRemovalDialog({
   const discount = baseCost !== null && finalPrice !== null ? baseCost - finalPrice : null;
   const hasConfirmedBalance = Number.isFinite(confirmedWalletBalance);
   const canAfford = finalPrice !== null && hasConfirmedBalance && confirmedWalletBalance >= finalPrice;
-  const canConfirm = finalPrice !== null && canAfford && !pending;
+  const canConfirm = finalPrice !== null && (canAfford || allowUnaffordableRetry) && !pending;
   const eraName = validTarget ? ERA_NAMES[target.stage] : null;
 
   useEffect(() => {

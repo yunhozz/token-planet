@@ -5,6 +5,7 @@ import { InvitePanel } from "./components/InvitePanel";
 import { GrowthJournal } from "./components/GrowthJournal";
 import { FormattedNumber } from "./components/FormattedNumber";
 import { LoadingStatus } from "./components/LoadingStatus";
+import { NaturalRemovalDialog } from "./components/NaturalRemovalDialog";
 import { PlanetProfileSetup } from "./components/PlanetProfileSetup";
 import { objectName, objectProgress, PlanetScene, STAGE_NAMES } from "./components/PlanetScene";
 import { initialLandscapeCamera } from "./components/planetLandscapeCamera";
@@ -18,10 +19,16 @@ import { ShopPanel, type ShopPanelPreview } from "./components/ShopPanel";
 import { ShopProductThumbnail } from "./components/ShopProductThumbnail";
 import { useShopActions } from "./hooks/useShopActions";
 import { sharing, type SharingState, type WorldMember } from "./lib/sharing";
-import type { Agent, GrowthJournal as GrowthJournalData, PlanetAvatar, ShopActionResult, ShopRequest, ShopState, WorldSnapshot } from "./types/usage";
+import type { Agent, GrowthJournal as GrowthJournalData, NaturalObjectKey, PlanetAvatar, ShopActionResult, ShopQuote, ShopRequest, ShopState, WorldSnapshot } from "./types/usage";
 import "./App.css";
 
 type FeatureScreen = "planet" | "cosmetic-shop" | "growth-journal";
+type ActiveNaturalRemoval = {
+  context: string;
+  key: NaturalObjectKey;
+  label: string;
+  generation: number;
+};
 
 function FeatureToolMenu({
   active,
@@ -56,6 +63,15 @@ const EMPTY_SNAPSHOT: WorldSnapshot = {
 
 function broadcastDesktopEvent(name: string) {
   return isTauri() ? emit(name, "main").catch(() => {}) : Promise.resolve();
+}
+
+function newShopRequestId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `shop-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function sameNaturalKey(left: NaturalObjectKey, right: NaturalObjectKey): boolean {
+  return left.cycle_id === right.cycle_id && left.stage === right.stage && left.ordinal === right.ordinal;
 }
 
 function worldContext(shared: SharingState | null, snapshot: WorldSnapshot | null) {
@@ -154,6 +170,11 @@ function App() {
   const shopContextRef = useRef(shopIdentity);
   shopContextRef.current = shopIdentity;
   const [shopPreview, setShopPreview] = useState<ShopPanelPreview | null>(null);
+  const [naturalRemoval, setNaturalRemoval] = useState<ActiveNaturalRemoval | null>(null);
+  const [naturalRemovalQuote, setNaturalRemovalQuote] = useState<ShopQuote | null>(null);
+  const [naturalRemovalError, setNaturalRemovalError] = useState<string | null>(null);
+  const naturalRemovalGeneration = useRef(0);
+  const naturalRemovalSubmitting = useRef(false);
   const [selectedLandscapeEntry, setSelectedLandscapeEntry] = useState<{ context: string; instanceId: string } | null>(null);
   const selectedLandscapeInstanceId = selectedLandscapeEntry?.context === shopIdentity ? selectedLandscapeEntry.instanceId : null;
 
@@ -167,6 +188,11 @@ function App() {
   function lockWorldContext() {
     worldTransitionEpoch.current += 1;
     sharedContextLockedRef.current = true;
+    naturalRemovalGeneration.current += 1;
+    naturalRemovalSubmitting.current = false;
+    setNaturalRemoval(null);
+    setNaturalRemovalQuote(null);
+    setNaturalRemovalError(null);
     if (resetPendingOwnerRef.current) {
       resetPendingOwnerRef.current = null;
       setPlanetBusy(false);
@@ -628,6 +654,46 @@ function App() {
     ...(currentShopState?.removed_natural_keys ?? []),
   ].map(({ stage, ordinal }) => `${stage}:${ordinal}`));
   const visiblePlanetObjects = planet.objects.filter((object) => !removedNaturalIds.has(`${object.stage}:${object.ordinal}`));
+  const activeNaturalRemoval = naturalRemoval
+    && naturalRemoval.context === shopIdentity
+    && featureScreen === "planet"
+    && detail
+    && detailTab === "planet"
+    && !sharedContextLockedRef.current
+    ? naturalRemoval
+    : null;
+  const activeNaturalRemovalPending = activeNaturalRemoval && shopActions.pending?.request.kind === "remove_natural"
+    && sameNaturalKey(shopActions.pending.request.key, activeNaturalRemoval.key)
+    ? shopActions.pending
+    : null;
+  const activeNaturalRemovalError = activeNaturalRemovalPending?.status === "uncertain"
+    ? `${activeNaturalRemovalPending.error ?? "요청 결과를 확인하지 못했습니다."} 제거 확인을 누르면 같은 요청 ID로 다시 확인합니다.`
+    : naturalRemovalError;
+  const canRequestNaturalRemoval = shopAccount?.is_guest === true
+    && shopAccount.account_id === "local"
+    && currentShopState?.account_id === "local"
+    && currentShopState.current_cycle_id === planet.current_cycle_id
+    && shopActionsAvailable
+    && (!shopActions.pending || (
+      shopActions.pending.status === "uncertain"
+      && shopActions.pending.request.kind === "remove_natural"
+    ))
+    && featureScreen === "planet"
+    && detail
+    && detailTab === "planet";
+  const canRequestNaturalRemovalForKey = (key: NaturalObjectKey) => {
+    const pending = shopActions.pending;
+    return !pending || (pending.status === "uncertain"
+      && pending.request.kind === "remove_natural"
+      && sameNaturalKey(pending.request.key, key));
+  };
+  useEffect(() => {
+    naturalRemovalGeneration.current += 1;
+    naturalRemovalSubmitting.current = false;
+    setNaturalRemoval(null);
+    setNaturalRemovalQuote(null);
+    setNaturalRemovalError(null);
+  }, [shopIdentity, featureScreen, detail, detailTab]);
   useEffect(() => {
     if (planet.can_reset || !planet.reset_available_at_utc) return;
     const wait = Math.max(0, Date.parse(planet.reset_available_at_utc) - Date.now()) + 25;
@@ -644,6 +710,113 @@ function App() {
       void invoke("set_detail_view", { detail: true }).catch(() => {});
     }
   }, []);
+
+  function requestNaturalRemoval(key: NaturalObjectKey, label: string) {
+    const context = shopContextRef.current;
+    if (!canRequestNaturalRemoval || !currentShopState || sharedContextLockedRef.current
+      || context !== shopIdentity || key.cycle_id !== planet.current_cycle_id
+      || !visiblePlanetObjects.some((object) => object.stage === key.stage && object.ordinal === key.ordinal)) return;
+
+    naturalRemovalGeneration.current += 1;
+    const generation = naturalRemovalGeneration.current;
+    setNaturalRemoval({ context, key, label, generation });
+    const pending = shopActions.pending;
+    if (pending) {
+      if (pending.status !== "uncertain" || pending.request.kind !== "remove_natural"
+        || !sameNaturalKey(pending.request.key, key)) return;
+      setNaturalRemovalQuote(pending.request.quote);
+      setNaturalRemovalError("요청 결과를 확인하지 못했습니다. 제거 확인을 누르면 같은 요청 ID로 다시 확인합니다.");
+      return;
+    }
+
+    setNaturalRemovalQuote(null);
+    setNaturalRemovalError(null);
+    void shopActions.quote({ kind: "remove_natural", key }).then((quote) => {
+      if (generation !== naturalRemovalGeneration.current || shopContextRef.current !== context
+        || sharedContextLockedRef.current || !quote || quote.target.kind !== "remove_natural"
+        || !sameNaturalKey(quote.target.key, key)) return;
+      setNaturalRemovalQuote(quote);
+    }).catch((cause: unknown) => {
+      if (generation !== naturalRemovalGeneration.current || shopContextRef.current !== context
+        || sharedContextLockedRef.current) return;
+      setNaturalRemovalError(cause instanceof Error ? cause.message : "제거 견적을 확인하지 못했습니다.");
+    });
+  }
+
+  function closeNaturalRemoval() {
+    naturalRemovalGeneration.current += 1;
+    naturalRemovalSubmitting.current = false;
+    setNaturalRemoval(null);
+    setNaturalRemovalQuote(null);
+    setNaturalRemovalError(null);
+  }
+
+  async function confirmNaturalRemoval() {
+    const target = activeNaturalRemoval;
+    const context = target?.context;
+    const pending = shopActions.pending;
+    const matchingPending = Boolean(target && pending?.request.kind === "remove_natural"
+      && sameNaturalKey(pending.request.key, target.key));
+    if (!target || !context || !currentShopState || !canRequestNaturalRemoval
+      || naturalRemovalSubmitting.current || sharedContextLockedRef.current
+      || context !== shopContextRef.current || context !== shopIdentity
+      || target.key.cycle_id !== planet.current_cycle_id
+      || (pending && (!matchingPending || pending.status !== "uncertain"))) return;
+
+    const quote = naturalRemovalQuote;
+    if (!pending && (!quote || quote.target.kind !== "remove_natural"
+      || !sameNaturalKey(quote.target.key, target.key))) return;
+
+    const generation = target.generation;
+    naturalRemovalSubmitting.current = true;
+    try {
+      let result: ShopActionResult | null;
+      if (pending?.status === "uncertain" && matchingPending) {
+        result = await shopActions.retryPending();
+      } else {
+        const request: ShopRequest = {
+          kind: "remove_natural",
+          request_id: newShopRequestId(),
+          key: target.key,
+          expected_version: 0,
+          quote: quote!,
+        };
+        result = await applyShopAction(request);
+      }
+
+      if (!result || generation !== naturalRemovalGeneration.current
+        || shopContextRef.current !== context || sharedContextLockedRef.current) return;
+      if (result.status === "quote_changed") {
+        const confirmedQuote = result.confirmed_quote;
+        if (confirmedQuote?.target.kind === "remove_natural"
+          && sameNaturalKey(confirmedQuote.target.key, target.key)) {
+          setNaturalRemovalQuote(confirmedQuote);
+          setNaturalRemovalError("제거 비용이 변경되었습니다. 새 금액을 확인한 뒤 다시 눌러 주세요.");
+        } else {
+          setNaturalRemovalQuote(null);
+          setNaturalRemovalError("새 제거 비용을 확인하지 못했습니다. 다시 견적을 확인해 주세요.");
+        }
+        return;
+      }
+      if (result.status === "removed" || result.status === "already_removed") {
+        closeNaturalRemoval();
+        return;
+      }
+      setNaturalRemovalError(result.status === "insufficient_balance"
+        ? "잔액이 부족해 자연물을 제거하지 못했습니다."
+        : "자연물을 제거하지 못했습니다. 상태를 확인한 뒤 다시 시도해 주세요.");
+    } catch (cause) {
+      if (generation === naturalRemovalGeneration.current
+        && shopContextRef.current === context && !sharedContextLockedRef.current) {
+        setNaturalRemovalError(cause instanceof Error
+          ? cause.message
+          : "요청 결과를 확인하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.");
+      }
+    } finally {
+      if (generation === naturalRemovalGeneration.current) naturalRemovalSubmitting.current = false;
+    }
+  }
+
   useEffect(() => {
     if (featureScreen !== "planet") {
       featureScreenHeadingRef.current?.focus();
@@ -840,6 +1013,8 @@ function App() {
                   if (sharedContextLockedRef.current || shopContextRef.current !== shopIdentity) return;
                   setSelectedLandscapeEntry(instanceId ? { context: shopIdentity, instanceId } : null);
                 }}
+                onRequestNaturalRemoval={canRequestNaturalRemoval ? requestNaturalRemoval : undefined}
+                canRequestNaturalRemoval={canRequestNaturalRemovalForKey}
               />
               <div className="personal-quick-facts">
                 <h1>{profile!.nickname}의 행성</h1>
@@ -931,6 +1106,17 @@ function App() {
         </div>
         <footer className="bottom-actions"><SyncStatus status={shared?.sync_status ?? "local"} pending={shared?.pending ?? 0} lastSyncedAt={shared?.last_synced_at} onPause={() => changeSharing(() => sharing.pause(true))} onResume={() => { if (window.confirm("동기화를 재개하면 내 행성 상태를 서버에 다시 동기화합니다. 공동 세계에 참여 중이면 행성 모습, 이번 행성 토큰, 누적 토큰과 성장 점수가 멤버에게 공개됩니다.")) void changeSharing(() => sharing.pause(false)); }} /></footer>
       </div>
+      {activeNaturalRemoval && currentShopState && <NaturalRemovalDialog
+        target={activeNaturalRemoval.key}
+        quote={naturalRemovalQuote}
+        pending={activeNaturalRemovalPending?.status === "submitting"}
+        allowUnaffordableRetry={activeNaturalRemovalPending?.status === "uncertain"}
+        confirmedWalletBalance={currentShopState.available_balance}
+        onConfirm={() => void confirmNaturalRemoval()}
+        onCancel={closeNaturalRemoval}
+        objectName={activeNaturalRemoval.label}
+        error={activeNaturalRemovalError}
+      />}
     </main>
   );
 }

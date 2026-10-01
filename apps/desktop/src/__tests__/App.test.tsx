@@ -1394,3 +1394,552 @@ it("shows the group's syncing state without the personal scene", async () => {
   expect(screen.getByText("멤버의 행성을 동기화하고 있습니다.")).toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "나의 행성" })).not.toBeInTheDocument();
 });
+
+it("offers removal for a selected generated object in the local guest planet", async () => {
+  const guestState: SharingState = {
+    ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local",
+  };
+  const snapshot = structuredClone(localSnapshot);
+  snapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+    { stage: 1, ordinal: 3, kind: "tree", x: 63, y: 20, seed: 3 },
+  ];
+  const naturalKey = { cycle_id: "cycle-1", stage: 0, ordinal: 0 } as const;
+  let shopState = { ...canonicalShopState(), account_id: "local" };
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(guestState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
+    if (command === "get_shop_state") return structuredClone(shopState);
+    if (command === "quote_shop_action") return {
+      target: { kind: "remove_natural", key: naturalKey },
+      catalog_revision: 1,
+      effect_revision: 0,
+      price: 100_000,
+    };
+    if (command === "apply_shop_action") {
+      const request = args?.request;
+      if (!request) throw new Error("missing removal request");
+      applied.push(request);
+      shopState = { ...shopState, state_revision: 2, available_balance: 11_900_000, removed_natural_keys: [naturalKey] };
+      return {
+        status: "removed", request_id: request.request_id, confirmed_quote: null, state: structuredClone(shopState),
+      } satisfies ShopActionResult;
+    }
+    if (command === "list_world_members") return [];
+    return null;
+  });
+
+  const { container } = render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+
+  const selectedObject = screen.getByRole("region", { name: "선택한 오브젝트" });
+  fireEvent.click(within(selectedObject).getByRole("button", { name: "자연물 제거" }));
+
+  const dialog = await screen.findByRole("dialog", { name: "바위 제거 확인" });
+  expect(dialog).toHaveTextContent("최종 제거 비용 100,000 토큰");
+  expect(invokeMock).toHaveBeenCalledWith("quote_shop_action", {
+    target: { kind: "remove_natural", key: naturalKey },
+  });
+  expect(applied).toHaveLength(0);
+
+  const originalViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+
+  await waitFor(() => expect(applied).toHaveLength(1));
+  expect(applied[0]).toMatchObject({
+    kind: "remove_natural",
+    key: naturalKey,
+    expected_version: 0,
+    quote: { target: { kind: "remove_natural", key: naturalKey }, price: 100_000 },
+  });
+  expect(applied[0].request_id).toEqual(expect.any(String));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-object-list-id="1-3"]')).toBeInTheDocument();
+  expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
+  expect(snapshot.planet.objects).toHaveLength(2);
+});
+
+const naturalRemovalKey = { cycle_id: "cycle-1", stage: 0, ordinal: 0 } as const;
+
+function naturalRemovalResult(
+  request: ShopRequest,
+  state: ShopState,
+  status: ShopActionResult["status"] = "removed",
+  confirmedQuote: ShopQuote | null = null,
+  overrides: Partial<ShopState> = {},
+): ShopActionResult {
+  if (request.kind !== "remove_natural") throw new Error("expected natural removal request");
+  const nextState: ShopState = {
+    ...state,
+    state_revision: state.state_revision + 1,
+    available_balance: Math.max(0, state.available_balance - request.quote.price),
+    removed_natural_keys: status === "removed"
+      ? [...state.removed_natural_keys, request.key]
+      : state.removed_natural_keys,
+    ...overrides,
+  };
+  return { status, request_id: request.request_id, confirmed_quote: confirmedQuote, state: nextState };
+}
+
+function setupGuestNaturalRemoval(options: {
+  quote?: (target: ShopQuote["target"]) => Promise<ShopQuote>;
+  apply?: (request: ShopRequest, state: ShopState) => Promise<ShopActionResult>;
+} = {}) {
+  const guestState: SharingState = {
+    ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local",
+  };
+  const snapshot = structuredClone(localSnapshot);
+  snapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+    { stage: 1, ordinal: 3, kind: "tree", x: 63, y: 20, seed: 3 },
+  ];
+  let state: ShopState = { ...canonicalShopState(), account_id: "local" };
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(guestState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
+    if (command === "get_shop_state") return structuredClone(state);
+    if (command === "quote_shop_action") {
+      const target = args?.target ?? { kind: "remove_natural", key: naturalRemovalKey };
+      return options.quote
+        ? options.quote(target)
+        : { target, catalog_revision: 1, effect_revision: 0, price: 100_000 } satisfies ShopQuote;
+    }
+    if (command === "apply_shop_action") {
+      const request = args?.request;
+      if (!request) throw new Error("missing removal request");
+      applied.push(request);
+      const result = options.apply
+        ? await options.apply(request, structuredClone(state))
+        : naturalRemovalResult(request, state);
+      state = structuredClone(result.state);
+      return result;
+    }
+    if (command === "list_world_members") return [];
+    return null;
+  });
+  return {
+    snapshot,
+    applied,
+    setBalance(balance: number) { state = { ...state, available_balance: balance, state_revision: state.state_revision + 1 }; },
+    get state() { return state; },
+  };
+}
+
+async function openGuestNaturalRemoval(container: HTMLElement) {
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
+  fireEvent.click(within(selected).getByRole("button", { name: "자연물 제거" }));
+  return screen.findByRole("dialog", { name: "바위 제거 확인" });
+}
+
+it("does not apply a natural removal when its quote is canceled", async () => {
+  const fixture = setupGuestNaturalRemoval();
+  const { container } = render(<App />);
+  const dialog = await openGuestNaturalRemoval(container);
+
+  fireEvent.click(within(dialog).getByRole("button", { name: "취소" }));
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  expect(fixture.applied).toHaveLength(0);
+  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+});
+
+it("keeps the natural object visible when the canonical removal result is insufficient", async () => {
+  const fixture = setupGuestNaturalRemoval({
+    apply: async (request, state) => naturalRemovalResult(
+      request, state, "insufficient_balance", null, { available_balance: 50_000 },
+    ),
+  });
+  const { container } = render(<App />);
+  const dialog = await openGuestNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("잔액이 부족해 자연물을 제거하지 못했습니다.");
+  expect(within(screen.getByRole("dialog", { name: "바위 제거 확인" })).getByRole("status"))
+    .toHaveTextContent("잔액이 부족합니다.");
+  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(fixture.state.removed_natural_keys).toEqual([]);
+});
+
+it("requires a new confirmation and request ID after the removal quote changes", async () => {
+  let attempts = 0;
+  const revisedQuote: ShopQuote = {
+    target: { kind: "remove_natural", key: naturalRemovalKey },
+    catalog_revision: 1, effect_revision: 1, price: 80_000,
+  };
+  const fixture = setupGuestNaturalRemoval({
+    apply: async (request, state) => {
+      attempts += 1;
+      return attempts === 1
+        ? naturalRemovalResult(request, state, "quote_changed", revisedQuote)
+        : naturalRemovalResult(request, state);
+    },
+  });
+  const { container } = render(<App />);
+  let dialog = await openGuestNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("제거 비용이 변경되었습니다.");
+  dialog = screen.getByRole("dialog", { name: "바위 제거 확인" });
+  expect(dialog).toHaveTextContent("최종 제거 비용 80,000 토큰");
+  expect(fixture.applied).toHaveLength(1);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  expect(fixture.applied).toHaveLength(2);
+  expect(fixture.applied[0].request_id).not.toBe(fixture.applied[1].request_id);
+  expect(fixture.applied[1]).toMatchObject({ quote: revisedQuote, key: naturalRemovalKey });
+});
+
+it("retries an uncertain natural removal with the exact same request ID and payload", async () => {
+  let attempts = 0;
+  const fixture = setupGuestNaturalRemoval({
+    apply: async (request, state) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("전송 결과를 확인할 수 없습니다.");
+      return naturalRemovalResult(request, state);
+    },
+  });
+  const { container } = render(<App />);
+  let dialog = await openGuestNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+
+  expect(await screen.findByRole("alert")).toHaveTextContent("같은 요청 ID로 다시 확인합니다.");
+  dialog = screen.getByRole("dialog", { name: "바위 제거 확인" });
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  expect(fixture.applied).toHaveLength(2);
+  expect(fixture.applied[1]).toEqual(fixture.applied[0]);
+  expect(fixture.applied[1].request_id).toEqual(expect.any(String));
+});
+
+it("keeps the same-ID receipt retry available after a refresh shows a lower balance", async () => {
+  let attempts = 0;
+  const fixture = setupGuestNaturalRemoval({
+    apply: async (request, state) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("전송 결과를 확인할 수 없습니다.");
+      return naturalRemovalResult(request, state);
+    },
+  });
+  const { container } = render(<App />);
+  let dialog = await openGuestNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("같은 요청 ID로 다시 확인합니다.");
+
+  fixture.setBalance(50_000);
+  await act(async () => { listeners.get("cosmetic-shop-updated")?.({ payload: null }); });
+  dialog = screen.getByRole("dialog", { name: "바위 제거 확인" });
+  await waitFor(() => expect(dialog).toHaveTextContent("현재 잔액 50,000 토큰"));
+  const retry = within(dialog).getByRole("button", { name: "제거 확인" });
+  expect(retry).toBeEnabled();
+  fireEvent.click(retry);
+
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  expect(fixture.applied).toHaveLength(2);
+  expect(fixture.applied[1]).toEqual(fixture.applied[0]);
+});
+
+it("blocks duplicate removal confirms while the canonical action is pending", async () => {
+  const response = deferred<ShopActionResult>();
+  const fixture = setupGuestNaturalRemoval({ apply: async () => response.promise });
+  const { container } = render(<App />);
+  const dialog = await openGuestNaturalRemoval(container);
+  const confirmButton = within(dialog).getByRole("button", { name: "제거 확인" });
+  fireEvent.click(confirmButton);
+  fireEvent.click(confirmButton);
+
+  await waitFor(() => expect(fixture.applied).toHaveLength(1));
+  expect(screen.getByRole("button", { name: "제거 중" })).toBeDisabled();
+  const result = naturalRemovalResult(fixture.applied[0], fixture.state);
+  await act(async () => { response.resolve(result); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  expect(fixture.applied).toHaveLength(1);
+});
+
+it("discards a late removal quote when the user leaves the detail route", async () => {
+  const pendingQuote = deferred<ShopQuote>();
+  const fixture = setupGuestNaturalRemoval({ quote: () => pendingQuote.promise });
+  const { container } = render(<App />);
+  await openGuestNaturalRemoval(container);
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+
+  await act(async () => {
+    pendingQuote.resolve({
+      target: { kind: "remove_natural", key: naturalRemovalKey },
+      catalog_revision: 1, effect_revision: 0, price: 100_000,
+    });
+  });
+
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+  expect(fixture.applied).toHaveLength(0);
+});
+
+it("invalidates a removal quote across a world lock even when the same context unlocks", async () => {
+  const pendingQuote = deferred<ShopQuote>();
+  const fixture = setupGuestNaturalRemoval({ quote: () => pendingQuote.promise });
+  const { container } = render(<App />);
+  await openGuestNaturalRemoval(container);
+
+  await act(async () => { listeners.get("world-context-changing")?.({ payload: "account" }); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  await act(async () => { listeners.get("world-state-updated")?.({ payload: null }); });
+  await screen.findByText("Orbit의 행성");
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+
+  await act(async () => {
+    pendingQuote.resolve({
+      target: { kind: "remove_natural", key: naturalRemovalKey },
+      catalog_revision: 1, effect_revision: 0, price: 100_000,
+    });
+  });
+
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+  expect(fixture.applied).toHaveLength(0);
+});
+
+it("does not restore a removal dialog or late error after a same-context world lock", async () => {
+  const pendingApply = deferred<ShopActionResult>();
+  const fixture = setupGuestNaturalRemoval({ apply: async () => pendingApply.promise });
+  const { container } = render(<App />);
+  const dialog = await openGuestNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+  await waitFor(() => expect(fixture.applied).toHaveLength(1));
+
+  await act(async () => { listeners.get("world-context-changing")?.({ payload: "world" }); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  await act(async () => { listeners.get("world-state-updated")?.({ payload: null }); });
+  await screen.findByText("Orbit의 행성");
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+  await act(async () => { pendingApply.reject(new Error("stale world action error")); });
+
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).toBeNull();
+});
+
+it("keeps a confirmed natural removal canonical when its result arrives after leaving detail", async () => {
+  const pendingApply = deferred<ShopActionResult>();
+  const fixture = setupGuestNaturalRemoval({ apply: async () => pendingApply.promise });
+  const { container } = render(<App />);
+  const dialog = await openGuestNaturalRemoval(container);
+  const originalViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+  await waitFor(() => expect(fixture.applied).toHaveLength(1));
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+
+  await act(async () => {
+    pendingApply.resolve(naturalRemovalResult(fixture.applied[0], fixture.state));
+  });
+  fireEvent.click(await screen.findByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+
+  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-object-list-id="1-3"]')).toBeInTheDocument();
+  expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("discards a late removal quote after the guest cycle changes", async () => {
+  const pendingQuote = deferred<ShopQuote>();
+  let activeSnapshot = structuredClone(localSnapshot);
+  activeSnapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+  ];
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(activeSnapshot);
+    if (command === "get_shop_state") return {
+      ...canonicalShopState(), account_id: "local", current_cycle_id: activeSnapshot.planet.current_cycle_id,
+    };
+    if (command === "quote_shop_action") return pendingQuote.promise;
+    if (command === "apply_shop_action") throw new Error("stale quote must not be applied");
+    if (command === "list_world_members") return [];
+    return null;
+  });
+  const { container } = render(<App />);
+  await openGuestNaturalRemoval(container);
+  const nextSnapshot = structuredClone(activeSnapshot);
+  nextSnapshot.planet.current_cycle_id = "cycle-2";
+  await act(async () => { listeners.get("usage-updated")?.({ payload: nextSnapshot }); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+
+  await act(async () => {
+    pendingQuote.resolve({
+      target: { kind: "remove_natural", key: naturalRemovalKey },
+      catalog_revision: 1, effect_revision: 0, price: 100_000,
+    });
+  });
+
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+  expect(invokeMock).not.toHaveBeenCalledWith("apply_shop_action", expect.anything());
+});
+
+it("ignores an old-cycle removal success after the guest has moved to a new cycle", async () => {
+  const pendingApply = deferred<ShopActionResult>();
+  let activeSnapshot = structuredClone(localSnapshot);
+  activeSnapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+  ];
+  let state: ShopState = { ...canonicalShopState(), account_id: "local" };
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(activeSnapshot);
+    if (command === "get_shop_state") return { ...structuredClone(state), current_cycle_id: activeSnapshot.planet.current_cycle_id };
+    if (command === "quote_shop_action") return {
+      target: { kind: "remove_natural", key: naturalRemovalKey },
+      catalog_revision: 1, effect_revision: 0, price: 100_000,
+    } satisfies ShopQuote;
+    if (command === "apply_shop_action") {
+      if (!args?.request) throw new Error("missing removal request");
+      applied.push(args.request);
+      return pendingApply.promise;
+    }
+    if (command === "list_world_members") return [];
+    return null;
+  });
+  const originalState = structuredClone(state);
+  const { container } = render(<App />);
+  const dialog = await openGuestNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+  await waitFor(() => expect(applied).toHaveLength(1));
+
+  activeSnapshot = structuredClone(activeSnapshot);
+  activeSnapshot.planet.current_cycle_id = "cycle-2";
+  state = { ...state, current_cycle_id: "cycle-2", removed_natural_keys: [], state_revision: 2 };
+  await act(async () => { listeners.get("usage-updated")?.({ payload: structuredClone(activeSnapshot) }); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  await act(async () => {
+    pendingApply.resolve(naturalRemovalResult(applied[0], originalState));
+  });
+
+  expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-cycle-id", "cycle-2");
+  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("discards a late removal quote while the app switches from the guest to another account", async () => {
+  const pendingQuote = deferred<ShopQuote>();
+  let activeShared: SharingState = {
+    ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local",
+  };
+  let activeSnapshot = structuredClone(localSnapshot);
+  activeSnapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+  ];
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(activeShared);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(activeSnapshot);
+    if (command === "get_shop_state") return {
+      ...canonicalShopState(),
+      account_id: activeShared.user_id ? `account:${activeShared.user_id}` : "local",
+      current_cycle_id: activeSnapshot.planet.current_cycle_id,
+    };
+    if (command === "quote_shop_action") return pendingQuote.promise;
+    if (command === "apply_shop_action") throw new Error("stale quote must not be applied");
+    if (command === "list_world_members") return [];
+    return null;
+  });
+  const { container } = render(<App />);
+  await openGuestNaturalRemoval(container);
+
+  activeShared = { ...ownerState, phase: "signed_in", user_id: "next-account", world: null, sync_status: "synced" };
+  activeSnapshot = structuredClone(activeSnapshot);
+  activeSnapshot.planet.profile = { nickname: "Next", avatar: "masculine" };
+  await act(async () => { listeners.get("world-context-changing")?.({ payload: "account" }); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  await act(async () => { listeners.get("world-state-updated")?.({ payload: null }); });
+  await screen.findByText("Next의 행성");
+
+  await act(async () => {
+    pendingQuote.resolve({
+      target: { kind: "remove_natural", key: naturalRemovalKey },
+      catalog_revision: 1, effect_revision: 0, price: 100_000,
+    });
+  });
+
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+  expect(invokeMock).not.toHaveBeenCalledWith("apply_shop_action", expect.anything());
+});
+
+it("does not surface an old guest removal error after switching accounts", async () => {
+  const pendingApply = deferred<ShopActionResult>();
+  let activeShared: SharingState = {
+    ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local",
+  };
+  let activeSnapshot = structuredClone(localSnapshot);
+  activeSnapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
+  ];
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(activeShared);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(activeSnapshot);
+    if (command === "get_shop_state") return {
+      ...canonicalShopState(),
+      account_id: activeShared.user_id ? `account:${activeShared.user_id}` : "local",
+      current_cycle_id: activeSnapshot.planet.current_cycle_id,
+    };
+    if (command === "quote_shop_action") return {
+      target: args?.target ?? { kind: "remove_natural", key: naturalRemovalKey },
+      catalog_revision: 1, effect_revision: 0, price: 100_000,
+    } satisfies ShopQuote;
+    if (command === "apply_shop_action") {
+      if (!args?.request) throw new Error("missing removal request");
+      applied.push(args.request);
+      return pendingApply.promise;
+    }
+    if (command === "list_world_members") return [];
+    return null;
+  });
+  const { container } = render(<App />);
+  const dialog = await openGuestNaturalRemoval(container);
+  fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
+  await waitFor(() => expect(applied).toHaveLength(1));
+
+  activeShared = { ...ownerState, phase: "signed_in", user_id: "next-account", world: null, sync_status: "synced" };
+  activeSnapshot = structuredClone(activeSnapshot);
+  activeSnapshot.planet.profile = { nickname: "Next", avatar: "masculine" };
+  await act(async () => { listeners.get("world-context-changing")?.({ payload: "account" }); });
+  await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
+  await act(async () => { listeners.get("world-state-updated")?.({ payload: null }); });
+  await screen.findByText("Next의 행성");
+  await act(async () => { pendingApply.reject(new Error("old account transport error")); });
+
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
+});
+
+it("disables natural removal for authenticated accounts", async () => {
+  const snapshot = structuredClone(localSnapshot);
+  snapshot.planet.objects = [{ stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 }];
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
+    if (command === "get_shop_state") return canonicalShopState();
+    if (command === "list_world_members") return [];
+    return null;
+  });
+  const { container } = render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+
+  expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
+  expect(invokeMock).not.toHaveBeenCalledWith("quote_shop_action", expect.anything());
+});
