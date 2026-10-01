@@ -5,7 +5,9 @@ use chrono_tz::Tz;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use super::ledger::{Ledger, ScanError};
-use crate::domain::cosmetic_shop::{ActiveEffects, EffectContribution, RewardState};
+use crate::domain::cosmetic_shop::{
+    ActiveEffects, EffectContribution, RewardState, ShopEffectTimeline,
+};
 use crate::domain::planet::{
     PlanetActivityDayContribution, PlanetDeviceContributionSnapshot,
     PlanetEffectContributionSegment,
@@ -18,6 +20,7 @@ struct EffectHistory {
     revision: u64,
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
+    active_instance_ids: Vec<String>,
     effects: ActiveEffects,
 }
 
@@ -49,92 +52,403 @@ struct ActivitySnapshot {
     tokens: u64,
 }
 
-impl Ledger {
-    pub fn rebuild_shop_contributions(&mut self) -> Result<(), ScanError> {
-        let connection = &self.connection;
-        let account_id = current_account_id(connection)?;
-        if account_id.starts_with("account:") {
+struct ConfirmedEffectTimelineState {
+    current_cycle_id: String,
+    effect_revision: u64,
+    server_time: DateTime<Utc>,
+    reward_timezone: String,
+    intervals: Vec<EffectHistory>,
+}
+
+fn rebuild_shop_contributions_in_transaction(
+    connection: &Connection,
+) -> Result<(), ScanError> {
+    let account_id = current_account_id(connection)?;
+    if account_id.starts_with("account:") {
+        let confirmed: bool = connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM shop_effect_timeline_state WHERE account_id=?1)",
+            [&account_id],
+            |row| row.get(0),
+        )?;
+        if !confirmed {
             return Ok(());
         }
-        let occurrences = canonical_occurrences(connection)?;
-        let device_id = setting(connection,"planet_device_id")?.ok_or(ScanError::Database)?;
-        let mut next_contributions = BTreeMap::<ContributionKey,(u64,u16,u16)>::new();
-        let mut next_activity = BTreeMap::<String,ActivitySnapshot>::new();
-        for occurrence in &occurrences {
-            let key = ContributionKey {
-                device_id: device_id.clone(),
-                cycle_id: occurrence.cycle_id.clone(),
-                date: occurrence.growth_date.clone(),
-                effect_revision: occurrence.effect_revision,
-            };
-            let values = next_contributions.entry(key).or_insert((
-                0,occurrence.effects.civilization_growth_bps,occurrence.effects.token_earning_bps,
-            ));
-            if values.1 != occurrence.effects.civilization_growth_bps
-                || values.2 != occurrence.effects.token_earning_bps {
-                return Err(ScanError::InvalidShopState);
-            }
-            values.0 = values.0.checked_add(occurrence.tokens).ok_or(ScanError::InvalidCount)?;
-            if occurrence.tokens == 0 {
-                continue;
-            }
-            let activity = next_activity.entry(occurrence.reward_date.clone()).or_insert_with(|| ActivitySnapshot {
+    }
+    let occurrences = canonical_occurrences(connection)?;
+    let device_id = setting(connection, "planet_device_id")?.ok_or(ScanError::Database)?;
+    let mut next_contributions = BTreeMap::<ContributionKey, (u64, u16, u16)>::new();
+    let mut next_activity = BTreeMap::<String, ActivitySnapshot>::new();
+    for occurrence in &occurrences {
+        let key = ContributionKey {
+            device_id: device_id.clone(),
+            cycle_id: occurrence.cycle_id.clone(),
+            date: occurrence.growth_date.clone(),
+            effect_revision: occurrence.effect_revision,
+        };
+        let values = next_contributions.entry(key).or_insert((
+            0,
+            occurrence.effects.civilization_growth_bps,
+            occurrence.effects.token_earning_bps,
+        ));
+        if values.1 != occurrence.effects.civilization_growth_bps
+            || values.2 != occurrence.effects.token_earning_bps
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        values.0 = values
+            .0
+            .checked_add(occurrence.tokens)
+            .ok_or(ScanError::InvalidCount)?;
+        if occurrence.tokens == 0 {
+            continue;
+        }
+        let activity = next_activity
+            .entry(occurrence.reward_date.clone())
+            .or_insert_with(|| ActivitySnapshot {
                 reward_date: occurrence.reward_date.clone(),
                 cycle_id: occurrence.cycle_id.clone(),
                 first_occurred_at_utc: occurrence.occurred_at.to_rfc3339(),
                 tokens: 0,
             });
-            activity.tokens = activity.tokens.checked_add(occurrence.tokens).ok_or(ScanError::InvalidCount)?;
-            let first = DateTime::parse_from_rfc3339(&activity.first_occurred_at_utc)
-                .map_err(|_| ScanError::Database)?.with_timezone(&Utc);
-            if occurrence.occurred_at < first {
-                activity.first_occurred_at_utc = occurrence.occurred_at.to_rfc3339();
-                activity.cycle_id = occurrence.cycle_id.clone();
-            }
+        activity.tokens = activity
+            .tokens
+            .checked_add(occurrence.tokens)
+            .ok_or(ScanError::InvalidCount)?;
+        let first = DateTime::parse_from_rfc3339(&activity.first_occurred_at_utc)
+            .map_err(|_| ScanError::Database)?
+            .with_timezone(&Utc);
+        if occurrence.occurred_at < first {
+            activity.first_occurred_at_utc = occurrence.occurred_at.to_rfc3339();
+            activity.cycle_id = occurrence.cycle_id.clone();
         }
-        let old_contributions = contribution_snapshot(connection,&account_id)?;
-        let new_contributions = next_contributions.iter().map(|(key,(tokens,growth,wallet))|
-            (key.clone(),*tokens,*growth,*wallet)).collect::<Vec<_>>();
-        let old_activity = activity_snapshot(connection,&account_id)?;
-        let new_activity = next_activity.values().cloned().collect::<Vec<_>>();
-        let changed = old_contributions != new_contributions || old_activity != new_activity;
-        let stored_version: Option<i64> = connection.query_row(
+    }
+    let old_contributions = contribution_snapshot(connection, &account_id)?;
+    let new_contributions = next_contributions
+        .iter()
+        .map(|(key, (tokens, growth, wallet))| (key.clone(), *tokens, *growth, *wallet))
+        .collect::<Vec<_>>();
+    let old_activity = activity_snapshot(connection, &account_id)?;
+    let new_activity = next_activity.values().cloned().collect::<Vec<_>>();
+    let changed = old_contributions != new_contributions || old_activity != new_activity;
+    let stored_version: Option<i64> = connection
+        .query_row(
             "SELECT canonical_version FROM shop_contribution_state WHERE account_id=?1",
-            [&account_id],|row|row.get(0),
-        ).optional()?;
-        let current_version = stored_version.unwrap_or(0);
-        let next_version = if changed {
-            current_version.checked_add(1).ok_or(ScanError::InvalidCount)?
-        } else {
-            current_version
-        };
-        let transaction = self.connection.transaction()?;
-        if changed {
-            transaction.execute("DELETE FROM shop_effect_contribution WHERE account_id=?1",[&account_id])?;
-            for (key,(tokens,growth_bps,wallet_bps)) in next_contributions {
-                transaction.execute(
-                    "INSERT INTO shop_effect_contribution(account_id,device_id,cycle_id,date,effect_revision,
-                     canonical_version,tokens,growth_bps,wallet_bps) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
-                    params![account_id,key.device_id,key.cycle_id,key.date,
-                        to_i64(key.effect_revision)?,next_version,to_i64(tokens)?,
-                        growth_bps,wallet_bps],
-                )?;
+            [&account_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let current_version = stored_version.unwrap_or(0);
+    let next_version = if changed {
+        current_version
+            .checked_add(1)
+            .ok_or(ScanError::InvalidCount)?
+    } else {
+        current_version
+    };
+    if changed {
+        connection.execute(
+            "DELETE FROM shop_effect_contribution WHERE account_id=?1",
+            [&account_id],
+        )?;
+        for (key, (tokens, growth_bps, wallet_bps)) in next_contributions {
+            connection.execute(
+                "INSERT INTO shop_effect_contribution(account_id,device_id,cycle_id,date,effect_revision,
+                 canonical_version,tokens,growth_bps,wallet_bps) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+                params![
+                    account_id,
+                    key.device_id,
+                    key.cycle_id,
+                    key.date,
+                    to_i64(key.effect_revision)?,
+                    next_version,
+                    to_i64(tokens)?,
+                    growth_bps,
+                    wallet_bps
+                ],
+            )?;
+        }
+        connection.execute(
+            "DELETE FROM shop_activity_day WHERE account_id=?1",
+            [&account_id],
+        )?;
+        for activity in new_activity {
+            connection.execute(
+                "INSERT INTO shop_activity_day(account_id,reward_date,cycle_id,first_occurred_at_utc,
+                 canonical_version,tokens) VALUES (?1,?2,?3,?4,?5,?6)",
+                params![
+                    account_id,
+                    activity.reward_date,
+                    activity.cycle_id,
+                    activity.first_occurred_at_utc,
+                    next_version,
+                    to_i64(activity.tokens)?
+                ],
+            )?;
+        }
+    }
+    connection.execute(
+        "INSERT INTO shop_contribution_state(account_id,canonical_version) VALUES (?1,?2)
+         ON CONFLICT(account_id) DO UPDATE SET canonical_version=excluded.canonical_version",
+        params![account_id, next_version],
+    )?;
+    Ok(())
+}
+
+fn normalize_account_uuid(value: &str) -> Result<String, ScanError> {
+    let value = value.strip_prefix("account:").unwrap_or(value);
+    uuid::Uuid::parse_str(value)
+        .map(|value| value.to_string())
+        .map_err(|_| ScanError::InvalidShopState)
+}
+
+fn parse_utc(value: &str) -> Result<DateTime<Utc>, ScanError> {
+    let parsed = DateTime::parse_from_rfc3339(value).map_err(|_| ScanError::InvalidShopState)?;
+    if parsed.offset().local_minus_utc() != 0 {
+        return Err(ScanError::InvalidShopState);
+    }
+    Ok(parsed.with_timezone(&Utc))
+}
+
+fn validate_effect_caps(effects: &ActiveEffects) -> Result<(), ScanError> {
+    if effects.token_earning_bps > 3_000
+        || effects.civilization_growth_bps > 2_000
+        || effects.shop_discount_bps > 1_500
+        || effects.reset_cooldown_bps > 2_500
+        || effects.natural_removal_discount_bps > 3_000
+        || effects.era_reward_tokens > 10_000_000
+        || effects.streak_reward_tokens > 500_000
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+    Ok(())
+}
+
+fn validate_shop_effect_timeline(
+    timeline: &ShopEffectTimeline,
+) -> Result<Vec<EffectHistory>, ScanError> {
+    if timeline.account_id.starts_with("account:") {
+        return Err(ScanError::InvalidShopState);
+    }
+    normalize_account_uuid(&timeline.account_id)?;
+    if timeline.current_cycle_id.trim().is_empty()
+        || to_i64(timeline.effect_revision).is_err()
+        || timeline.reward_timezone.parse::<Tz>().is_err()
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+    let server_time = parse_utc(&timeline.server_time_utc)?;
+    let mut histories = Vec::with_capacity(timeline.intervals.len());
+    let mut previous_started = None;
+    let mut previous_ended = None;
+    let mut previous_revision = 0;
+    for (index, interval) in timeline.intervals.iter().enumerate() {
+        if interval.cycle_id.trim().is_empty()
+            || interval.revision == 0
+            || interval.revision <= previous_revision
+            || interval.revision > timeline.effect_revision
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        let started_at = parse_utc(&interval.started_at_utc)?;
+        let ended_at = interval.ended_at_utc.as_deref().map(parse_utc).transpose()?;
+        if started_at > server_time
+            || previous_started.is_some_and(|previous| started_at <= previous)
+            || previous_ended.is_some_and(|previous| previous != started_at)
+            || ended_at.is_some_and(|ended| ended <= started_at || ended > server_time)
+            || (index + 1 < timeline.intervals.len() && ended_at.is_none())
+            || (index + 1 == timeline.intervals.len() && ended_at.is_some())
+            || interval.active_instance_ids.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        validate_effect_caps(&interval.effects)?;
+        histories.push(EffectHistory {
+            cycle_id: interval.cycle_id.clone(),
+            revision: interval.revision,
+            started_at,
+            ended_at,
+            active_instance_ids: interval.active_instance_ids.clone(),
+            effects: interval.effects.clone(),
+        });
+        previous_started = Some(started_at);
+        previous_ended = ended_at;
+        previous_revision = interval.revision;
+    }
+    if histories.last().map(|history| history.revision) != Some(timeline.effect_revision)
+        && !(histories.is_empty() && timeline.effect_revision == 0)
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+    if histories
+        .last()
+        .is_some_and(|history| history.cycle_id != timeline.current_cycle_id)
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+    Ok(histories)
+}
+
+fn load_confirmed_timeline(
+    connection: &Connection,
+    account_id: &str,
+) -> Result<Option<ConfirmedEffectTimelineState>, ScanError> {
+    let stored: Option<(String, i64, String, String)> = connection
+        .query_row(
+            "SELECT current_cycle_id,effect_revision,server_time_utc,reward_timezone
+             FROM shop_effect_timeline_state WHERE account_id=?1",
+            [account_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((current_cycle_id, effect_revision, server_time, reward_timezone)) = stored else {
+        return Ok(None);
+    };
+    Ok(Some(ConfirmedEffectTimelineState {
+        current_cycle_id,
+        effect_revision: to_u64(effect_revision)?,
+        server_time: parse_utc(&server_time)?,
+        reward_timezone,
+        intervals: effect_histories(connection, account_id)?,
+    }))
+}
+
+fn same_interval_content(left: &EffectHistory, right: &EffectHistory) -> bool {
+    left.cycle_id == right.cycle_id
+        && left.revision == right.revision
+        && left.started_at == right.started_at
+        && left.ended_at == right.ended_at
+        && left.active_instance_ids == right.active_instance_ids
+        && left.effects == right.effects
+}
+
+fn validate_timeline_successor(
+    prior: &ConfirmedEffectTimelineState,
+    incoming_timeline: &ShopEffectTimeline,
+    incoming: &[EffectHistory],
+) -> Result<(), ScanError> {
+    let incoming_server_time = parse_utc(&incoming_timeline.server_time_utc)?;
+    if incoming_server_time < prior.server_time
+        || incoming_timeline.reward_timezone != prior.reward_timezone
+        || incoming_timeline.effect_revision < prior.effect_revision
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+    if incoming_timeline.effect_revision == prior.effect_revision {
+        if incoming_timeline.current_cycle_id != prior.current_cycle_id
+            || incoming.len() != prior.intervals.len()
+            || !incoming
+                .iter()
+                .zip(&prior.intervals)
+                .all(|(new, old)| same_interval_content(new, old))
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        return Ok(());
+    }
+    if incoming.len() < prior.intervals.len() {
+        return Err(ScanError::InvalidShopState);
+    }
+    for (index, old) in prior.intervals.iter().enumerate() {
+        let new = &incoming[index];
+        if old.cycle_id != new.cycle_id
+            || old.revision != new.revision
+            || old.started_at != new.started_at
+            || old.active_instance_ids != new.active_instance_ids
+            || old.effects != new.effects
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        match old.ended_at {
+            Some(old_end) if new.ended_at != Some(old_end) => {
+                return Err(ScanError::InvalidShopState);
             }
-            transaction.execute("DELETE FROM shop_activity_day WHERE account_id=?1",[&account_id])?;
-            for activity in new_activity {
+            None => {
+                let Some(new_end) = new.ended_at else {
+                    return Err(ScanError::InvalidShopState);
+                };
+                if new_end < prior.server_time {
+                    return Err(ScanError::InvalidShopState);
+                }
+            }
+            _ => {}
+        }
+    }
+    for added in &incoming[prior.intervals.len()..] {
+        if added.revision <= prior.effect_revision || added.started_at < prior.server_time {
+            return Err(ScanError::InvalidShopState);
+        }
+    }
+    if incoming.is_empty() || incoming.last().map(|interval| interval.revision) != Some(incoming_timeline.effect_revision) {
+        return Err(ScanError::InvalidShopState);
+    }
+    Ok(())
+}
+
+impl Ledger {
+    pub fn rebuild_shop_contributions(&mut self) -> Result<(), ScanError> {
+        let transaction = self.connection.transaction()?;
+        rebuild_shop_contributions_in_transaction(&transaction)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    /// Applies a server-confirmed personal effect timeline and rebuilds this
+    /// device's canonical contribution snapshot in one transaction.
+    pub fn apply_confirmed_shop_effect_timeline(
+        &mut self,
+        timeline: &ShopEffectTimeline,
+        expected_account_id: &str,
+        expected_cycle_id: &str,
+    ) -> Result<(), ScanError> {
+        let transaction = self.connection.transaction()?;
+        let actual_account = current_account_id(&transaction)?;
+        let actual_cycle = current_cycle_id(&transaction)?;
+        let expected_account = normalize_account_uuid(expected_account_id)?;
+        let timeline_account = normalize_account_uuid(&timeline.account_id)?;
+        if !actual_account.starts_with("account:")
+            || normalize_account_uuid(&actual_account)? != expected_account
+            || timeline_account != expected_account
+            || actual_cycle != expected_cycle_id
+            || timeline.current_cycle_id != expected_cycle_id
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+
+        let incoming = validate_shop_effect_timeline(timeline)?;
+        let prior = load_confirmed_timeline(&transaction, &actual_account)?;
+        if let Some(prior) = &prior {
+            validate_timeline_successor(prior, timeline, &incoming)?;
+        }
+
+        if prior.as_ref().is_none_or(|prior| prior.effect_revision != timeline.effect_revision) {
+            transaction.execute("DELETE FROM shop_effect_history WHERE account_id=?1",[&actual_account])?;
+            for interval in &incoming {
                 transaction.execute(
-                    "INSERT INTO shop_activity_day(account_id,reward_date,cycle_id,first_occurred_at_utc,
-                     canonical_version,tokens) VALUES (?1,?2,?3,?4,?5,?6)",
-                    params![account_id,activity.reward_date,activity.cycle_id,
-                        activity.first_occurred_at_utc,next_version,to_i64(activity.tokens)?],
+                    "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+                     ended_at_utc,active_instance_ids_json,effects_json)
+                     VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                    params![actual_account,interval.cycle_id,to_i64(interval.revision)?,
+                        interval.started_at.to_rfc3339(),
+                        interval.ended_at.map(|value|value.to_rfc3339()),
+                        serde_json::to_string(&interval.active_instance_ids).map_err(|_|ScanError::Database)?,
+                        serde_json::to_string(&interval.effects).map_err(|_|ScanError::Database)?],
                 )?;
             }
         }
         transaction.execute(
-            "INSERT INTO shop_contribution_state(account_id,canonical_version) VALUES (?1,?2)
-             ON CONFLICT(account_id) DO UPDATE SET canonical_version=excluded.canonical_version",
-            params![account_id,next_version],
+            "INSERT INTO shop_effect_timeline_state(account_id,current_cycle_id,effect_revision,
+             server_time_utc,reward_timezone) VALUES (?1,?2,?3,?4,?5)
+             ON CONFLICT(account_id) DO UPDATE SET current_cycle_id=excluded.current_cycle_id,
+             effect_revision=excluded.effect_revision,server_time_utc=excluded.server_time_utc,
+             reward_timezone=excluded.reward_timezone",
+            params![actual_account,timeline.current_cycle_id,to_i64(timeline.effect_revision)?,
+                parse_utc(&timeline.server_time_utc)?.to_rfc3339(),timeline.reward_timezone],
         )?;
+        transaction.execute(
+            "UPDATE shop_account_state SET reward_timezone=?2 WHERE account_id=?1",
+            params![actual_account,timeline.reward_timezone],
+        )?;
+        rebuild_shop_contributions_in_transaction(&transaction)?;
         transaction.commit()?;
         Ok(())
     }
@@ -377,6 +691,13 @@ impl Ledger {
              );
              CREATE INDEX IF NOT EXISTS shop_effect_history_by_time
                 ON shop_effect_history(account_id,cycle_id,started_at_utc,ended_at_utc);
+             CREATE TABLE IF NOT EXISTS shop_effect_timeline_state (
+                account_id TEXT PRIMARY KEY,
+                current_cycle_id TEXT NOT NULL,
+                effect_revision INTEGER NOT NULL CHECK(effect_revision >= 0),
+                server_time_utc TEXT NOT NULL,
+                reward_timezone TEXT NOT NULL
+             );
              CREATE TABLE IF NOT EXISTS shop_effect_contribution (
                 account_id TEXT NOT NULL,
                 device_id TEXT NOT NULL,
@@ -518,17 +839,18 @@ fn current_cycle_id(connection:&Connection)->Result<String,ScanError> {
 
 fn effect_histories(connection:&Connection,account_id:&str)->Result<Vec<EffectHistory>,ScanError> {
     let mut statement=connection.prepare(
-        "SELECT cycle_id,revision,started_at_utc,ended_at_utc,effects_json
+        "SELECT cycle_id,revision,started_at_utc,ended_at_utc,active_instance_ids_json,effects_json
          FROM shop_effect_history WHERE account_id=?1 ORDER BY started_at_utc,revision",
     )?;
     let rows=statement.query_map([account_id],|row|{
         let started:String=row.get(2)?;
         let ended:Option<String>=row.get(3)?;
-        let effects:String=row.get(4)?;
-        Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,started,ended,effects))
+        let active_instance_ids:String=row.get(4)?;
+        let effects:String=row.get(5)?;
+        Ok((row.get::<_,String>(0)?,row.get::<_,i64>(1)?,started,ended,active_instance_ids,effects))
     })?;
     rows.map(|row|{
-        let(cycle_id,revision,started,ended,effects)=row?;
+        let(cycle_id,revision,started,ended,active_instance_ids,effects)=row?;
         Ok(EffectHistory{
             cycle_id,
             revision:to_u64(revision)?,
@@ -536,6 +858,7 @@ fn effect_histories(connection:&Connection,account_id:&str)->Result<Vec<EffectHi
                 .map_err(|_|ScanError::Database)?.with_timezone(&Utc),
             ended_at:ended.map(|value|DateTime::parse_from_rfc3339(&value)
                 .map(|time|time.with_timezone(&Utc)).map_err(|_|ScanError::Database)).transpose()?,
+            active_instance_ids:serde_json::from_str(&active_instance_ids).map_err(|_|ScanError::Database)?,
             effects:serde_json::from_str(&effects).map_err(|_|ScanError::Database)?,
         })
     }).collect()
@@ -564,8 +887,15 @@ fn canonical_occurrences(connection:&Connection)->Result<Vec<CanonicalOccurrence
     let device_id=setting(connection,"planet_device_id")?.ok_or(ScanError::Database)?;
     let growth_timezone=setting(connection,"planet_timezone")?
         .ok_or(ScanError::Database)?.parse::<Tz>().map_err(|_|ScanError::TimezoneMismatch)?;
-    let reward_timezone=load_shop_reward_state(connection,&account_id,&current_cycle)?
-        .reward_timezone.parse::<Tz>().map_err(|_|ScanError::TimezoneMismatch)?;
+    let confirmed_timezone: Option<String> = connection.query_row(
+        "SELECT reward_timezone FROM shop_effect_timeline_state WHERE account_id=?1",
+        [&account_id],
+        |row| row.get(0),
+    ).optional()?;
+    let reward_timezone = match confirmed_timezone {
+        Some(value) => value,
+        None => load_shop_reward_state(connection,&account_id,&current_cycle)?.reward_timezone,
+    }.parse::<Tz>().map_err(|_|ScanError::TimezoneMismatch)?;
     let histories=effect_histories(connection,&account_id)?;
     let mut statement=connection.prepare(
         "SELECT r.event_key,r.occurred_at_utc,r.total_tokens
@@ -681,7 +1011,9 @@ fn record_game_reward(
 mod tests {
     use super::Ledger;
     use crate::collectors::{ParsedRecord, RecordKind};
-    use crate::domain::cosmetic_shop::{ActiveEffects, EffectContribution};
+    use crate::domain::cosmetic_shop::{
+        ActiveEffects, EffectContribution, ShopEffectInterval, ShopEffectTimeline,
+    };
     use crate::domain::shop_effects::weighted_growth;
     use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
     use chrono::{DateTime, Utc};
@@ -697,6 +1029,78 @@ mod tests {
             [],
         ).unwrap();
         ledger
+    }
+
+    fn signed_timeline(
+        account_id: &str,
+        cycle_id: &str,
+        effect_revision: u64,
+        server_time_utc: &str,
+        intervals: Vec<ShopEffectInterval>,
+    ) -> ShopEffectTimeline {
+        ShopEffectTimeline {
+            account_id: account_id.into(),
+            current_cycle_id: cycle_id.into(),
+            effect_revision,
+            server_time_utc: server_time_utc.into(),
+            reward_timezone: "UTC".into(),
+            intervals,
+        }
+    }
+
+    fn effect_interval(
+        cycle_id: &str,
+        revision: u64,
+        started_at_utc: &str,
+        ended_at_utc: Option<&str>,
+        active_instance_ids: &[&str],
+        effects: ActiveEffects,
+    ) -> ShopEffectInterval {
+        ShopEffectInterval {
+            cycle_id: cycle_id.into(),
+            revision,
+            started_at_utc: started_at_utc.into(),
+            ended_at_utc: ended_at_utc.map(str::to_owned),
+            active_instance_ids: active_instance_ids.iter().map(|id| (*id).into()).collect(),
+            effects,
+        }
+    }
+
+    fn signed_account(ledger: &mut Ledger) -> (String, String) {
+        let account_id = "00000000-0000-0000-0000-000000000031";
+        ledger.ensure_planet_account(account_id).unwrap();
+        (account_id.into(), ledger.planet_cycle_id().unwrap())
+    }
+
+    fn one_interval_timeline(
+        account_id: &str,
+        cycle_id: &str,
+        server_time_utc: &str,
+        effects: ActiveEffects,
+        active_instance_ids: &[&str],
+    ) -> ShopEffectTimeline {
+        signed_timeline(
+            account_id,
+            cycle_id,
+            1,
+            server_time_utc,
+            vec![effect_interval(
+                cycle_id,
+                1,
+                "2026-09-24T00:00:00Z",
+                None,
+                active_instance_ids,
+                effects,
+            )],
+        )
+    }
+
+    fn contribution_version(ledger: &Ledger, account_id: &str) -> i64 {
+        ledger.connection.query_row(
+            "SELECT canonical_version FROM shop_contribution_state WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| row.get(0),
+        ).unwrap()
     }
 
     fn add_event(ledger: &mut Ledger, key: &str, at: &str, tokens: u64) {
@@ -940,6 +1344,579 @@ mod tests {
             [&account],|row|row.get(0),
         ).unwrap();
         assert_eq!(still_stored_version,stored_version);
+    }
+
+    #[test]
+    fn confirmed_effect_timeline_rebuilds_signed_usage_from_server_intervals_without_rewards() {
+        let mut ledger = ledger();
+        let user_id = "00000000-0000-0000-0000-000000000031";
+        ledger.ensure_planet_account(user_id).unwrap();
+        let cycle_id = ledger.planet_cycle_id().unwrap();
+        add_event(&mut ledger,"signed-timeline-event","2026-09-25T12:00:00Z",100_000);
+        let timeline: ShopEffectTimeline = serde_json::from_value(serde_json::json!({
+            "account_id": user_id,
+            "current_cycle_id": cycle_id,
+            "effect_revision": 1,
+            "server_time_utc": "2026-10-01T00:00:00Z",
+            "reward_timezone": "UTC",
+            "intervals": [{
+                "cycle_id": cycle_id,
+                "revision": 1,
+                "started_at_utc": "2026-09-24T00:00:00Z",
+                "ended_at_utc": null,
+                "active_instance_ids": [],
+                "effects": {
+                    "token_earning_bps": 100,
+                    "civilization_growth_bps": 1_000,
+                    "shop_discount_bps": 0,
+                    "reset_cooldown_bps": 0,
+                    "natural_removal_discount_bps": 0,
+                    "era_reward_tokens": 0,
+                    "streak_reward_tokens": 0,
+                },
+            }],
+        })).unwrap();
+
+        ledger.apply_confirmed_shop_effect_timeline(&timeline,user_id,&cycle_id).unwrap();
+
+        let account_id = format!("account:{user_id}");
+        let (tokens,growth_bps,wallet_bps):(i64,i64,i64) = ledger.connection.query_row(
+            "SELECT tokens,growth_bps,wallet_bps FROM shop_effect_contribution
+             WHERE account_id=?1 AND cycle_id=?2",
+            rusqlite::params![account_id,cycle_id],
+            |row|Ok((row.get(0)?,row.get(1)?,row.get(2)?)),
+        ).unwrap();
+        assert_eq!((tokens,growth_bps,wallet_bps),(100_000,1_000,100));
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_game_reward WHERE account_id=?1",
+            [&account_id],|row|row.get(0),
+        ).unwrap(),0);
+    }
+
+    #[test]
+    fn same_revision_clock_refresh_preserves_history_and_canonical_version() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        add_event(&mut ledger, "timeline-clock-event", "2026-09-25T12:00:00Z", 100_000);
+        let effects = ActiveEffects {
+            token_earning_bps: 100,
+            civilization_growth_bps: 1_000,
+            ..ActiveEffects::default()
+        };
+        let initial = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            effects.clone(),
+            &["instance-1"],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&initial, &account_id, &cycle_id).unwrap();
+        let version = contribution_version(&ledger, &account_id);
+        let history_before: (String, String) = ledger.connection.query_row(
+            "SELECT active_instance_ids_json,effects_json FROM shop_effect_history WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+
+        let refreshed = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T01:00:00Z",
+            effects,
+            &["instance-1"],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&refreshed, &account_id, &cycle_id).unwrap();
+
+        assert_eq!(contribution_version(&ledger, &account_id), version);
+        let history_after: (String, String) = ledger.connection.query_row(
+            "SELECT active_instance_ids_json,effects_json FROM shop_effect_history WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(history_after, history_before);
+        let (revision, server_time): (i64, String) = ledger.connection.query_row(
+            "SELECT effect_revision,server_time_utc FROM shop_effect_timeline_state WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((revision, server_time.as_str()), (1, "2026-10-01T01:00:00+00:00"));
+    }
+
+    #[test]
+    fn first_confirmed_timezone_replaces_local_placeholder_and_is_then_immutable() {
+        let mut ledger = ledger();
+        ledger.set_planet_timezone("Pacific/Kiritimati").unwrap();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        add_event(&mut ledger, "timeline-timezone-event", "2026-10-01T23:30:00Z", 100_000);
+        let mut timeline = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-02T00:00:00Z",
+            ActiveEffects::default(),
+            &[],
+        );
+        timeline.reward_timezone = "UTC".into();
+        ledger.apply_confirmed_shop_effect_timeline(&timeline, &account_id, &cycle_id).unwrap();
+
+        let reward_date: String = ledger.connection.query_row(
+            "SELECT reward_date FROM shop_activity_day WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| row.get(0),
+        ).unwrap();
+        let account_timezone: String = ledger.connection.query_row(
+            "SELECT reward_timezone FROM shop_account_state WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| row.get(0),
+        ).unwrap();
+        let planet_timezone = ledger.planet_timezone().unwrap().to_string();
+        assert_eq!(reward_date, "2026-10-01");
+        assert_eq!(account_timezone, "UTC");
+        assert_eq!(planet_timezone, "Pacific/Kiritimati");
+
+        timeline.reward_timezone = "Asia/Seoul".into();
+        timeline.server_time_utc = "2026-10-02T01:00:00Z".into();
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&timeline, &account_id, &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+        let stored_timezone: String = ledger.connection.query_row(
+            "SELECT reward_timezone FROM shop_effect_timeline_state WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stored_timezone, "UTC");
+    }
+
+    #[test]
+    fn timeline_rejects_stale_account_cycle_revision_and_same_revision_content_conflicts() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        add_event(&mut ledger, "timeline-conflict-event", "2026-09-25T12:00:00Z", 100_000);
+        let initial = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            ActiveEffects::default(),
+            &[],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&initial, &account_id, &cycle_id).unwrap();
+        let before_version = contribution_version(&ledger, &account_id);
+
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&initial, "00000000-0000-0000-0000-000000000032", &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&initial, &account_id, "stale-cycle"),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+
+        let mut conflicting = initial.clone();
+        conflicting.intervals[0].effects.token_earning_bps = 100;
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&conflicting, &account_id, &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+        let stale_revision = signed_timeline(&account_id, &cycle_id, 0, "2026-10-01T01:00:00Z", vec![]);
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&stale_revision, &account_id, &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+
+        assert_eq!(contribution_version(&ledger, &account_id), before_version);
+        let (revision, effect_json): (i64, String) = ledger.connection.query_row(
+            "SELECT t.effect_revision,h.effects_json FROM shop_effect_timeline_state t
+             JOIN shop_effect_history h USING(account_id) WHERE t.account_id=?1",
+            [format!("account:{account_id}")],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!(revision, 1);
+        assert_eq!(effect_json, serde_json::to_string(&ActiveEffects::default()).unwrap());
+    }
+
+    #[test]
+    fn timeline_rejects_uncapped_effects_noncanonical_ids_non_utc_overlaps_and_gaps() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        let over_cap = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            ActiveEffects {
+                token_earning_bps: 3_001,
+                ..ActiveEffects::default()
+            },
+            &[],
+        );
+        let unsorted_ids = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            ActiveEffects::default(),
+            &["instance-b", "instance-a"],
+        );
+        let mut non_utc = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            ActiveEffects::default(),
+            &[],
+        );
+        let mut local_account_key = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            ActiveEffects::default(),
+            &[],
+        );
+        let overlapping = signed_timeline(
+            &account_id,
+            &cycle_id,
+            2,
+            "2026-10-02T00:00:00Z",
+            vec![
+                effect_interval(
+                    &cycle_id,
+                    1,
+                    "2026-09-24T00:00:00Z",
+                    Some("2026-10-01T12:00:00Z"),
+                    &[],
+                    ActiveEffects::default(),
+                ),
+                effect_interval(
+                    &cycle_id,
+                    2,
+                    "2026-10-01T11:00:00Z",
+                    None,
+                    &[],
+                    ActiveEffects::default(),
+                ),
+            ],
+        );
+        let gap = signed_timeline(
+            &account_id,
+            &cycle_id,
+            2,
+            "2026-10-02T00:00:00Z",
+            vec![
+                effect_interval(
+                    &cycle_id,
+                    1,
+                    "2026-09-24T00:00:00Z",
+                    Some("2026-10-01T12:00:00Z"),
+                    &[],
+                    ActiveEffects::default(),
+                ),
+                effect_interval(
+                    &cycle_id,
+                    2,
+                    "2026-10-01T13:00:00Z",
+                    None,
+                    &[],
+                    ActiveEffects::default(),
+                ),
+            ],
+        );
+        non_utc.intervals[0].started_at_utc = "2026-09-24T00:00:00+01:00".into();
+        local_account_key.account_id = format!("account:{account_id}");
+
+        for invalid in [over_cap, unsorted_ids, non_utc, local_account_key, overlapping, gap] {
+            assert_eq!(
+                ledger.apply_confirmed_shop_effect_timeline(&invalid, &account_id, &cycle_id),
+                Err(crate::storage::ledger::ScanError::InvalidShopState),
+            );
+        }
+        let stored_count: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM shop_effect_timeline_state WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stored_count, 0);
+    }
+
+    #[test]
+    fn higher_timeline_revision_rebuilds_late_usage_from_occurrence_intervals() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        let old_effects = ActiveEffects {
+            token_earning_bps: 100,
+            civilization_growth_bps: 1_000,
+            ..ActiveEffects::default()
+        };
+        let initial = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            old_effects.clone(),
+            &["instance-1"],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&initial, &account_id, &cycle_id).unwrap();
+        let before_version = contribution_version(&ledger, &account_id);
+
+        add_event(&mut ledger, "late-before-effect-change", "2026-10-01T06:00:00Z", 5_000);
+        add_event(&mut ledger, "late-after-effect-change", "2026-10-01T18:00:00Z", 7_000);
+        let new_effects = ActiveEffects {
+            token_earning_bps: 200,
+            ..ActiveEffects::default()
+        };
+        let updated = signed_timeline(
+            &account_id,
+            &cycle_id,
+            2,
+            "2026-10-02T00:00:00Z",
+            vec![
+                effect_interval(
+                    &cycle_id,
+                    1,
+                    "2026-09-24T00:00:00Z",
+                    Some("2026-10-01T12:00:00Z"),
+                    &["instance-1"],
+                    old_effects,
+                ),
+                effect_interval(
+                    &cycle_id,
+                    2,
+                    "2026-10-01T12:00:00Z",
+                    None,
+                    &["instance-1", "instance-2"],
+                    new_effects,
+                ),
+            ],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&updated, &account_id, &cycle_id).unwrap();
+
+        let rows: Vec<(i64, i64, i64, i64)> = {
+            let mut statement = ledger.connection.prepare(
+                "SELECT effect_revision,tokens,growth_bps,wallet_bps FROM shop_effect_contribution
+                 WHERE account_id=?1 AND date='2026-10-01' ORDER BY effect_revision",
+            ).unwrap();
+            statement.query_map([format!("account:{account_id}")], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            }).unwrap().collect::<Result<Vec<_>, _>>().unwrap()
+        };
+        assert_eq!(rows, vec![(1, 5_000, 1_000, 100), (2, 7_000, 0, 200)]);
+        let updated_version = contribution_version(&ledger, &account_id);
+        assert!(updated_version > before_version);
+        let rewritten_closed_interval = signed_timeline(
+            &account_id,
+            &cycle_id,
+            3,
+            "2026-10-03T00:00:00Z",
+            vec![
+                effect_interval(
+                    &cycle_id,
+                    1,
+                    "2026-09-24T00:00:00Z",
+                    Some("2026-10-01T12:00:00Z"),
+                    &["instance-1"],
+                    ActiveEffects {
+                        token_earning_bps: 100,
+                        civilization_growth_bps: 999,
+                        ..ActiveEffects::default()
+                    },
+                ),
+                effect_interval(
+                    &cycle_id,
+                    2,
+                    "2026-10-01T12:00:00Z",
+                    Some("2026-10-02T12:00:00Z"),
+                    &["instance-1", "instance-2"],
+                    ActiveEffects {
+                        token_earning_bps: 200,
+                        ..ActiveEffects::default()
+                    },
+                ),
+                effect_interval(
+                    &cycle_id,
+                    3,
+                    "2026-10-02T12:00:00Z",
+                    None,
+                    &["instance-1", "instance-2"],
+                    ActiveEffects {
+                        token_earning_bps: 200,
+                        ..ActiveEffects::default()
+                    },
+                ),
+            ],
+        );
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&rewritten_closed_interval, &account_id, &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+        assert_eq!(contribution_version(&ledger, &account_id), updated_version);
+        ledger.settle_guest_rewards(Utc::now()).unwrap();
+        ledger.settle_guest_cycle_tokens(&cycle_id, Utc::now()).unwrap();
+        let local_rewards: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM shop_game_reward WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(local_rewards, 0);
+    }
+
+    #[test]
+    fn higher_revision_with_unchanged_event_mapping_advances_timeline_not_contributions() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        add_event(&mut ledger, "timeline-revision-event", "2026-09-25T12:00:00Z", 100_000);
+        let effects = ActiveEffects {
+            token_earning_bps: 100,
+            civilization_growth_bps: 1_000,
+            ..ActiveEffects::default()
+        };
+        let initial = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            effects.clone(),
+            &["instance-1"],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&initial, &account_id, &cycle_id).unwrap();
+        let version = contribution_version(&ledger, &account_id);
+        let updated = signed_timeline(
+            &account_id,
+            &cycle_id,
+            2,
+            "2026-10-02T00:00:00Z",
+            vec![
+                effect_interval(
+                    &cycle_id,
+                    1,
+                    "2026-09-24T00:00:00Z",
+                    Some("2026-10-01T12:00:00Z"),
+                    &["instance-1"],
+                    effects.clone(),
+                ),
+                effect_interval(
+                    &cycle_id,
+                    2,
+                    "2026-10-01T12:00:00Z",
+                    None,
+                    &["instance-1"],
+                    effects,
+                ),
+            ],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&updated, &account_id, &cycle_id).unwrap();
+
+        assert_eq!(contribution_version(&ledger, &account_id), version);
+        let timeline_revision: i64 = ledger.connection.query_row(
+            "SELECT effect_revision FROM shop_effect_timeline_state WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(timeline_revision, 2);
+    }
+
+    #[test]
+    fn failed_contribution_rebuild_rolls_back_timeline_history_and_metadata() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        add_event(&mut ledger, "atomic-baseline-event", "2026-10-03T01:00:00Z", 100_000);
+        let initial_effects = ActiveEffects {
+            token_earning_bps: 100,
+            ..ActiveEffects::default()
+        };
+        let initial = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-03T00:00:00Z",
+            initial_effects.clone(),
+            &["instance-1"],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&initial, &account_id, &cycle_id).unwrap();
+        let before_version = contribution_version(&ledger, &account_id);
+        let account_key = format!("account:{account_id}");
+        ledger.connection.execute(
+            "INSERT INTO usage_record(event_key,source_id,agent,kind,bucket_date,occurred_at_utc,
+             total_tokens,coverage,parser_version)
+             VALUES ('atomic-overflow-event','test:atomic-overflow','codex','response',
+             '2026-10-03','2026-10-03T01:30:00+00:00',?1,'complete',1)",
+            [i64::MAX],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO planet_usage_owner(event_key,account_id) VALUES ('atomic-overflow-event',?1)",
+            [&account_key],
+        ).unwrap();
+        let updated = signed_timeline(
+            &account_id,
+            &cycle_id,
+            2,
+            "2026-10-04T00:00:00Z",
+            vec![
+                effect_interval(
+                    &cycle_id,
+                    1,
+                    "2026-09-24T00:00:00Z",
+                    Some("2026-10-03T02:00:00Z"),
+                    &["instance-1"],
+                    initial_effects,
+                ),
+                effect_interval(
+                    &cycle_id,
+                    2,
+                    "2026-10-03T02:00:00Z",
+                    None,
+                    &["instance-2"],
+                    ActiveEffects::default(),
+                ),
+            ],
+        );
+
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&updated, &account_id, &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidCount),
+        );
+
+        let (revision, server_time): (i64, String) = ledger.connection.query_row(
+            "SELECT effect_revision,server_time_utc FROM shop_effect_timeline_state WHERE account_id=?1",
+            [&account_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((revision, server_time.as_str()), (1, "2026-10-03T00:00:00+00:00"));
+        let (history_count, open_revision): (i64, i64) = ledger.connection.query_row(
+            "SELECT count(*),max(revision) FROM shop_effect_history
+             WHERE account_id=?1 AND ended_at_utc IS NULL",
+            [&account_key],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        ).unwrap();
+        assert_eq!((history_count, open_revision), (1, 1));
+        assert_eq!(contribution_version(&ledger, &account_id), before_version);
+        let stored_tokens: i64 = ledger.connection.query_row(
+            "SELECT tokens FROM shop_effect_contribution WHERE account_id=?1",
+            [&account_key],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(stored_tokens, 100_000);
+    }
+
+    #[test]
+    fn account_switch_cannot_apply_a_previous_account_timeline() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        let timeline = one_interval_timeline(
+            &account_id,
+            &cycle_id,
+            "2026-10-01T00:00:00Z",
+            ActiveEffects::default(),
+            &[],
+        );
+        ledger.apply_confirmed_shop_effect_timeline(&timeline, &account_id, &cycle_id).unwrap();
+
+        let next_account = "00000000-0000-0000-0000-000000000032";
+        ledger.ensure_planet_account(next_account).unwrap();
+        let next_cycle = ledger.planet_cycle_id().unwrap();
+        assert_ne!(cycle_id, next_cycle);
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&timeline, &account_id, &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+        let old_account_timeline: i64 = ledger.connection.query_row(
+            "SELECT effect_revision FROM shop_effect_timeline_state WHERE account_id=?1",
+            [format!("account:{account_id}")],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(old_account_timeline, 1);
     }
 
     #[test]

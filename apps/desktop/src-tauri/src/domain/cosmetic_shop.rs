@@ -106,6 +106,28 @@ pub struct ActiveEffects {
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
+pub struct ShopEffectTimeline {
+    pub account_id: String,
+    pub current_cycle_id: String,
+    pub effect_revision: u64,
+    pub server_time_utc: String,
+    pub reward_timezone: String,
+    pub intervals: Vec<ShopEffectInterval>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ShopEffectInterval {
+    pub cycle_id: String,
+    pub revision: u64,
+    pub started_at_utc: String,
+    pub ended_at_utc: Option<String>,
+    pub active_instance_ids: Vec<String>,
+    pub effects: ActiveEffects,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct EffectContribution {
     pub device_id: String,
     pub cycle_id: String,
@@ -599,5 +621,59 @@ pub fn legacy_equivalent(new_sku: &str) -> Option<&'static str> {
         "flag_v2" => Some("flag"),
         "crystal_tower_v2" => Some("crystal_tower"),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod effect_timeline_tests {
+    use super::{ActiveEffects, ShopEffectInterval, ShopEffectTimeline};
+
+    #[test]
+    fn confirmed_effect_timeline_uses_only_the_personal_wire_contract() {
+        let timeline = ShopEffectTimeline {
+            account_id: "00000000-0000-0000-0000-000000000031".into(),
+            current_cycle_id: "cycle-current".into(),
+            effect_revision: 1,
+            server_time_utc: "2026-10-01T00:00:00+00:00".into(),
+            reward_timezone: "UTC".into(),
+            intervals: vec![ShopEffectInterval {
+                cycle_id: "cycle-current".into(),
+                revision: 1,
+                started_at_utc: "2026-09-24T00:00:00+00:00".into(),
+                ended_at_utc: None,
+                active_instance_ids: vec!["instance-1".into()],
+                effects: ActiveEffects {
+                    token_earning_bps: 100,
+                    ..ActiveEffects::default()
+                },
+            }],
+        };
+
+        assert_eq!(
+            serde_json::to_value(timeline).unwrap(),
+            serde_json::json!({
+                "account_id": "00000000-0000-0000-0000-000000000031",
+                "current_cycle_id": "cycle-current",
+                "effect_revision": 1,
+                "server_time_utc": "2026-10-01T00:00:00+00:00",
+                "reward_timezone": "UTC",
+                "intervals": [{
+                    "cycle_id": "cycle-current",
+                    "revision": 1,
+                    "started_at_utc": "2026-09-24T00:00:00+00:00",
+                    "ended_at_utc": null,
+                    "active_instance_ids": ["instance-1"],
+                    "effects": {
+                        "token_earning_bps": 100,
+                        "civilization_growth_bps": 0,
+                        "shop_discount_bps": 0,
+                        "reset_cooldown_bps": 0,
+                        "natural_removal_discount_bps": 0,
+                        "era_reward_tokens": 0,
+                        "streak_reward_tokens": 0
+                    }
+                }]
+            })
+        );
     }
 }
