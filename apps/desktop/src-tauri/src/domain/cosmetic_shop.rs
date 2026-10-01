@@ -109,6 +109,7 @@ pub struct ActiveEffects {
 pub struct ShopEffectTimeline {
     pub account_id: String,
     pub current_cycle_id: String,
+    /// Account-global high-water revision; sparse visible intervals may end earlier.
     pub effect_revision: u64,
     pub server_time_utc: String,
     pub reward_timezone: String,

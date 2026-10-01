@@ -308,6 +308,7 @@ fn validate_shop_effect_timeline(
             || previous_ended.is_some_and(|previous| started_at < previous)
             || ended_at.is_some_and(|ended| ended <= started_at || ended > server_time)
             || (index + 1 < timeline.intervals.len() && ended_at.is_none())
+            || (ended_at.is_none() && interval.cycle_id != timeline.current_cycle_id)
             || interval.active_instance_ids.windows(2).any(|pair| pair[0] >= pair[1])
             || bound.is_some_and(|bound| {
                 started_at < bound.started_at
@@ -330,8 +331,9 @@ fn validate_shop_effect_timeline(
         previous_ended = ended_at;
         previous_revision = interval.revision;
     }
-    if histories.last().map(|history| history.revision) != Some(timeline.effect_revision)
-        && !(histories.is_empty() && timeline.effect_revision == 0)
+    if histories
+        .iter()
+        .any(|history| history.revision > timeline.effect_revision)
     {
         return Err(ScanError::InvalidShopState);
     }
@@ -513,7 +515,10 @@ fn validate_timeline_successor(
             return Err(ScanError::InvalidShopState);
         }
     }
-    if incoming.is_empty() || incoming.last().map(|interval| interval.revision) != Some(incoming_timeline.effect_revision) {
+    if incoming
+        .iter()
+        .any(|interval| interval.revision > incoming_timeline.effect_revision)
+    {
         return Err(ScanError::InvalidShopState);
     }
     Ok(())
@@ -1888,6 +1893,95 @@ mod tests {
         ).unwrap();
         assert_eq!(revision, 1);
         assert_eq!(effect_json, serde_json::to_string(&ActiveEffects::default()).unwrap());
+    }
+
+    #[test]
+    fn account_global_effect_revision_accepts_sparse_visible_timeline() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        let initial = signed_timeline(
+            &account_id,
+            &cycle_id,
+            7,
+            "2026-10-02T00:00:00Z",
+            vec![],
+        );
+
+        ledger
+            .apply_confirmed_shop_effect_timeline(&initial, &account_id, &cycle_id)
+            .unwrap();
+
+        let mut stale_visible = initial.clone();
+        stale_visible.effect_revision = 8;
+        stale_visible.server_time_utc = "2026-10-03T00:00:00Z".into();
+        stale_visible.intervals = vec![effect_interval(
+            &cycle_id,
+            6,
+            "2026-10-02T00:00:00Z",
+            None,
+            &[],
+            ActiveEffects::default(),
+        )];
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&stale_visible, &account_id, &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
+
+        let mut successor = initial;
+        successor.effect_revision = 8;
+        successor.server_time_utc = "2026-10-03T00:00:00Z".into();
+        successor.intervals = vec![effect_interval(
+            &cycle_id,
+            8,
+            "2026-10-02T00:00:00Z",
+            None,
+            &[],
+            ActiveEffects::default(),
+        )];
+        ledger
+            .apply_confirmed_shop_effect_timeline(&successor, &account_id, &cycle_id)
+            .unwrap();
+
+        let stored_revision: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT effect_revision FROM shop_effect_timeline_state WHERE account_id=?1",
+                [format!("account:{account_id}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_revision, 8);
+    }
+
+    #[test]
+    fn timeline_rejects_open_interval_for_noncurrent_cycle() {
+        let mut ledger = ledger();
+        let (account_id, cycle_id) = signed_account(&mut ledger);
+        let timeline = ShopEffectTimeline {
+            account_id: account_id.clone(),
+            current_cycle_id: cycle_id.clone(),
+            effect_revision: 1,
+            server_time_utc: "2026-10-02T00:00:00Z".into(),
+            reward_timezone: "UTC".into(),
+            cycle_bounds: vec![ShopCycleBound {
+                cycle_id: cycle_id.clone(),
+                started_at_utc: "2026-09-24T00:00:00Z".into(),
+                ended_at_utc: None,
+            }],
+            intervals: vec![effect_interval(
+                "legacy-open-cycle",
+                1,
+                "2026-09-25T00:00:00Z",
+                None,
+                &[],
+                ActiveEffects::default(),
+            )],
+        };
+
+        assert_eq!(
+            ledger.apply_confirmed_shop_effect_timeline(&timeline, &account_id, &cycle_id),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        );
     }
 
     #[test]
