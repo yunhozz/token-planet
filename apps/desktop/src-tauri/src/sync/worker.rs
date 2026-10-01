@@ -7,6 +7,7 @@ use crate::domain::planet::{
 use crate::domain::usage::UsageCoverage;
 use crate::sync::auth::{AuthConfig, SessionStore, SupabaseAuthClient};
 use crate::sync::client::SupabaseSyncClient;
+use crate::storage::ledger::Ledger;
 use crate::AppState;
 
 #[derive(Default)]
@@ -62,6 +63,16 @@ fn bootstrap_contribution_snapshot(
         daily_segments,
         activity_days: Vec::new(),
     })
+}
+
+fn require_guest_shop_import_complete(ledger: &Ledger) -> Result<(), String> {
+    if ledger
+        .has_unimported_guest_shop_state()
+        .map_err(|_| "게스트 상점 가져오기 상태를 확인할 수 없습니다")?
+    {
+        return Err("게스트 상점 가져오기를 완료한 뒤 동기화할 수 있습니다".into());
+    }
+    Ok(())
 }
 
 pub async fn sync_once(state: &AppState) -> Result<(), String> {
@@ -322,7 +333,10 @@ pub async fn import_pending_guest_cosmetics(
 
 #[cfg(test)]
 mod tests {
-    use super::{bootstrap_contribution_snapshot, RetryDelay};
+    use super::{
+        bootstrap_contribution_snapshot, require_guest_shop_import_complete,
+        RetryDelay,
+    };
     use crate::collectors::{ParsedRecord, RecordKind};
     use crate::domain::cosmetic_shop::{
         ActiveEffects, ShopCycleBound, ShopEffectInterval, ShopEffectTimeline,
@@ -353,6 +367,29 @@ mod tests {
                 },
             })
             .unwrap();
+    }
+
+    #[test]
+    fn unimported_guest_shop_ownership_blocks_personal_sync_before_remote_work() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        let guest_account = ledger.cosmetic_account_id().unwrap();
+        let cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+             VALUES (?1,'guest-only-instance','land_tree',0,'seed',1,'2026-10-01T00:00:00Z')",
+            [&guest_account],
+        ).unwrap();
+        ledger.ensure_planet_account("00000000-0000-0000-0000-000000000064").unwrap();
+        assert!(ledger.pending_guest_cosmetic_import().unwrap().is_none());
+
+        let result = require_guest_shop_import_complete(&ledger);
+
+        assert!(result.is_err(), "guest ownership requires a complete import first");
+        assert_eq!(ledger.planet_cycle_id().unwrap(), cycle_id);
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM shop_landscape_instance WHERE account_id=?1 AND instance_id='guest-only-instance'",
+            [&guest_account], |row| row.get(0),
+        ).unwrap(), 1, "the pending guest source row must remain untouched");
     }
 
     #[test]
