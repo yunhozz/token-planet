@@ -4,7 +4,8 @@ use std::{sync::OnceLock, time::Duration};
 
 use crate::domain::cosmetic_shop::{
     CosmeticEquipResult, CosmeticPurchaseResult, CosmeticShopState, GuestCosmeticImport,
-    GuestCosmeticImportResult, QuoteTarget, ShopActionResult, ShopQuote, ShopRequest, ShopState,
+    GuestCosmeticImportResult, QuoteTarget, ResetShopResult, ShopActionResult, ShopActionStatus,
+    ShopQuote, ShopRequest, ShopState,
 };
 use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
 use crate::domain::planet::{PlanetDeviceContribution, PlanetState, WorldPlanet};
@@ -65,6 +66,28 @@ fn guest_import_rpc_body(import: &GuestCosmeticImport) -> serde_json::Value {
         "p_wallet_credits": import.wallet_credits,
         "p_purchases": import.purchases,
     })
+}
+
+fn reset_my_planet_rpc_body(request_id: uuid::Uuid, expected_cycle_id: &str) -> serde_json::Value {
+    serde_json::json!({
+        "p_request_id": request_id.to_string(),
+        "p_cycle_id": expected_cycle_id,
+    })
+}
+
+fn validate_reset_shop_result(
+    result: ResetShopResult,
+    request_id: &str,
+    expected_cycle_id: &str,
+) -> Result<ResetShopResult, SyncError> {
+    if result.action.request_id != request_id
+        || result.action.state.current_cycle_id != result.planet_state.current_cycle_id
+        || (result.action.status == ShopActionStatus::Reset
+            && result.planet_state.current_cycle_id == expected_cycle_id)
+    {
+        return Err(SyncError::InvalidResponse);
+    }
+    Ok(result)
 }
 
 #[derive(Clone, Deserialize, Serialize, PartialEq)]
@@ -175,6 +198,23 @@ impl SupabaseSyncClient {
             &serde_json::json!({ "p_request": request }),
         )
         .await
+    }
+
+    pub async fn reset_my_planet(
+        &self,
+        access_token: &str,
+        request_id: uuid::Uuid,
+        expected_cycle_id: &str,
+    ) -> Result<ResetShopResult, SyncError> {
+        let request_id_text = request_id.to_string();
+        let result = self
+            .post_rpc(
+                access_token,
+                "reset_my_planet",
+                &reset_my_planet_rpc_body(request_id, expected_cycle_id),
+            )
+            .await?;
+        validate_reset_shop_result(result, &request_id_text, expected_cycle_id)
     }
 
     pub async fn cosmetic_shop_state(
@@ -502,15 +542,15 @@ fn one_row<T>(mut rows: Vec<T>) -> Result<T, SyncError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        guest_import_rpc_body, one_row, MySyncPolicy, SupabaseSyncClient, SyncError, UploadBody,
-        WorldSummary,
+        guest_import_rpc_body, one_row, reset_my_planet_rpc_body, validate_reset_shop_result,
+        MySyncPolicy, SupabaseSyncClient, SyncError, UploadBody, WorldSummary,
     };
     use crate::domain::cosmetic_shop::{
         ActiveEffects, AvatarEquipment, AvatarEquipmentItem, GuestCosmeticImport,
-        GuestCosmeticPurchase, QuoteTarget, RewardState, ShopActionResult, ShopActionStatus,
-        ShopQuote, ShopRequest, ShopState,
+        GuestCosmeticPurchase, QuoteTarget, ResetShopResult, RewardState, ShopActionResult,
+        ShopActionStatus, ShopQuote, ShopRequest, ShopState,
     };
-    use crate::domain::planet::PlanetWalletCredit;
+    use crate::domain::planet::{PlanetAvatar, PlanetProfile, PlanetState, PlanetWalletCredit};
     use crate::domain::usage::{Agent, UsageCoverage};
     use crate::sync::aggregate::DailyUsageSnapshot;
     use std::io::{Read, Write};
@@ -653,6 +693,46 @@ mod tests {
         }
     }
 
+    fn empty_planet_state(cycle_id: &str) -> PlanetState {
+        PlanetState {
+            version: 1,
+            profile: Some(PlanetProfile {
+                nickname: "Reset Test".into(),
+                avatar: PlanetAvatar::Masculine,
+            }),
+            timezone: "UTC".into(),
+            current_cycle_id: cycle_id.into(),
+            cycle_started_at_utc: "2026-10-01T00:00:00Z".into(),
+            last_reset_at_utc: None,
+            wallet_balance: 0,
+            wallet_credits: vec![],
+            current_planet_tokens: 0,
+            lifetime_tokens: 0,
+            growth_credit: 0.0,
+            stage: 0,
+            progress_to_next: 0.0,
+            incomplete: false,
+            can_reset: true,
+            reset_available_at_utc: None,
+            objects: vec![],
+            removed_natural_keys: vec![],
+        }
+    }
+
+    fn reset_shop_result(request_id: &str, cycle_id: &str) -> ResetShopResult {
+        let mut state = empty_shop_state();
+        state.current_cycle_id = cycle_id.into();
+        ResetShopResult {
+            action: ShopActionResult {
+                status: ShopActionStatus::Reset,
+                request_id: request_id.into(),
+                confirmed_quote: None,
+                state,
+            },
+            planet_state: empty_planet_state(cycle_id),
+        }
+    }
+
     fn purchase_quote() -> ShopQuote {
         ShopQuote {
             target: QuoteTarget::Purchase {
@@ -675,6 +755,65 @@ mod tests {
             request.headers.get("authorization").map(String::as_str),
             Some("Bearer account-token")
         );
+    }
+
+    #[test]
+    fn reset_rpc_body_contains_only_the_typed_request_id_and_expected_old_cycle() {
+        let request_id = uuid::Uuid::parse_str("70000000-0000-0000-0000-000000000001").unwrap();
+        let body = reset_my_planet_rpc_body(request_id, "expected-old-cycle");
+
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "p_request_id": "70000000-0000-0000-0000-000000000001",
+                "p_cycle_id": "expected-old-cycle"
+            })
+        );
+        assert_eq!(body.as_object().unwrap().len(), 2);
+    }
+
+    #[test]
+    fn reset_response_requires_a_consistent_composite_and_matching_request_id() {
+        let request_id = "70000000-0000-0000-0000-000000000001";
+        let result = reset_shop_result(request_id, "server-generated-cycle");
+        let wire = serde_json::to_value(&result).unwrap();
+        let decoded: ResetShopResult = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(decoded.action.request_id, request_id);
+        assert_eq!(decoded.action.state.current_cycle_id, decoded.planet_state.current_cycle_id);
+        assert!(validate_reset_shop_result(decoded, request_id, "expected-old-cycle").is_ok());
+
+        assert!(serde_json::from_value::<ResetShopResult>(
+            serde_json::to_value(empty_planet_state("legacy-cycle")).unwrap()
+        ).is_err(), "a legacy planet-only response must not decode as a reset result");
+
+        let mut extra_field = wire;
+        extra_field["ignored"] = serde_json::json!(true);
+        assert!(serde_json::from_value::<ResetShopResult>(extra_field).is_err());
+
+        assert!(matches!(
+            validate_reset_shop_result(
+                reset_shop_result("70000000-0000-0000-0000-000000000002", "server-generated-cycle"),
+                request_id,
+                "expected-old-cycle",
+            ),
+            Err(SyncError::InvalidResponse),
+        ));
+
+        let mut split_cycles = reset_shop_result(request_id, "server-generated-cycle");
+        split_cycles.planet_state.current_cycle_id = "another-cycle".into();
+        assert!(matches!(
+            validate_reset_shop_result(split_cycles, request_id, "expected-old-cycle"),
+            Err(SyncError::InvalidResponse),
+        ));
+
+        assert!(matches!(
+            validate_reset_shop_result(
+                reset_shop_result(request_id, "expected-old-cycle"),
+                request_id,
+                "expected-old-cycle",
+            ),
+            Err(SyncError::InvalidResponse),
+        ), "a reset success must return the server-generated next cycle");
     }
 
     #[test]

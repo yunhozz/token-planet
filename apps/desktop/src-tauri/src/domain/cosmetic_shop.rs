@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use super::planet::PlanetWalletCredit;
+use super::planet::{PlanetState, PlanetWalletCredit};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -264,6 +264,13 @@ pub struct ShopActionResult {
     #[serde(default)]
     pub confirmed_quote: Option<ShopQuote>,
     pub state: ShopState,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResetShopResult {
+    pub action: ShopActionResult,
+    pub planet_state: PlanetState,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
