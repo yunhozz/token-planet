@@ -77,6 +77,16 @@ describe("planet landscape camera", () => {
     expect(screenToLandscape({ x: 320, y: 340 }, rect, viewBox)).toEqual({ x: 105, y: 77 });
   });
 
+  it("returns null when finite geometry overflows during conversion", () => {
+    const point = { x: Number.MAX_VALUE, y: 0 };
+    const rect = { left: 0, top: 0, width: Number.MIN_VALUE, height: Number.MIN_VALUE };
+    const viewBox = { x: 0, y: 0, width: 1, height: 1 };
+
+    expect([point.x, point.y, rect.left, rect.top, rect.width, rect.height, ...Object.values(viewBox)]
+      .every(Number.isFinite)).toBe(true);
+    expect(screenToLandscape(point, rect, viewBox)).toBeNull();
+  });
+
   it("round trips landscape points through preserveAspectRatio meet geometry", () => {
     const viewBox = { x: -300, y: 80, width: 600, height: 400 };
     const rect = { left: 20, top: 70, width: 900, height: 500 };
