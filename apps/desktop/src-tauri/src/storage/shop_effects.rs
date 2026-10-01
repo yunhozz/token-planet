@@ -1152,33 +1152,59 @@ mod tests {
     #[test]
     fn rebuild_uses_occurrence_time_and_replaces_late_or_corrected_canonical_rows() {
         let mut ledger = ledger();
+        let current_cycle = ledger.planet_cycle_id().unwrap();
         add_event(&mut ledger,"before-effect","2026-09-25T06:00:00Z",50_000);
         add_effect_history(&ledger,1,"2026-09-25T12:00:00+00:00",ActiveEffects {
             civilization_growth_bps: 2_000,
             token_earning_bps: 100,
             ..ActiveEffects::default()
         });
+        add_event(&mut ledger,"at-effect-start","2026-09-25T12:00:00Z",50_000);
         add_event(&mut ledger,"after-effect","2026-09-25T18:00:00Z",50_000);
+
+        let occurrences = super::canonical_occurrences(&ledger.connection).unwrap();
+        let before_effect = occurrences.iter().find(|item| item.event_key == "before-effect").unwrap();
+        assert_eq!(before_effect.cycle_id, current_cycle);
+        assert_eq!(before_effect.effect_revision, 0);
+        assert_eq!(before_effect.effects, ActiveEffects::default());
+        let at_effect_start = occurrences.iter().find(|item| item.event_key == "at-effect-start").unwrap();
+        assert_eq!(at_effect_start.cycle_id, current_cycle);
+        assert_eq!(at_effect_start.effect_revision, 1);
+        assert_eq!(at_effect_start.effects, ActiveEffects {
+            civilization_growth_bps: 2_000,
+            token_earning_bps: 100,
+            ..ActiveEffects::default()
+        });
+        let after_effect = occurrences.iter().find(|item| item.event_key == "after-effect").unwrap();
+        assert_eq!(after_effect.cycle_id, current_cycle);
+        assert_eq!(after_effect.effect_revision, 1);
+        assert_eq!(after_effect.effects, ActiveEffects {
+            civilization_growth_bps: 2_000,
+            token_earning_bps: 100,
+            ..ActiveEffects::default()
+        });
 
         ledger.rebuild_shop_contributions().unwrap();
         let segments = contribution_rows(&ledger,"2026-09-25");
         assert_eq!(segments.len(),2);
+        assert_eq!(segments[0].tokens,50_000);
+        assert_eq!(segments[1].tokens,100_000,"usage at the interval start belongs to revision 1");
         assert_eq!(segments[0].growth_bps,0,"the effect must not apply before activation");
         assert_eq!(segments[1].growth_bps,2_000);
-        assert!((weighted_growth(100_000,&segments).unwrap()-1.1).abs()<1e-12);
+        assert!((weighted_growth(150_000,&segments).unwrap()-1.4981851742056773).abs()<1e-12);
 
         add_event(&mut ledger,"late-before-effect","2026-09-25T09:00:00Z",1_000);
         ledger.rebuild_shop_contributions().unwrap();
         let segments = contribution_rows(&ledger,"2026-09-25");
-        assert_eq!(segments.iter().map(|segment| segment.tokens).sum::<u64>(),101_000);
+        assert_eq!(segments.iter().map(|segment| segment.tokens).sum::<u64>(),151_000);
         assert_eq!(segments.iter().find(|segment| segment.effect_revision==0).unwrap().tokens,51_000);
-        assert_eq!(segments.iter().find(|segment| segment.effect_revision==1).unwrap().tokens,50_000);
+        assert_eq!(segments.iter().find(|segment| segment.effect_revision==1).unwrap().tokens,100_000);
 
         add_event(&mut ledger,"after-effect","2026-09-25T18:00:00Z",25_000);
         ledger.rebuild_shop_contributions().unwrap();
         let corrected = contribution_rows(&ledger,"2026-09-25");
-        assert_eq!(corrected.iter().map(|segment| segment.tokens).sum::<u64>(),76_000);
-        assert_eq!(corrected.iter().find(|segment| segment.effect_revision==1).unwrap().tokens,25_000);
+        assert_eq!(corrected.iter().map(|segment| segment.tokens).sum::<u64>(),126_000);
+        assert_eq!(corrected.iter().find(|segment| segment.effect_revision==1).unwrap().tokens,75_000);
         let contribution_versions: i64 = ledger.connection.query_row(
             "SELECT count(DISTINCT canonical_version) FROM shop_effect_contribution",
             [], |row| row.get(0),
@@ -1217,6 +1243,30 @@ mod tests {
         let growth = ledger.shop_growth_credit_by_date().unwrap();
         let expected = weighted_growth(25_000,&[]).unwrap();
         assert!((growth["2026-09-25"]-expected).abs()<1e-12);
+    }
+
+    #[test]
+    fn raw_usage_without_effect_history_before_cycle_start_uses_baseline_revision_zero() {
+        let mut ledger = ledger();
+        ledger.connection.execute(
+            "UPDATE setting SET value='2026-09-26T00:00:00Z'
+             WHERE key IN ('planet_last_reset_at_utc','planet_cycle_started_at_utc')",
+            [],
+        ).unwrap();
+        let current_cycle = ledger.planet_cycle_id().unwrap();
+        add_event(&mut ledger,"untracked-old-cycle","2026-09-25T12:00:00Z",1_000);
+        add_event(&mut ledger,"untracked-current-cycle","2026-09-27T12:00:00Z",2_000);
+
+        let occurrences = super::canonical_occurrences(&ledger.connection).unwrap();
+        assert_eq!(occurrences.len(),2);
+        let old = occurrences.iter().find(|item| item.event_key == "untracked-old-cycle").unwrap();
+        assert_eq!(old.cycle_id,"baseline");
+        assert_eq!(old.effect_revision,0);
+        assert_eq!(old.effects,ActiveEffects::default());
+        let current = occurrences.iter().find(|item| item.event_key == "untracked-current-cycle").unwrap();
+        assert_eq!(current.cycle_id,current_cycle);
+        assert_eq!(current.effect_revision,0);
+        assert_eq!(current.effects,ActiveEffects::default());
     }
 
     #[test]
