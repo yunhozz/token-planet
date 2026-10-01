@@ -124,7 +124,7 @@ select is((select count(*)::bigint from private.shop_device_activity_day
   where user_id = '00000000-0000-0000-0000-000000000966'), 1::bigint,
   'first activity day is recorded with the canonical device snapshot');
 select is((select reward_timezone from private.shop_account_state
-  where user_id = '00000000-0000-0000-0000-000000000966'), 'UTC',
+  where user_id = '00000000-0000-0000-0000-000000000966'), 'Asia/Seoul',
   'first planet timezone is frozen for reward-date validation');
 
 select lives_ok($$select pg_temp.upload_effect_contribution(
