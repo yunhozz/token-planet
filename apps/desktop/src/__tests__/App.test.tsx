@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../App";
 import type { SharingState } from "../lib/sharing";
-import type { CosmeticShopState, GrowthJournal as GrowthJournalData, WorldSnapshot } from "../types/usage";
+import type { GrowthJournal as GrowthJournalData, ShopActionResult, ShopQuote, ShopRequest, ShopState, WorldSnapshot } from "../types/usage";
 
 const invokeMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn());
@@ -31,21 +31,50 @@ const localSnapshot: WorldSnapshot = {
   },
 };
 
-function shopState(balance: number): CosmeticShopState {
+function canonicalShopState(balance = 12_000_000, stateRevision = 1, instances: ShopState["landscape_instances"] = [], placements: ShopState["placements"] = []): ShopState {
   return {
-    slots: [], products: [], current_cycle_id: "cycle-1", available_balance: balance,
-    owned_skus: [], equipped: [], slot_versions: {}, actions_require_online: true,
-    action_unavailable_reason: null, guest_import_pending: false, guest_import_error: null,
-  };
-}
-
-function catalogShopState(balance: number, owned: string[] = []): CosmeticShopState {
-  return {
-    ...shopState(balance),
-    slots: [{ slot_id: "sky", display_name: "하늘" }],
-    products: [{ sku: "star_cluster", slot_id: "sky", display_name: "별무리", price: 100_000, catalog_revision: 1, purchasable: true }],
-    owned_skus: owned,
-    slot_versions: { sky: 0 },
+    account_id: "account:owner",
+    current_cycle_id: "cycle-1",
+    catalog_revision: 1,
+    state_revision: stateRevision,
+    available_balance: balance,
+    products: [{
+      sku: "land_pond", category: "landscape", display_name: "연못", price: 5_000_000,
+      catalog_revision: 1, purchasable: true, placement_zone: "ground", avatar_slot: null,
+      effect_type: "token_earning", effect_value: 100,
+    }, {
+      sku: "avatar_explorer_hat", category: "avatar", display_name: "탐험가 모자", price: 1_000_000,
+      catalog_revision: 1, purchasable: true, placement_zone: null, avatar_slot: "head",
+      effect_type: null, effect_value: 0,
+    }],
+    landscape_instances: instances,
+    placements,
+    removed_natural_keys: [],
+    avatar_owned_skus: [],
+    avatar_equipment: {
+      head: { sku: null, version: 0 },
+      outfit: { sku: null, version: 0 },
+      face: { sku: null, version: 0 },
+      back: { sku: null, version: 0 },
+    },
+    effects: {
+      token_earning_bps: 0,
+      civilization_growth_bps: 0,
+      shop_discount_bps: 0,
+      reset_cooldown_bps: 0,
+      natural_removal_discount_bps: 0,
+      era_reward_tokens: 0,
+      streak_reward_tokens: 0,
+    },
+    reward_state: {
+      reward_timezone: "Asia/Seoul",
+      settled_cycle_tokens: 0,
+      era_reward_tokens: 0,
+      streak_reward_tokens: 0,
+    },
+    action_unavailable_reason: null,
+    guest_import_pending: false,
+    guest_import_error: null,
   };
 }
 
@@ -108,6 +137,7 @@ beforeEach(() => {
     listeners.set(event, handler);
     return () => {};
   });
+  Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
@@ -130,7 +160,7 @@ it("opens the cosmetic shop in the current window and restores exploration on re
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
-    if (command === "get_shop_state") return shopState(0);
+    if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
@@ -145,16 +175,16 @@ it("opens the cosmetic shop in the current window and restores exploration on re
   fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
   const originalViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
 
-  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
+  fireEvent.click(screen.getByRole("button", { name: "행성 상점" }));
 
   expect(openWindow).not.toHaveBeenCalled();
-  expect(await screen.findByRole("heading", { name: "행성 꾸미기", level: 1 })).toHaveFocus();
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  expect(await screen.findByRole("heading", { name: "행성 상점", level: 1 })).toHaveFocus();
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
 
   expect(await screen.findByRole("region", { name: "행성 풍경" })).toBeInTheDocument();
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
   expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
-  expect(screen.getByRole("button", { name: "행성 꾸미기" })).toHaveFocus();
+  expect(screen.getByRole("button", { name: "행성 상점" })).toHaveFocus();
 });
 
 it("opens the growth journal in the current window and returns to personal detail", async () => {
@@ -167,7 +197,7 @@ it("opens the growth journal in the current window and returns to personal detai
 
   expect(openWindow).not.toHaveBeenCalled();
   expect(await screen.findByRole("heading", { name: "성장 일지", level: 1 })).toHaveFocus();
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
 
   expect(await screen.findByRole("region", { name: "행성 풍경" })).toBeInTheDocument();
   expect(screen.getByRole("button", { name: "성장 일지 보기" })).toHaveFocus();
@@ -177,12 +207,199 @@ it("opens legacy feature URLs in detail mode and returns to personal detail", as
   window.history.replaceState({}, "", "/?window=cosmetic-shop");
   const { container } = render(<App />);
 
-  expect(await screen.findByRole("heading", { name: "행성 꾸미기", level: 1 })).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  expect(await screen.findByRole("heading", { name: "행성 상점", level: 1 })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
 
   expect(await screen.findByRole("tab", { name: "내 행성" })).toHaveAttribute("aria-selected", "true");
   expect(container.querySelector(".planet-landscape")).toBeInTheDocument();
   expect(screen.queryByRole("main", { name: "행성 팝오버" })).not.toBeInTheDocument();
+});
+
+it("selects a purchased inventory instance and places it from the main landscape", async () => {
+  let canonical = canonicalShopState();
+  const instance = {
+    instance_id: "pond-instance-placed", sku: "land_pond", variation_index: 2,
+    seed: "seed-pond-placed", variation_version: 1, placement_version: 0,
+  };
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return structuredClone(canonical);
+    if (command === "quote_shop_action") {
+      if (!args?.target) throw new Error("missing quote target");
+      return { target: structuredClone(args.target), catalog_revision: 1, effect_revision: 0, price: 5_000_000 } satisfies ShopQuote;
+    }
+    if (command === "apply_shop_action") {
+      const request = args?.request;
+      if (!request) throw new Error("missing canonical request");
+      applied.push(request);
+      if (request.kind === "purchase") {
+        canonical = canonicalShopState(7_000_000, 2, [instance]);
+        return { status: "purchased", request_id: request.request_id, confirmed_quote: null, state: structuredClone(canonical) } satisfies ShopActionResult;
+      }
+      if (request.kind === "place") {
+        const placed = { ...instance, placement_version: 1 };
+        canonical = canonicalShopState(7_000_000, 3, [placed], [{ instance_id: instance.instance_id, cycle_id: "cycle-1", x: request.x, y: request.y, version: 1 }]);
+        return { status: "placed", request_id: request.request_id, confirmed_quote: null, state: structuredClone(canonical) } satisfies ShopActionResult;
+      }
+      if (request.kind === "retrieve") {
+        const retrieved = { ...instance, placement_version: 2 };
+        canonical = canonicalShopState(7_000_000, 4, [retrieved], []);
+        return { status: "retrieved", request_id: request.request_id, confirmed_quote: null, state: structuredClone(canonical) } satisfies ShopActionResult;
+      }
+      throw new Error(`unexpected request kind: ${request.kind}`);
+    }
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  const { container } = render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  const shop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(within(shop).getByRole("button", { name: "연못 구매" }));
+  fireEvent.click(await screen.findByRole("button", { name: "구매 확정" }));
+  fireEvent.click(within(shop).getByRole("tab", { name: "보유함" }));
+  fireEvent.click(await within(shop).findByRole("button", { name: "배치 선택" }));
+
+  const viewport = await screen.findByRole("group", { name: "행성 풍경 탐사" });
+  const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+  const rect = { left: 37, top: 51, width: 900, height: 420 };
+  Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+  const [viewX, viewY, viewWidth, viewHeight] = svg.getAttribute("viewBox")!.split(" ").map(Number);
+  const scale = Math.min(rect.width / viewWidth, rect.height / viewHeight);
+  const point = (x: number, y: number) => ({
+    clientX: rect.left + (rect.width - viewWidth * scale) / 2 + (x - viewX) * scale,
+    clientY: rect.top + (rect.height - viewHeight * scale) / 2 + (y - viewY) * scale,
+  });
+  const from = point(760, 160);
+  const drop = point(832, 232);
+  await act(async () => {
+    fireEvent.pointerDown(viewport, { pointerId: 33, button: 0, ...from });
+    fireEvent.pointerMove(viewport, { pointerId: 33, ...drop });
+    fireEvent.pointerUp(viewport, { pointerId: 33, ...drop });
+    await Promise.resolve();
+  });
+
+  await waitFor(() => expect(container.querySelector('[data-shop-instance-id="pond-instance-placed"]')).toHaveAttribute("transform", "translate(800 200)"));
+  expect(applied.map((request) => request.kind)).toEqual(["purchase", "place"]);
+  expect(applied[1]).toMatchObject({ kind: "place", instance_id: instance.instance_id, cycle_id: "cycle-1", expected_version: 0, x: 800, y: 200 });
+
+  fireEvent.click(screen.getByRole("button", { name: "연못, 설치된 장식" }));
+  fireEvent.click(screen.getByRole("button", { name: "보관" }));
+  await waitFor(() => expect(container.querySelector('[data-shop-instance-id="pond-instance-placed"]')).not.toBeInTheDocument());
+  expect(applied[2]).toMatchObject({ kind: "retrieve", instance_id: instance.instance_id, cycle_id: "cycle-1", expected_version: 1 });
+  fireEvent.click(screen.getByRole("button", { name: "행성 상점 열기" }));
+  const returnedShop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(within(returnedShop).getByRole("tab", { name: "보유함" }));
+  expect(await within(returnedShop).findByText("변형 3 · 보관함")).toBeInTheDocument();
+});
+
+it("previews avatar equipment temporarily and renders only confirmed equipment on the planet", async () => {
+  let canonical = canonicalShopState();
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return structuredClone(canonical);
+    if (command === "quote_shop_action") {
+      if (!args?.target) throw new Error("missing quote target");
+      return { target: structuredClone(args.target), catalog_revision: 1, effect_revision: 0, price: 1_000_000 } satisfies ShopQuote;
+    }
+    if (command === "apply_shop_action") {
+      const request = args?.request;
+      if (!request) throw new Error("missing canonical request");
+      applied.push(request);
+      if (request.kind === "purchase") {
+        canonical = { ...canonicalShopState(11_000_000, 2), avatar_owned_skus: ["avatar_explorer_hat"] };
+        return { status: "purchased", request_id: request.request_id, confirmed_quote: null, state: structuredClone(canonical) } satisfies ShopActionResult;
+      }
+      if (request.kind === "equip_avatar") {
+        canonical = {
+          ...canonicalShopState(11_000_000, 3),
+          avatar_owned_skus: ["avatar_explorer_hat"],
+          avatar_equipment: { ...canonical.avatar_equipment, head: { sku: request.sku, version: 1 } },
+        };
+        return { status: "equipped", request_id: request.request_id, confirmed_quote: null, state: structuredClone(canonical) } satisfies ShopActionResult;
+      }
+      throw new Error(`unexpected request kind: ${request.kind}`);
+    }
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  const { container } = render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  const shop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(within(shop).getByRole("tab", { name: "아바타" }));
+  fireEvent.click(within(shop).getByRole("button", { name: "탐험가 모자 미리보기" }));
+  expect(container.querySelector('.shop-planet-preview [data-avatar-equipment="avatar_explorer_hat"]')).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "미리보기 해제" }));
+  expect(container.querySelector('.shop-planet-preview [data-avatar-equipment="avatar_explorer_hat"]')).not.toBeInTheDocument();
+
+  fireEvent.click(within(shop).getByRole("button", { name: "탐험가 모자 구매" }));
+  fireEvent.click(await screen.findByRole("button", { name: "구매 확정" }));
+  fireEvent.click(within(shop).getByRole("tab", { name: "보유함" }));
+  fireEvent.click(await within(shop).findByRole("button", { name: "탐험가 모자 장착" }));
+  await waitFor(() => expect(container.querySelector('.shop-planet-preview [data-avatar-equipment="avatar_explorer_hat"]')).toBeInTheDocument());
+  expect(within(shop).getByText("장착 중")).toBeInTheDocument();
+  expect(applied.map((request) => request.kind)).toEqual(["purchase", "equip_avatar"]);
+
+  fireEvent.click(screen.getByRole("button", { name: "← 행성으로 돌아가기" }));
+  expect(await screen.findByRole("region", { name: "행성 풍경" })).toBeInTheDocument();
+  expect(container.querySelector('.planet-landscape-avatar-sprite [data-avatar-equipment="avatar_explorer_hat"]')).toBeInTheDocument();
+});
+
+it("uses the canonical shop panel and keeps a confirmed landscape purchase in inventory", async () => {
+  let canonical = canonicalShopState();
+  const instance = {
+    instance_id: "pond-instance-1", sku: "land_pond", variation_index: 2,
+    seed: "seed-pond-1", variation_version: 1, placement_version: 0,
+  };
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return structuredClone(canonical);
+    if (command === "quote_shop_action") {
+      if (!args?.target) throw new Error("missing quote target");
+      return {
+        target: structuredClone(args.target), catalog_revision: 1, effect_revision: 0, price: 5_000_000,
+      } satisfies ShopQuote;
+    }
+    if (command === "apply_shop_action") {
+      const request = args?.request;
+      if (!request) throw new Error("missing canonical request");
+      canonical = canonicalShopState(7_000_000, 2, [instance]);
+      return {
+        status: "purchased", request_id: request.request_id, confirmed_quote: null, state: structuredClone(canonical),
+      } satisfies ShopActionResult;
+    }
+    if (command === "get_shop_state") return canonicalShopState();
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+
+  const shop = await screen.findByRole("region", { name: "행성 상점" });
+  expect(within(shop).getByRole("tab", { name: "조경" })).toHaveAttribute("aria-selected", "true");
+  fireEvent.click(within(shop).getByRole("button", { name: "연못 구매" }));
+  fireEvent.click(await screen.findByRole("button", { name: "구매 확정" }));
+
+  await waitFor(() => expect(screen.getByText("7,000,000 토큰")).toBeInTheDocument());
+  fireEvent.click(within(shop).getByRole("tab", { name: "보유함" }));
+  expect(await within(shop).findByText("연못")).toBeInTheDocument();
+  expect(within(shop).getByText("변형 3 · 보관함")).toBeInTheDocument();
 });
 
 it("uses the flat landscape only in personal detail and keeps exploration when switching tabs", async () => {
@@ -227,15 +444,15 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
     { stage: 0, ordinal: 0, kind: "rock", x: 35, y: 42, seed: 10 },
     { stage: 1, ordinal: 3, kind: "tree", x: 63, y: 20, seed: 3 },
   ];
-  const heldRefresh = deferred<WorldSnapshot>();
-  let holdRefresh = false;
+  const currentShop = () => ({
+    ...canonicalShopState(),
+    account_id: `account:${activeShared.user_id}`,
+    current_cycle_id: activeSnapshot.planet.current_cycle_id,
+  });
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(activeShared);
-    if (command === "current_usage") return structuredClone(activeSnapshot);
-    if (command === "refresh_usage") return holdRefresh ? heldRefresh.promise : structuredClone(activeSnapshot);
-    if (command === "get_shop_state") return {
-      ...catalogShopState(500_000), current_cycle_id: activeSnapshot.planet.current_cycle_id,
-    };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(activeSnapshot);
+    if (command === "get_shop_state") return structuredClone(currentShop());
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
@@ -245,27 +462,29 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
+  const initialZoom = Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom);
   fireEvent.click(screen.getByRole("button", { name: "확대" }));
   fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
   expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await screen.findByRole("button", { name: "별무리 미리보기" });
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  const previewButton = await screen.findByRole("button", { name: "연못 미리보기" });
+  fireEvent.click(previewButton);
 
   if (changedContext === "account") activeShared = { ...activeShared, user_id: "member-next", phase: "signed_in", world: null };
   if (changedContext === "world") activeShared = { ...activeShared, world: { ...activeShared.world!, id: "world-2" } };
   if (changedContext === "cycle") activeSnapshot.planet.current_cycle_id = "cycle-2";
-  holdRefresh = true;
-  fireEvent.click(screen.getByRole("button", { name: "사용량 새로고침" }));
+  await act(async () => { listeners.get("world-context-changing")?.({ payload: "cosmetic-shop" }); });
 
-  await screen.findByText("계정과 행성 상태를 확인하고 있습니다.");
-  expect(screen.getByRole("heading", { name: "행성 꾸미기", level: 1 })).toBeInTheDocument();
-  await act(async () => { heldRefresh.resolve(structuredClone(activeSnapshot)); });
-  expect(await screen.findByRole("button", { name: "별무리 미리보기" })).toBeEnabled();
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 상점" })).toBeDisabled());
+  expect(screen.getByRole("heading", { name: "행성 상점", level: 1 })).toBeInTheDocument();
+  await act(async () => { listeners.get("world-state-updated")?.({ payload: null }); });
+  await waitFor(() => expect(screen.getByRole("button", { name: "연못 미리보기" })).toBeEnabled());
+  expect(screen.getByRole("heading", { name: "행성 상점", level: 1 })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
 
   await screen.findByRole("region", { name: "행성 풍경" });
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
-  expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(1);
+  expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(initialZoom);
   expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "false");
 });
 
@@ -286,6 +505,7 @@ it("clears exploration immediately while a world context is locked", async () =>
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
+  const initialZoom = Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom);
   fireEvent.click(screen.getByRole("button", { name: "확대" }));
   fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
   expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
@@ -293,16 +513,16 @@ it("clears exploration immediately while a world context is locked", async () =>
   await act(async () => { listeners.get("world-context-changing")?.({ payload: "cosmetic-shop" }); });
 
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
-  expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(1);
+  expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(initialZoom);
   fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
 });
 
-it("keeps shop load errors on the shop screen", async () => {
+it("keeps a canonical shop load error visible when leaving and reopening the shop", async () => {
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") throw new Error("shop unavailable");
+    if (command === "get_shop_state") throw new Error("상점 상태를 불러오지 못했습니다.");
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
@@ -311,17 +531,15 @@ it("keeps shop load errors on the shop screen", async () => {
 
   await screen.findByText("Orbit의 행성");
   await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_shop_state"));
-  expect(screen.queryByText("상점 상태를 불러오지 못했습니다.")).not.toBeInTheDocument();
-
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  expect(await screen.findByText("상점 상태를 불러오지 못했습니다.")).toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
-  expect(screen.queryByText("상점 상태를 불러오지 못했습니다.")).not.toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("상점 상태를 불러오지 못했습니다.");
 
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  expect(await screen.findByText("상점 상태를 불러오지 못했습니다.")).toBeInTheDocument();
-  expect(screen.getByRole("button", { name: "다시 불러오기" })).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("상점 상태를 불러오지 못했습니다.");
+  expect(screen.getByRole("button", { name: "상점 다시 확인" })).toBeInTheDocument();
 });
 
 it("ignores a late journal failure after leaving and reloads on reentry", async () => {
@@ -344,7 +562,7 @@ it("ignores a late journal failure after leaving and reloads on reentry", async 
   await screen.findByRole("heading", { name: "성장 일지", level: 1 });
   await waitFor(() => expect(journalReads).toBe(1));
 
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
   await act(async () => { oldRead.reject(new Error("stale journal failure")); });
   expect(screen.queryByText("성장 일지를 불러오지 못했습니다.")).not.toBeInTheDocument();
 
@@ -474,12 +692,16 @@ it("refreshes owner candidates even when the member count stays the same", async
   expect(screen.getByLabelText("소유권을 넘길 참여자")).toHaveValue("");
 });
 
-it("refreshes the confirmed shop state after sync finishes", async () => {
+it("refreshes the confirmed canonical shop state after sync finishes", async () => {
   let synced = false;
+  let reads = 0;
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return shopState(synced ? 100_000 : 0);
+    if (command === "get_shop_state") {
+      reads += 1;
+      return canonicalShopState(synced ? 100_000 : 0, synced ? 2 : 1);
+    }
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
@@ -487,24 +709,27 @@ it("refreshes the confirmed shop state after sync finishes", async () => {
   render(<App />);
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("0 토큰"));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  const shop = await screen.findByRole("region", { name: "행성 상점" });
+  await within(shop).findByText("0 토큰", { exact: true });
 
   synced = true;
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
 
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰"));
+  await waitFor(() => expect(within(shop).getByText("100,000 토큰", { exact: true })).toBeInTheDocument());
+  expect(reads).toBeGreaterThan(1);
 });
 
-it("retries an unavailable shop when navigating to the in-app shop screen", async () => {
-  let shopReads = 0;
+it("retries an unavailable canonical shop state when the user asks to refresh", async () => {
+  let reads = 0;
+  let unavailable = true;
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_shop_state") {
-      shopReads += 1;
-      if (shopReads === 1) throw new Error("temporary shop read failure");
-      return catalogShopState(300_000);
+      reads += 1;
+      if (unavailable) throw new Error("상점 상태를 불러오지 못했습니다.");
+      return canonicalShopState(300_000, 2);
     }
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
@@ -513,47 +738,48 @@ it("retries an unavailable shop when navigating to the in-app shop screen", asyn
   render(<App />);
 
   await screen.findByText("Orbit의 행성");
-  await waitFor(() => expect(shopReads).toBe(1));
-  expect(screen.queryByText("상점 상태를 불러오지 못했습니다.")).not.toBeInTheDocument();
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("상점 상태를 불러오지 못했습니다.");
+  expect(screen.getByRole("button", { name: "상점 다시 확인" })).toBeEnabled();
 
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("300,000 토큰"));
-  expect(shopReads).toBe(2);
+  unavailable = false;
+  fireEvent.click(screen.getByRole("button", { name: "상점 다시 확인" }));
+  const shop = await screen.findByRole("region", { name: "행성 상점" });
+  await within(shop).findByText("300,000 토큰", { exact: true });
+  expect(reads).toBe(2);
 });
 
-it("coalesces a shared shop read when opening the in-app shop screen", async () => {
-  let latestShop = catalogShopState(200_000);
-  let heldRead: ReturnType<typeof deferred<CosmeticShopState>> | null = null;
+it("coalesces shop state loading while opening the canonical shop screen", async () => {
+  const heldRead = deferred<ShopState>();
+  let reads = 0;
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return heldRead?.promise ?? structuredClone(latestShop);
-    if (command === "list_world_members") return [{ user_id: "owner", role: "owner" }, { user_id: "member", role: "member" }];
+    if (command === "get_shop_state") { reads += 1; return heldRead.promise; }
+    if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
   render(<App />);
+
   await screen.findByText("Orbit의 행성");
-  const readsBefore = invokeMock.mock.calls.filter(([command]) => command === "get_shop_state").length;
-  heldRead = deferred<CosmeticShopState>();
-  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
-  await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 1));
-
+  await waitFor(() => expect(reads).toBe(1));
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-shop")).toBeInTheDocument());
-  expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 1);
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  await screen.findByText("상점을 불러오고 있습니다.");
+  expect(reads).toBe(1);
 
-  await act(async () => { heldRead!.resolve(structuredClone(latestShop)); });
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
+  await act(async () => { heldRead.resolve(canonicalShopState(200_000)); });
+  const shop = await screen.findByRole("region", { name: "행성 상점" });
+  await within(shop).findByText("200,000 토큰", { exact: true });
 });
 
-it("filters context-change events using the actual main window identity while in the shop", async () => {
+it("filters context-changing events by the actual main window while the shop is open", async () => {
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return catalogShopState(500_000);
+    if (command === "get_shop_state") return canonicalShopState(500_000);
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
@@ -562,355 +788,244 @@ it("filters context-change events using the actual main window identity while in
 
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  const previewButton = await screen.findByRole("button", { name: "별무리 미리보기" });
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  const previewButton = await screen.findByRole("button", { name: "연못 미리보기" });
 
   await act(async () => { listeners.get("world-context-changing")?.({ payload: "main" }); });
   expect(previewButton).toBeEnabled();
 
   await act(async () => { listeners.get("world-context-changing")?.({ payload: "cosmetic-shop" }); });
-  expect(screen.getByRole("heading", { name: "행성 꾸미기", level: 1 })).toBeInTheDocument();
-  expect(screen.getByText("계정과 행성 상태를 확인하고 있습니다.")).toBeInTheDocument();
+  expect(screen.getByRole("heading", { name: "행성 상점", level: 1 })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "행성 상점" })).toBeDisabled();
   await act(async () => { listeners.get("world-state-updated")?.({ payload: null }); });
-  await waitFor(() => expect(screen.getByRole("button", { name: "별무리 미리보기" })).toBeEnabled());
-  expect(screen.getByRole("heading", { name: "행성 꾸미기", level: 1 })).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 상점" })).toBeEnabled());
+  expect(screen.getByRole("heading", { name: "행성 상점", level: 1 })).toBeInTheDocument();
 });
 
-it("keeps a confirmed purchase without equipping it automatically", async () => {
-  const originalShop = catalogShopState(200_000);
-  const purchasedShop = catalogShopState(100_000, ["star_cluster"]);
-  let heldRead: ReturnType<typeof deferred<CosmeticShopState>> | null = null;
-  invokeMock.mockImplementation(async (command: string) => {
+it("retries a failed canonical purchase with the same request after returning to the shop", async () => {
+  const instance = {
+    instance_id: "pond-instance-retried", sku: "land_pond", variation_index: 1,
+    seed: "seed-pond-retried", variation_version: 1, placement_version: 0,
+  };
+  let canonical = canonicalShopState();
+  const applied: ShopRequest[] = [];
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return heldRead?.promise ?? structuredClone(originalShop);
-    if (command === "purchase_cosmetic") return {
-      result: { purchase_id: "purchase-1", sku: "star_cluster", status: "purchased", price: 100_000, available_balance: 100_000 },
-      state: structuredClone(purchasedShop), unavailable_reason: null,
-    };
-    if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
-    return null;
-  });
-  const { container } = render(<App />);
-  await screen.findByText("Orbit의 행성");
-  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
-
-  const readsBefore = invokeMock.mock.calls.filter(([command]) => command === "get_shop_state").length;
-  heldRead = deferred<CosmeticShopState>();
-  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
-  await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state")).toHaveLength(readsBefore + 1));
-
-  fireEvent.click(screen.getByRole("button", { name: "별무리 구매" }));
-  fireEvent.click(await screen.findByRole("button", { name: "구매 확인" }));
-  expect(await screen.findByText("별무리 구매 완료 · 잔액 100,000 토큰")).toBeInTheDocument();
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰"));
-
-  await act(async () => { heldRead!.resolve(structuredClone(originalShop)); });
-  fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
-  expect(await screen.findByRole("button", { name: "별무리 장착" })).toBeInTheDocument();
-  expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("100,000 토큰");
-
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
-  await screen.findByRole("region", { name: "행성 풍경" });
-  expect(container.querySelector('[data-cosmetic="star_cluster"]')).not.toBeInTheDocument();
-});
-
-it("does not apply a pending purchase after the account changes", async () => {
-  const pendingPurchase = deferred<unknown>();
-  let currentAccount = structuredClone(ownerState);
-  invokeMock.mockImplementation(async (command: string) => {
-    if (command === "get_sharing_state") return structuredClone(currentAccount);
-    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return catalogShopState(currentAccount.user_id === "owner" ? 200_000 : 700_000);
-    if (command === "purchase_cosmetic") return pendingPurchase.promise;
-    if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
-    return null;
-  });
-  render(<App />);
-
-  await screen.findByText("Orbit의 행성");
-  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
-  fireEvent.click(screen.getByRole("button", { name: "별무리 구매" }));
-  fireEvent.click(await screen.findByRole("button", { name: "구매 확인" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("purchase_cosmetic", { sku: "star_cluster" }));
-
-  currentAccount = { ...currentAccount, user_id: "next-account", phase: "signed_in", world: null };
-  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("700,000 토큰"));
-  expect(screen.getByRole("heading", { name: "행성 꾸미기", level: 1 })).toBeInTheDocument();
-
-  await act(async () => {
-    pendingPurchase.resolve({
-      result: { purchase_id: "stale-purchase", sku: "star_cluster", status: "purchased", price: 100_000, available_balance: 100_000 },
-      state: catalogShopState(100_000, ["star_cluster"]), unavailable_reason: null,
-    });
-    await Promise.resolve();
-  });
-
-  expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("700,000 토큰");
-  expect(screen.getByRole("button", { name: "별무리 구매" })).toBeInTheDocument();
-});
-
-it.each(["purchase", "equip"] as const)("shows a failed %s in the shop after returning to it", async (actionKind) => {
-  const pendingAction = deferred<unknown>();
-  const actionError = "요청 결과를 확인할 수 없습니다.";
-  let shopReads = 0;
-  let returnedToShop = false;
-  invokeMock.mockImplementation(async (command: string) => {
-    if (command === "get_sharing_state") return structuredClone(ownerState);
-    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") {
-      shopReads += 1;
-      return catalogShopState(returnedToShop ? 175_000 : 200_000, actionKind === "equip" ? ["star_cluster"] : []);
+    if (command === "get_shop_state") return structuredClone(canonical);
+    if (command === "quote_shop_action") {
+      if (!args?.target) throw new Error("missing quote target");
+      return { target: structuredClone(args.target), catalog_revision: 1, effect_revision: 0, price: 5_000_000 } satisfies ShopQuote;
     }
-    if (command === (actionKind === "purchase" ? "purchase_cosmetic" : "equip_cosmetic")) return pendingAction.promise;
-    if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
-    return null;
-  });
-  render(<App />);
-
-  await screen.findByText("Orbit의 행성");
-  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
-  if (actionKind === "purchase") {
-    fireEvent.click(screen.getByRole("button", { name: "별무리 구매" }));
-    fireEvent.click(await screen.findByRole("button", { name: "구매 확인" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("purchase_cosmetic", { sku: "star_cluster" }));
-  } else {
-    fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
-    fireEvent.click(await screen.findByRole("button", { name: "별무리 장착" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("equip_cosmetic", {
-      slotId: "sky", sku: "star_cluster", cycleId: "cycle-1", expectedVersion: 0,
-    }));
-  }
-
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
-  await screen.findByRole("region", { name: "행성 풍경" });
-  await act(async () => {
-    pendingAction.reject(actionError);
-    await Promise.resolve();
-  });
-  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-
-  const readsBeforeReentry = shopReads;
-  returnedToShop = true;
-  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent(actionError);
-  expect(screen.getByRole("button", { name: "상점 다시 확인" })).toBeEnabled();
-  await waitFor(() => expect(shopReads).toBeGreaterThan(readsBeforeReentry));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("175,000 토큰"));
-  expect(await screen.findByRole("alert")).toHaveTextContent(actionError);
-
-  const readsBeforeRetry = shopReads;
-  fireEvent.click(screen.getByRole("button", { name: "상점 다시 확인" }));
-  await waitFor(() => expect(shopReads).toBeGreaterThan(readsBeforeRetry));
-  expect(screen.queryByText(actionError)).not.toBeInTheDocument();
-});
-
-it.each(["purchase", "equip"] as const)("discards a pending %s failure after the account changes", async (actionKind) => {
-  const pendingAction = deferred<unknown>();
-  const actionError = "이전 계정 요청 실패";
-  let currentAccount = structuredClone(ownerState);
-  invokeMock.mockImplementation(async (command: string) => {
-    if (command === "get_sharing_state") return structuredClone(currentAccount);
-    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return currentAccount.user_id === "owner"
-      ? catalogShopState(200_000, actionKind === "equip" ? ["star_cluster"] : [])
-      : catalogShopState(700_000);
-    if (command === (actionKind === "purchase" ? "purchase_cosmetic" : "equip_cosmetic")) return pendingAction.promise;
-    if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
-    return null;
-  });
-  render(<App />);
-
-  await screen.findByText("Orbit의 행성");
-  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("200,000 토큰"));
-  if (actionKind === "purchase") {
-    fireEvent.click(screen.getByRole("button", { name: "별무리 구매" }));
-    fireEvent.click(await screen.findByRole("button", { name: "구매 확인" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("purchase_cosmetic", { sku: "star_cluster" }));
-  } else {
-    fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
-    fireEvent.click(await screen.findByRole("button", { name: "별무리 장착" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("equip_cosmetic", {
-      slotId: "sky", sku: "star_cluster", cycleId: "cycle-1", expectedVersion: 0,
-    }));
-  }
-
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
-  await screen.findByRole("region", { name: "행성 풍경" });
-  currentAccount = { ...currentAccount, user_id: "next-account", phase: "signed_in", world: null };
-  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
-  await waitFor(() => expect(invokeMock.mock.calls.filter(([command]) => command === "get_shop_state").length).toBeGreaterThan(1));
-
-  await act(async () => {
-    pendingAction.reject(actionError);
-    await Promise.resolve();
-  });
-  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-
-  fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("700,000 토큰"));
-  expect(screen.queryByText(actionError)).not.toBeInTheDocument();
-  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-});
-
-it("shows confirmed equipment on the planet after returning from the shop", async () => {
-  const ownedShop = catalogShopState(500_000, ["star_cluster"]);
-  const equippedShop = {
-    ...ownedShop,
-    equipped: [{ slot_id: "sky", sku: "star_cluster", version: 1 }],
-    slot_versions: { sky: 1 },
-  };
-  invokeMock.mockImplementation(async (command: string) => {
-    if (command === "get_sharing_state") return structuredClone(ownerState);
-    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return structuredClone(ownedShop);
-    if (command === "equip_cosmetic") return {
-      result: { status: "equipped", cycle_id: "cycle-1", slot_id: "sky", sku: "star_cluster", version: 1 },
-      state: structuredClone(equippedShop), unavailable_reason: null,
-    };
-    if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
-    return null;
-  });
-  const { container } = render(<App />);
-
-  await screen.findByText("Orbit의 행성");
-  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
-  fireEvent.click(await screen.findByRole("button", { name: "별무리 장착" }));
-  expect(await screen.findByText("행성에 장식을 장착했습니다.")).toBeInTheDocument();
-
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
-  await screen.findByRole("region", { name: "행성 풍경" });
-  expect(container.querySelector('[data-cosmetic="star_cluster"]')).toBeInTheDocument();
-});
-
-it("applies a pending same-context equip after returning to the planet", async () => {
-  const pendingEquip = deferred<unknown>();
-  const ownedShop = catalogShopState(500_000, ["star_cluster"]);
-  const equippedShop = {
-    ...ownedShop,
-    equipped: [{ slot_id: "sky", sku: "star_cluster", version: 1 }],
-    slot_versions: { sky: 1 },
-  };
-  invokeMock.mockImplementation(async (command: string) => {
-    if (command === "get_sharing_state") return structuredClone(ownerState);
-    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return structuredClone(ownedShop);
-    if (command === "equip_cosmetic") return pendingEquip.promise;
-    if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
-    return null;
-  });
-  const { container } = render(<App />);
-
-  await screen.findByText("Orbit의 행성");
-  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
-  fireEvent.click(await screen.findByRole("button", { name: "별무리 장착" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("equip_cosmetic", {
-    slotId: "sky", sku: "star_cluster", cycleId: "cycle-1", expectedVersion: 0,
-  }));
-
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
-  await screen.findByRole("region", { name: "행성 풍경" });
-  expect(container.querySelector('[data-cosmetic="star_cluster"]')).not.toBeInTheDocument();
-  await act(async () => {
-    pendingEquip.resolve({
-      result: { status: "equipped", cycle_id: "cycle-1", slot_id: "sky", sku: "star_cluster", version: 1 },
-      state: equippedShop, unavailable_reason: null,
-    });
-    await Promise.resolve();
-  });
-
-  await waitFor(() => expect(container.querySelector('[data-cosmetic="star_cluster"]')).toBeInTheDocument());
-});
-
-it("discards a pending equip when the account changes", async () => {
-  const pendingEquip = deferred<unknown>();
-  const ownedShop = catalogShopState(500_000, ["star_cluster"]);
-  const equippedShop = {
-    ...ownedShop,
-    equipped: [{ slot_id: "sky", sku: "star_cluster", version: 1 }],
-    slot_versions: { sky: 1 },
-  };
-  let currentAccount = structuredClone(ownerState);
-  invokeMock.mockImplementation(async (command: string) => {
-    if (command === "get_sharing_state") return structuredClone(currentAccount);
-    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return currentAccount.user_id === "owner" ? structuredClone(ownedShop) : catalogShopState(700_000);
-    if (command === "equip_cosmetic") return pendingEquip.promise;
-    if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
-    return null;
-  });
-  const { container } = render(<App />);
-
-  await screen.findByText("Orbit의 행성");
-  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  fireEvent.click(screen.getByRole("tab", { name: "보관함 (1)" }));
-  fireEvent.click(await screen.findByRole("button", { name: "별무리 장착" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("equip_cosmetic", {
-    slotId: "sky", sku: "star_cluster", cycleId: "cycle-1", expectedVersion: 0,
-  }));
-
-  currentAccount = { ...currentAccount, user_id: "next-account", phase: "signed_in", world: null };
-  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("700,000 토큰"));
-  expect(screen.getByRole("button", { name: "별무리 구매" })).toBeInTheDocument();
-
-  await act(async () => {
-    pendingEquip.resolve({
-      result: { status: "equipped", cycle_id: "cycle-1", slot_id: "sky", sku: "star_cluster", version: 1 },
-      state: equippedShop, unavailable_reason: null,
-    });
-    await Promise.resolve();
-  });
-
-  expect(container.querySelector('[data-cosmetic="star_cluster"]')).not.toBeInTheDocument();
-  expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("700,000 토큰");
-});
-
-it("does not show the previous account shop when the next account lookup fails", async () => {
-  let currentAccount = ownerState;
-  invokeMock.mockImplementation(async (command: string) => {
-    if (command === "get_sharing_state") return structuredClone(currentAccount);
-    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") {
-      if (currentAccount.user_id === "next-account") throw "서버에서 상점 상태를 불러오지 못했습니다";
-      return shopState(600_000);
+    if (command === "apply_shop_action") {
+      const request = args?.request;
+      if (!request) throw new Error("missing canonical request");
+      applied.push(request);
+      if (applied.length === 1) throw new Error("network disconnected");
+      canonical = canonicalShopState(7_000_000, 2, [instance]);
+      return { status: "purchased", request_id: request.request_id, confirmed_quote: null, state: structuredClone(canonical) } satisfies ShopActionResult;
     }
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
   render(<App />);
+
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")?.textContent).toBe("600,000 토큰"));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  const shop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(within(shop).getByRole("button", { name: "연못 구매" }));
+  fireEvent.click(await screen.findByRole("button", { name: "구매 확정" }));
+  expect(await screen.findByText("요청 결과를 확인하지 못했습니다. 같은 요청으로 다시 시도해 주세요.")).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "같은 요청 다시 시도" })).toBeInTheDocument();
+
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  fireEvent.click(screen.getByRole("button", { name: "행성 상점 열기" }));
+  const reopenedShop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(await within(reopenedShop).findByRole("button", { name: "같은 요청 다시 시도" }));
+
+  expect(await screen.findByText("구매를 완료했습니다. 보유함에서 상품을 확인할 수 있습니다.")).toBeInTheDocument();
+  expect(applied).toHaveLength(2);
+  expect(applied[1].request_id).toBe(applied[0].request_id);
+  expect(applied[1]).toEqual(applied[0]);
+  fireEvent.click(within(reopenedShop).getByRole("tab", { name: "보유함" }));
+  expect(await within(reopenedShop).findByText("변형 2 · 보관함")).toBeInTheDocument();
+});
+
+it("ignores a pending purchase result after the account changes", async () => {
+  const pendingApply = deferred<ShopActionResult>();
+  const instance = {
+    instance_id: "pond-instance-stale", sku: "land_pond", variation_index: 0,
+    seed: "seed-pond-stale", variation_version: 1, placement_version: 0,
+  };
+  let currentAccount = structuredClone(ownerState);
+  const pendingRequests: ShopRequest[] = [];
+  const stateForCurrentAccount = () => ({
+    ...canonicalShopState(currentAccount.user_id === "owner" ? 12_000_000 : 9_000_000),
+    account_id: `account:${currentAccount.user_id}`,
+  });
+  invokeMock.mockImplementation(async (command: string, args?: { target?: ShopQuote["target"]; request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return structuredClone(stateForCurrentAccount());
+    if (command === "quote_shop_action") {
+      if (!args?.target) throw new Error("missing quote target");
+      return { target: structuredClone(args.target), catalog_revision: 1, effect_revision: 0, price: 5_000_000 } satisfies ShopQuote;
+    }
+    if (command === "apply_shop_action") {
+      if (!args?.request) throw new Error("missing canonical request");
+      pendingRequests.push(args.request);
+      return pendingApply.promise;
+    }
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  let shop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(within(shop).getByRole("button", { name: "연못 구매" }));
+  fireEvent.click(await screen.findByRole("button", { name: "구매 확정" }));
+  await waitFor(() => expect(pendingRequests).toHaveLength(1));
+
+  currentAccount = { ...currentAccount, user_id: "next-account", phase: "signed_in", world: null };
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "행성 상점" })).getByText("9,000,000 토큰", { exact: true })).toBeInTheDocument());
+  shop = screen.getByRole("region", { name: "행성 상점" });
+
+  await act(async () => {
+    pendingApply.resolve({
+      status: "purchased", request_id: pendingRequests[0].request_id, confirmed_quote: null,
+      state: canonicalShopState(1_000_000, 2, [instance]),
+    });
+    await Promise.resolve();
+  });
+
+  expect(within(shop).getByText("9,000,000 토큰", { exact: true })).toBeInTheDocument();
+  expect(within(shop).getByRole("button", { name: "연못 구매" })).toBeInTheDocument();
+});
+
+it("applies a confirmed avatar equipment result after returning to the planet", async () => {
+  const pendingApply = deferred<ShopActionResult>();
+  const ownedState = { ...canonicalShopState(), avatar_owned_skus: ["avatar_explorer_hat"] };
+  const equippedState: ShopState = {
+    ...ownedState,
+    state_revision: 2,
+    avatar_equipment: { ...ownedState.avatar_equipment, head: { sku: "avatar_explorer_hat", version: 1 } },
+  };
+  let request: ShopRequest | null = null;
+  invokeMock.mockImplementation(async (command: string, args?: { request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return structuredClone(ownedState);
+    if (command === "apply_shop_action") {
+      request = args?.request ?? null;
+      return pendingApply.promise;
+    }
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  const { container } = render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  const shop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(within(shop).getByRole("tab", { name: "아바타" }));
+  fireEvent.click(within(shop).getByRole("tab", { name: "보유함" }));
+  fireEvent.click(await within(shop).findByRole("button", { name: "탐험가 모자 장착" }));
+  await waitFor(() => expect(request).toMatchObject({ kind: "equip_avatar", slot: "head", sku: "avatar_explorer_hat", expected_version: 0 }));
+
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  expect(container.querySelector('.planet-landscape-avatar-sprite [data-avatar-equipment="avatar_explorer_hat"]')).not.toBeInTheDocument();
+  await act(async () => {
+    pendingApply.resolve({ status: "equipped", request_id: request!.request_id, confirmed_quote: null, state: equippedState });
+    await Promise.resolve();
+  });
+  await waitFor(() => expect(container.querySelector('.planet-landscape-avatar-sprite [data-avatar-equipment="avatar_explorer_hat"]')).toBeInTheDocument());
+});
+
+it("ignores pending avatar equipment after the account changes", async () => {
+  const pendingApply = deferred<ShopActionResult>();
+  const ownedState = { ...canonicalShopState(), avatar_owned_skus: ["avatar_explorer_hat"] };
+  const equippedState: ShopState = {
+    ...ownedState,
+    state_revision: 2,
+    avatar_equipment: { ...ownedState.avatar_equipment, head: { sku: "avatar_explorer_hat", version: 1 } },
+  };
+  let currentAccount = structuredClone(ownerState);
+  let request: ShopRequest | null = null;
+  const stateForCurrentAccount = () => currentAccount.user_id === "owner"
+    ? ownedState
+    : { ...canonicalShopState(9_000_000), account_id: `account:${currentAccount.user_id}` };
+  invokeMock.mockImplementation(async (command: string, args?: { request?: ShopRequest }) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return structuredClone(stateForCurrentAccount());
+    if (command === "apply_shop_action") { request = args?.request ?? null; return pendingApply.promise; }
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  const { container } = render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  let shop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(within(shop).getByRole("tab", { name: "아바타" }));
+  fireEvent.click(within(shop).getByRole("tab", { name: "보유함" }));
+  fireEvent.click(await within(shop).findByRole("button", { name: "탐험가 모자 장착" }));
+  await waitFor(() => expect(request).toMatchObject({ kind: "equip_avatar" }));
+
+  currentAccount = { ...currentAccount, user_id: "next-account", phase: "signed_in", world: null };
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "행성 상점" })).getByText("9,000,000 토큰", { exact: true })).toBeInTheDocument());
+  shop = screen.getByRole("region", { name: "행성 상점" });
+  expect(within(shop).queryByRole("button", { name: "탐험가 모자 장착" })).not.toBeInTheDocument();
+
+  await act(async () => {
+    pendingApply.resolve({ status: "equipped", request_id: request!.request_id, confirmed_quote: null, state: equippedState });
+    await Promise.resolve();
+  });
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
+  await screen.findByRole("region", { name: "행성 풍경" });
+  expect(container.querySelector('.planet-landscape-avatar-sprite [data-avatar-equipment="avatar_explorer_hat"]')).not.toBeInTheDocument();
+});
+
+it("does not show the previous account shop state when the next account lookup fails", async () => {
+  let currentAccount: SharingState = ownerState;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") {
+      if (currentAccount.user_id === "next-account") throw new Error("서버에서 상점 상태를 불러오지 못했습니다.");
+      return canonicalShopState(600_000);
+    }
+    if (command === "list_world_members") return [];
+    if (command === "get_my_member_code") return "AB12CD34EF";
+    return null;
+  });
+  render(<App />);
+
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  let shop = await screen.findByRole("region", { name: "행성 상점" });
+  await within(shop).findByText("600,000 토큰", { exact: true });
 
   currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null };
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
 
-  await waitFor(() => expect(document.querySelector(".cosmetic-balance strong")).toBeNull());
-  expect(await screen.findByText("서버에서 상점 상태를 불러오지 못했습니다")).toBeInTheDocument();
+  await waitFor(() => expect(screen.queryByText("600,000 토큰", { exact: true })).not.toBeInTheDocument());
+  expect(await screen.findByRole("alert")).toHaveTextContent("서버에서 상점 상태를 불러오지 못했습니다.");
 });
 
 it("returns_to_popup_then_reopens_personal_detail", async () => {
@@ -936,7 +1051,7 @@ it("returns_to_popup_then_reopens_personal_detail", async () => {
   fireEvent.keyDown(personal, { key: "ArrowRight" });
   expect(group).toHaveFocus();
   expect(group).toHaveAttribute("aria-selected", "true");
-  fireEvent.click(screen.getByRole("button", { name: "행성으로 돌아가기" }));
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
   expect(screen.getByRole("main", { name: "행성 팝오버" })).toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "행성·그룹 자세히 보기" }));
   expect(await screen.findByRole("tab", { name: "내 행성" })).toHaveAttribute("aria-selected", "true");
@@ -965,7 +1080,7 @@ it("retains_view_when_native_transition_fails", async () => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage") return structuredClone(localSnapshot);
     if (command === "set_detail_view") throw "window size unavailable";
-    if (command === "get_shop_state") return shopState(0);
+    if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
@@ -1001,7 +1116,7 @@ it("opens_popover_after_profile_setup", async () => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage") return structuredClone(unprofiled);
     if (command === "set_planet_profile") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return shopState(0);
+    if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
@@ -1023,7 +1138,7 @@ it("keeps_unknown_usage_distinct_from_zero", async () => {
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage") return unknown;
-    if (command === "get_shop_state") return shopState(0);
+    if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
@@ -1035,37 +1150,34 @@ it("keeps_unknown_usage_distinct_from_zero", async () => {
   expect(screen.getByRole("region", { name: "수집 상태" })).not.toHaveTextContent("0 토큰");
 });
 
-it("clears a cosmetic preview when leaving the shop and personal detail", async () => {
-  const previewShop: CosmeticShopState = {
-    ...shopState(600_000),
-    slots: [{ slot_id: "sky", display_name: "하늘" }],
-    products: [{ sku: "star_cluster", slot_id: "sky", display_name: "별무리", price: 100_000, catalog_revision: 1, purchasable: true }],
-    slot_versions: { sky: 0 },
-  };
+it("clears the canonical avatar preview when leaving the shop and personal detail", async () => {
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
-    if (command === "get_shop_state") return structuredClone(previewShop);
+    if (command === "get_shop_state") return canonicalShopState(600_000);
     if (command === "list_world_members") return [];
     if (command === "get_my_member_code") return "AB12CD34EF";
     return null;
   });
-  render(<App />);
+  const { container } = render(<App />);
+
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "행성 꾸미기" }));
-  fireEvent.click(await screen.findByRole("button", { name: "별무리 미리보기" }));
-  expect(document.querySelector('[data-cosmetic="star_cluster"]')).toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  let shop = await screen.findByRole("region", { name: "행성 상점" });
+  fireEvent.click(within(shop).getByRole("tab", { name: "아바타" }));
+  fireEvent.click(within(shop).getByRole("button", { name: "탐험가 모자 미리보기" }));
+  expect(container.querySelector('.shop-planet-preview [data-avatar-equipment="avatar_explorer_hat"]')).toBeInTheDocument();
 
-  fireEvent.click(screen.getByRole("button", { name: /내 행성으로 돌아가기/ }));
+  fireEvent.click(screen.getByRole("button", { name: /행성으로 돌아가기/ }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  expect(document.querySelector('[data-cosmetic="star_cluster"]')).not.toBeInTheDocument();
-
-  fireEvent.click(screen.getByRole("tab", { name: "그룹" }));
-  fireEvent.click(screen.getByRole("tab", { name: "내 행성" }));
-
-  expect(document.querySelector('[data-cosmetic="star_cluster"]')).not.toBeInTheDocument();
+  expect(container.querySelector('.planet-landscape-avatar-sprite [data-avatar-equipment="avatar_explorer_hat"]')).not.toBeInTheDocument();
+  fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
+  shop = await screen.findByRole("region", { name: "행성 상점" });
+  expect(container.querySelector('.shop-planet-preview [data-avatar-equipment="avatar_explorer_hat"]')).not.toBeInTheDocument();
+  expect(within(shop).queryByText("탐험가 모자 미리보기 중")).not.toBeInTheDocument();
 });
+
 
 it("keeps the three token totals tied to their original fields", async () => {
   const distinct = structuredClone(localSnapshot);
@@ -1088,8 +1200,180 @@ it("keeps the three token totals tied to their original fields", async () => {
   expect(screen.getByRole("region", { name: "전체 사용량 (과거 포함)" })).toHaveTextContent("19");
 });
 
+it("does not expose local reset to an authenticated account", async () => {
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  expect(screen.getByRole("button", { name: "행성 초기화" })).toBeDisabled();
+  expect(screen.getByText("로그인 계정의 초기화는 서버 상점 연결 후 사용할 수 있습니다.")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  expect(invokeMock).not.toHaveBeenCalledWith("reset_planet");
+});
+
+it("keeps the local reset action for an eligible guest", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" };
+    if (command === "current_usage" || command === "refresh_usage" || command === "reset_planet") return structuredClone(localSnapshot);
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+  confirm.mockRestore();
+});
+
+it("drops a guest reset click when account context starts changing during confirmation", async () => {
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    return null;
+  });
+  const confirm = vi.spyOn(window, "confirm").mockImplementation(() => {
+    listeners.get("world-context-changing")?.({ payload: "account" });
+    return true;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  expect(confirm).toHaveBeenCalledTimes(1);
+  expect(invokeMock).not.toHaveBeenCalledWith("reset_planet");
+});
+
+it("does not replace a new account snapshot with a pending old guest reset result", async () => {
+  const pendingReset = deferred<WorldSnapshot>();
+  let currentAccount: SharingState = { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" };
+  let currentSnapshot = structuredClone(localSnapshot);
+  const nextSnapshot = structuredClone(localSnapshot);
+  nextSnapshot.planet.profile = { nickname: "Next", avatar: "masculine" };
+  const staleSnapshot = structuredClone(localSnapshot);
+  staleSnapshot.planet.profile = { nickname: "Stale", avatar: "masculine" };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(currentSnapshot);
+    if (command === "get_shop_state") return {
+      ...canonicalShopState(),
+      account_id: currentAccount.user_id ? `account:${currentAccount.user_id}` : "local",
+      current_cycle_id: currentSnapshot.planet.current_cycle_id,
+    };
+    if (command === "reset_planet") return pendingReset.promise;
+    return null;
+  });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+
+  currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null, sync_status: "synced" };
+  currentSnapshot = nextSnapshot;
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await screen.findByText("Next의 행성");
+  await act(async () => { pendingReset.resolve(staleSnapshot); });
+
+  expect(screen.getByText("Next의 행성")).toBeInTheDocument();
+  expect(screen.queryByText("Stale의 행성")).not.toBeInTheDocument();
+});
+
+it("does not show a rejected old guest reset on the new account", async () => {
+  const pendingReset = deferred<WorldSnapshot>();
+  let currentAccount: SharingState = { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" };
+  let currentSnapshot = structuredClone(localSnapshot);
+  const nextSnapshot = structuredClone(localSnapshot);
+  nextSnapshot.planet.profile = { nickname: "Next", avatar: "masculine" };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(currentSnapshot);
+    if (command === "get_shop_state") return {
+      ...canonicalShopState(),
+      account_id: currentAccount.user_id ? `account:${currentAccount.user_id}` : "local",
+      current_cycle_id: currentSnapshot.planet.current_cycle_id,
+    };
+    if (command === "reset_planet") return pendingReset.promise;
+    return null;
+  });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+
+  currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null, sync_status: "synced" };
+  currentSnapshot = nextSnapshot;
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await screen.findByText("Next의 행성");
+  await act(async () => { pendingReset.reject(new Error("이전 계정 초기화 실패")); });
+
+  expect(screen.getByText("Next의 행성")).toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("does not let an old reset completion clear the new cycle reset pending state", async () => {
+  const firstReset = deferred<WorldSnapshot>();
+  const secondReset = deferred<WorldSnapshot>();
+  let resetCalls = 0;
+  let currentSnapshot = structuredClone(localSnapshot);
+  const staleSnapshot = structuredClone(localSnapshot);
+  staleSnapshot.planet.profile = { nickname: "Stale", avatar: "masculine" };
+  const nextSnapshot = structuredClone(localSnapshot);
+  nextSnapshot.planet.current_cycle_id = "cycle-2";
+  nextSnapshot.planet.profile = { nickname: "새 주기", avatar: "masculine" };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(currentSnapshot);
+    if (command === "get_shop_state") return { ...canonicalShopState(), account_id: "local", current_cycle_id: currentSnapshot.planet.current_cycle_id };
+    if (command === "reset_planet") return resetCalls++ === 0 ? firstReset.promise : secondReset.promise;
+    return null;
+  });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(resetCalls).toBe(1));
+
+  currentSnapshot = nextSnapshot;
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await screen.findByText("새 주기의 행성");
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(resetCalls).toBe(2));
+
+  await act(async () => { firstReset.resolve(staleSnapshot); });
+  expect(screen.getByText("새 주기의 행성")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "처리 중" })).toBeDisabled();
+
+  const completedSnapshot = structuredClone(nextSnapshot);
+  completedSnapshot.planet.current_cycle_id = "cycle-3";
+  completedSnapshot.planet.profile = { nickname: "완료", avatar: "masculine" };
+  await act(async () => { secondReset.resolve(completedSnapshot); });
+  await screen.findByText("완료의 행성");
+});
+
 it("explains reset effects and group visibility before the user acts", async () => {
   const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    return null;
+  });
   render(<App />);
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
