@@ -100,6 +100,40 @@ language sql as $$
   );
 $$;
 
+create function pg_temp.upload_transition_contribution(p_tokens bigint)
+returns jsonb
+language plpgsql as $$
+declare
+  v_cycle_id text := current_setting('shop_test.transition_cycle');
+  v_effect_revision bigint := current_setting('shop_test.transition_revision')::bigint;
+  v_version bigint := current_setting('shop_test.transition_version')::bigint;
+  v_occurred_at timestamptz := clock_timestamp();
+  v_day text;
+begin
+  v_day := to_char(v_occurred_at at time zone 'Asia/Seoul', 'YYYY-MM-DD');
+  return public.upsert_my_planet_state(
+    pg_temp.planet_state('Transition Owner', v_cycle_id, v_occurred_at),
+    jsonb_build_object(
+      'device_id', '30000000-0000-0000-0000-000000000970',
+      'current_cycle_id', v_cycle_id,
+      'lifetime_tokens', p_tokens,
+      'current_planet_tokens', p_tokens,
+      'daily_tokens', jsonb_build_object(v_day, p_tokens),
+      'incomplete', false,
+      'canonical_version', v_version,
+      'daily_segments', jsonb_build_array(jsonb_build_object(
+        'cycle_id', v_cycle_id, 'date', v_day,
+        'effect_revision', v_effect_revision, 'tokens', p_tokens
+      )),
+      'activity_days', jsonb_build_array(jsonb_build_object(
+        'cycle_id', v_cycle_id, 'reward_date', v_day,
+        'first_occurred_at_utc', v_occurred_at, 'tokens', p_tokens
+      ))
+    )
+  );
+end;
+$$;
+
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000966', true);
 select lives_ok($$select pg_temp.upload_effect_contribution(
@@ -489,15 +523,9 @@ select is((select count(*)::bigint from private.shop_planet_object_generation_ba
     and b.cycle_id = 'threshold-cycle'), 1::bigint,
   'separate account upload leaves the original account-cycle marker intact');
 
-insert into private.shop_effect_history(
-  user_id, cycle_id, revision, started_at, ended_at, active_instance_ids, effects
-) values (
-  '00000000-0000-0000-0000-000000000970', 'transition-cycle-next', 1,
-  now() - interval '24 hours', null, '[]'::jsonb,
-  '{"token_earning_bps":0,"civilization_growth_bps":2000,"shop_discount_bps":0,"reset_cooldown_bps":0,"natural_removal_discount_bps":0,"era_reward_tokens":0,"streak_reward_tokens":0}'::jsonb
-);
 update public.planet_member_state p
-set last_reset_at = now() - interval '10 hours'
+set last_reset_at = now() - interval '10 hours',
+    reset_available_at = now() + interval '14 hours'
 where p.user_id = '00000000-0000-0000-0000-000000000970';
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000970', true);
@@ -518,8 +546,8 @@ select throws_ok($$select public.upsert_my_planet_state(
       'reward_date', to_char(now() at time zone 'Asia/Seoul', 'YYYY-MM-DD'),
       'first_occurred_at_utc', now(), 'tokens', 100000))
   )
-)$$, '23514', 'planet reset cooldown has not elapsed',
-  'cycle change before the legacy cooldown elapses is rejected');
+)$$, '23514', 'planet cycle can only change through reset_my_planet',
+  'client cycle changes are rejected while the server reset is unavailable');
 reset role;
 select is((select p.current_cycle_id from public.planet_member_state p
   where p.user_id = '00000000-0000-0000-0000-000000000970'), 'transition-cycle',
@@ -529,11 +557,12 @@ select is((select count(*)::bigint from private.shop_planet_object_generation_ba
   'rejected early cycle change does not create a second generation marker');
 
 update public.planet_member_state p
-set last_reset_at = now() - interval '48 hours'
+set last_reset_at = now() - interval '48 hours',
+    reset_available_at = now() - interval '24 hours'
 where p.user_id = '00000000-0000-0000-0000-000000000970';
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000970', true);
-select lives_ok($$select public.upsert_my_planet_state(
+select throws_ok($$select public.upsert_my_planet_state(
   pg_temp.planet_state('Transition Owner', 'transition-cycle-next', now() - interval '24 hours'),
   jsonb_build_object(
     'device_id', '30000000-0000-0000-0000-000000000971',
@@ -550,16 +579,70 @@ select lives_ok($$select public.upsert_my_planet_state(
       'reward_date', to_char(now() at time zone 'Asia/Seoul', 'YYYY-MM-DD'),
       'first_occurred_at_utc', now(), 'tokens', 100000))
   )
-)$$, 'valid cycle change after the legacy cooldown elapses succeeds');
+)$$, '23514', 'planet cycle can only change through reset_my_planet',
+  'client cycle changes remain rejected after the old cooldown would have elapsed');
 reset role;
-select is((public.get_my_planet_state()->>'current_cycle_id'), 'transition-cycle-next',
-  'new valid cycle becomes canonical after reset cooldown');
+select is((select p.current_cycle_id from public.planet_member_state p
+  where p.user_id = '00000000-0000-0000-0000-000000000970'), 'transition-cycle',
+  'elapsed client timestamps still leave the server-owned cycle unchanged');
+select is((select count(*)::bigint from private.shop_planet_object_generation_baseline b
+  where b.user_id = '00000000-0000-0000-0000-000000000970'), 1::bigint,
+  'legacy upload attempts do not create reset-cycle generation markers');
+select is((select count(*)::bigint from private.shop_planet_object_generation_baseline b
+  where b.user_id = '00000000-0000-0000-0000-000000000970'
+    and b.cycle_id = 'transition-cycle'), 1::bigint,
+  'rejected transition preserves the old cycle generation marker');
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000970', true);
+select set_config('shop_test.transition_reset', public.reset_my_planet(
+  '40000000-0000-0000-0000-000000000970', 'transition-cycle'
+)::text, true);
+reset role;
+select is(current_setting('shop_test.transition_reset')::jsonb->'action'->>'status',
+  'reset', 'the authenticated reset RPC performs the valid server cycle transition');
+select set_config('shop_test.transition_cycle',
+  (select p.current_cycle_id from public.planet_member_state p
+    where p.user_id = '00000000-0000-0000-0000-000000000970'), true);
+select set_config('shop_test.transition_revision',
+  (select h.revision::text
+    from private.shop_effect_history h
+    join public.planet_member_state p on p.user_id = h.user_id
+      and p.current_cycle_id = h.cycle_id
+    where h.user_id = '00000000-0000-0000-0000-000000000970'
+      and h.ended_at is null), true);
+select set_config('shop_test.transition_version',
+  (select (d.canonical_version + 1)::text
+    from private.planet_device_state d
+    where d.user_id = '00000000-0000-0000-0000-000000000970'
+      and d.device_id = '30000000-0000-0000-0000-000000000970'), true);
+select is(current_setting('shop_test.transition_cycle'),
+  current_setting('shop_test.transition_reset')::jsonb->'planet_state'->>'current_cycle_id',
+  'the reset response and stored server-selected cycle agree');
+
+set local role authenticated;
+select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000970', true);
+select lives_ok($$select pg_temp.upload_transition_contribution(100000)$$,
+  'the first contribution uploads against the server-selected new cycle');
+reset role;
+select is((public.get_my_planet_state()->>'current_cycle_id'),
+  current_setting('shop_test.transition_cycle'),
+  'new canonical upload retains the actual server-selected cycle');
+select is((select min(c.effect_revision)
+  from private.shop_effect_contribution c
+  where c.user_id = '00000000-0000-0000-0000-000000000970'
+    and c.cycle_id = current_setting('shop_test.transition_cycle')),
+  current_setting('shop_test.transition_revision')::bigint,
+  'new-cycle contribution uses the server-created global effect revision');
+select is((public.get_my_planet_state()->>'growth_credit')::numeric, 1::numeric,
+  'new-cycle growth uses its server-created zero-effect baseline');
 select is(public.get_my_planet_state()->'objects',
-  jsonb_build_array(private.shop_canonical_planet_object('transition-cycle-next', 0, 0)),
-  'new cycle starts from its own server-projected natural-object basis');
+  jsonb_build_array(private.shop_canonical_planet_object(
+    current_setting('shop_test.transition_cycle'), 0, 0)),
+  'new cycle projects natural objects from its own server-selected identity');
 select is((select count(*)::bigint from private.shop_planet_object_generation_baseline b
   where b.user_id = '00000000-0000-0000-0000-000000000970'), 2::bigint,
-  'old and new cycle generation markers remain separate for the account');
+  'old and reset-created cycle generation markers remain separate');
 select is((select count(*)::bigint from private.shop_planet_object_generation_baseline b
   where b.user_id = '00000000-0000-0000-0000-000000000970'
     and b.cycle_id = 'transition-cycle'), 1::bigint,
