@@ -84,6 +84,13 @@ function thumbnail(product: ShopProduct, props: Partial<ComponentProps<typeof Sh
   return render(<ShopProductThumbnail product={product} {...props} />);
 }
 
+function deepFreeze<T extends object>(value: T): T {
+  for (const nested of Object.values(value)) {
+    if (nested && typeof nested === "object") deepFreeze(nested);
+  }
+  return Object.freeze(value);
+}
+
 describe("ShopProductThumbnail", () => {
   it("renders distinct art for all 32 landscape products in their canonical zones", () => {
     const { container } = render(
@@ -200,5 +207,86 @@ describe("ShopProductThumbnail", () => {
     expect(screen.getByRole("img", { name: "미등록 장식 미리보기" })).toHaveTextContent("미리보기를 제공할 수 없습니다.");
     expect(container.querySelector("svg")).not.toBeInTheDocument();
     expect(container.querySelector("[data-thumbnail-unavailable]")).toHaveClass("catalog-preview");
+  });
+
+  it("shows an accessible unavailable preview for an unknown avatar SKU", () => {
+    const unknownAvatar: ShopProduct = {
+      ...AVATAR_CATALOG[0],
+      sku: "avatar_unregistered",
+      display_name: "미등록 아바타 장식",
+      purchasable: false,
+    };
+    const { container } = thumbnail(unknownAvatar);
+
+    expect(screen.getByRole("img", { name: "미등록 아바타 장식 미리보기" }))
+      .toHaveTextContent("미리보기를 제공할 수 없습니다.");
+    expect(container.querySelector("svg")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-thumbnail-unavailable]")).toBeInTheDocument();
+  });
+
+  it("falls back when a known landscape SKU declares the wrong zone", () => {
+    const wrongZoneProduct: ShopProduct = {
+      ...LANDSCAPE_CATALOG.find((product) => product.sku === "land_thin_ring")!,
+      placement_zone: "ground",
+    };
+    const { container } = thumbnail(wrongZoneProduct);
+
+    expect(screen.getByRole("img", { name: "얇은 고리 미리보기" }))
+      .toHaveTextContent("미리보기를 제공할 수 없습니다.");
+    expect(container.querySelector("[data-landscape-art]")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-thumbnail-unavailable]")).toBeInTheDocument();
+  });
+
+  it("falls back when a known avatar SKU declares the wrong slot", () => {
+    const wrongSlotProduct: ShopProduct = {
+      ...AVATAR_CATALOG.find((product) => product.sku === "avatar_explorer_hat")!,
+      avatar_slot: "outfit",
+    };
+    const { container } = thumbnail(wrongSlotProduct);
+
+    expect(screen.getByRole("img", { name: "탐험가 모자 미리보기" }))
+      .toHaveTextContent("미리보기를 제공할 수 없습니다.");
+    expect(container.querySelector("svg")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-thumbnail-unavailable]")).toBeInTheDocument();
+  });
+
+  it("falls back when a supplied landscape instance belongs to a different SKU", () => {
+    const product = LANDSCAPE_CATALOG.find((candidate) => candidate.sku === "land_garden")!;
+    const mismatchedInstance: LandscapeInstance = {
+      instance_id: "tree-instance-for-garden",
+      sku: "land_tree",
+      variation_index: 2,
+      seed: "mismatched-instance-seed",
+      variation_version: 1,
+      placement_version: 3,
+    };
+    const { container } = thumbnail(product, { instance: mismatchedInstance });
+
+    expect(screen.getByRole("img", { name: "꽃 정원 미리보기" }))
+      .toHaveTextContent("미리보기를 제공할 수 없습니다.");
+    expect(container.querySelector("[data-landscape-art]")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-thumbnail-unavailable]")).toBeInTheDocument();
+  });
+
+  it("does not mutate frozen product or supplied instance inputs", () => {
+    const productCopy = structuredClone(LANDSCAPE_CATALOG.find((candidate) => candidate.sku === "land_garden")!);
+    const instanceCopy: LandscapeInstance = {
+      instance_id: "frozen-garden-instance",
+      sku: "land_garden",
+      variation_index: 3,
+      seed: "frozen-garden-seed",
+      variation_version: 5,
+      placement_version: 9,
+    };
+    const expectedProduct = structuredClone(productCopy);
+    const expectedInstance = structuredClone(instanceCopy);
+    const product = deepFreeze(productCopy);
+    const instance = deepFreeze(instanceCopy);
+
+    const { container } = thumbnail(product, { instance });
+
+    expect(container.querySelector("[data-landscape-art]")).toHaveAttribute("data-landscape-art", product.sku);
+    expect(product).toEqual(expectedProduct);
+    expect(instance).toEqual(expectedInstance);
   });
 });
