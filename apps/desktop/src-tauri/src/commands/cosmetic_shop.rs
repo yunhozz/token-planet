@@ -2,12 +2,321 @@ use tauri::State;
 
 use crate::domain::cosmetic_shop::{
     CosmeticEquipAction, CosmeticEquipResult, CosmeticEquipStatus, CosmeticPurchaseAction,
-    CosmeticShopState,
+    CosmeticShopState, QuoteTarget, ShopActionResult, ShopActionStatus, ShopQuote, ShopRequest,
+    ShopState,
 };
 use crate::sync::auth::{AuthConfig, AuthError, SessionStore, StoredSession, SupabaseAuthClient};
 use crate::sync::client::{SupabaseSyncClient, SyncError};
 use crate::sync::worker::import_pending_guest_cosmetics;
-use crate::AppState;
+use crate::{storage::ledger::Ledger, AppState};
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Mutex;
+
+type ShopRpcFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SyncError>> + Send + 'a>>;
+
+trait ShopRpc: Send + Sync {
+    fn get_state<'a>(&'a self, access_token: &'a str) -> ShopRpcFuture<'a, ShopState>;
+    fn quote_action<'a>(
+        &'a self,
+        access_token: &'a str,
+        target: &'a QuoteTarget,
+    ) -> ShopRpcFuture<'a, ShopQuote>;
+    fn apply_action<'a>(
+        &'a self,
+        access_token: &'a str,
+        request: &'a ShopRequest,
+    ) -> ShopRpcFuture<'a, ShopActionResult>;
+}
+
+impl ShopRpc for SupabaseSyncClient {
+    fn get_state<'a>(&'a self, access_token: &'a str) -> ShopRpcFuture<'a, ShopState> {
+        Box::pin(self.get_my_shop_state(access_token))
+    }
+
+    fn quote_action<'a>(
+        &'a self,
+        access_token: &'a str,
+        target: &'a QuoteTarget,
+    ) -> ShopRpcFuture<'a, ShopQuote> {
+        Box::pin(self.quote_shop_action(access_token, target))
+    }
+
+    fn apply_action<'a>(
+        &'a self,
+        access_token: &'a str,
+        request: &'a ShopRequest,
+    ) -> ShopRpcFuture<'a, ShopActionResult> {
+        Box::pin(self.apply_shop_action(access_token, request))
+    }
+}
+
+#[derive(Clone)]
+enum CanonicalShopSession {
+    Guest,
+    Unavailable(String),
+    Online {
+        account_id: String,
+        cycle_id: String,
+        access_token: String,
+    },
+}
+
+fn request_id(request: &ShopRequest) -> &str {
+    match request {
+        ShopRequest::Purchase { request_id, .. }
+        | ShopRequest::Place { request_id, .. }
+        | ShopRequest::Retrieve { request_id, .. }
+        | ShopRequest::EquipAvatar { request_id, .. }
+        | ShopRequest::RemoveNatural { request_id, .. }
+        | ShopRequest::ResetPlanet { request_id, .. } => request_id,
+    }
+}
+
+fn offline_shop_action(
+    ledger: &Mutex<Ledger>,
+    request: &ShopRequest,
+    reason: &str,
+) -> Result<ShopActionResult, String> {
+    let mut shop = ledger
+        .lock()
+        .map_err(|_| "상점 저장소 오류")?
+        .shop_state()
+        .map_err(|_| "상점 상태를 읽을 수 없습니다")?;
+    shop.action_unavailable_reason = Some(reason.to_owned());
+    Ok(ShopActionResult {
+        status: ShopActionStatus::Unavailable,
+        request_id: request_id(request).to_owned(),
+        confirmed_quote: None,
+        state: shop,
+    })
+}
+
+fn canonical_local_shop_state(
+    ledger: &Mutex<Ledger>,
+    reason: Option<&str>,
+) -> Result<ShopState, String> {
+    let mut shop = ledger
+        .lock()
+        .map_err(|_| "상점 저장소 오류")?
+        .shop_state()
+        .map_err(|_| "상점 상태를 읽을 수 없습니다")?;
+    if let Some(reason) = reason {
+        shop.action_unavailable_reason = Some(reason.to_owned());
+    }
+    Ok(shop)
+}
+
+fn ensure_shop_context(
+    ledger: &Mutex<Ledger>,
+    account_id: &str,
+    cycle_id: &str,
+) -> Result<(), String> {
+    let ledger = ledger.lock().map_err(|_| "상점 저장소 오류")?;
+    let actual_account = ledger
+        .cosmetic_account_id()
+        .map_err(|_| "상점 계정 정보를 읽을 수 없습니다")?;
+    let actual_cycle = ledger
+        .planet_cycle_id()
+        .map_err(|_| "행성 주기를 읽을 수 없습니다")?;
+    if actual_account != account_id || actual_cycle != cycle_id {
+        return Err("계정 또는 행성 주기가 변경되어 상점 응답을 반영할 수 없습니다".into());
+    }
+    Ok(())
+}
+
+fn online_shop_context(
+    ledger: &Mutex<Ledger>,
+    user_id: &str,
+    access_token: &str,
+) -> Result<CanonicalShopSession, String> {
+    let ledger = ledger.lock().map_err(|_| "상점 저장소 오류")?;
+    let account_id = ledger
+        .cosmetic_account_id()
+        .map_err(|_| "상점 계정 정보를 읽을 수 없습니다")?;
+    let expected_account = format!("account:{user_id}");
+    if account_id != expected_account {
+        return Err("로그인 계정과 현재 상점 계정이 다릅니다".into());
+    }
+    let cycle_id = ledger
+        .planet_cycle_id()
+        .map_err(|_| "행성 주기를 읽을 수 없습니다")?;
+    Ok(CanonicalShopSession::Online {
+        account_id,
+        cycle_id,
+        access_token: access_token.to_owned(),
+    })
+}
+
+async fn get_shop_state_for_session(
+    ledger: &Mutex<Ledger>,
+    session: CanonicalShopSession,
+    rpc: Option<&dyn ShopRpc>,
+) -> Result<ShopState, String> {
+    match session {
+        CanonicalShopSession::Guest => {
+            if ledger
+                .lock()
+                .map_err(|_| "상점 저장소 오류")?
+                .cosmetic_account_id()
+                .map_err(|_| "상점 계정 정보를 읽을 수 없습니다")?
+                .starts_with("account:")
+            {
+                return Err("로그인 계정의 상점은 서버 연결 후 이용할 수 있습니다".into());
+            }
+            canonical_local_shop_state(ledger, None)
+        }
+        CanonicalShopSession::Unavailable(reason) => {
+            canonical_local_shop_state(ledger, Some(&reason))
+        }
+        CanonicalShopSession::Online {
+            account_id,
+            cycle_id,
+            access_token,
+        } => {
+            ensure_shop_context(ledger, &account_id, &cycle_id)?;
+            let rpc = rpc.ok_or("온라인 상점 연결을 사용할 수 없습니다")?;
+            let shop = rpc
+                .get_state(&access_token)
+                .await
+                .map_err(sync_error_reason)?;
+            store_remote_shop_state(ledger, &account_id, &cycle_id, &shop, true)?;
+            Ok(shop)
+        }
+    }
+}
+
+async fn quote_shop_action_for_session(
+    ledger: &Mutex<Ledger>,
+    session: CanonicalShopSession,
+    rpc: Option<&dyn ShopRpc>,
+    target: &QuoteTarget,
+) -> Result<ShopQuote, String> {
+    match session {
+        CanonicalShopSession::Guest => {
+            let ledger = ledger.lock().map_err(|_| "상점 저장소 오류")?;
+            if ledger
+                .cosmetic_account_id()
+                .map_err(|_| "상점 계정 정보를 읽을 수 없습니다")?
+                .starts_with("account:")
+            {
+                return Err("로그인 계정의 견적은 서버 연결 후 이용할 수 있습니다".into());
+            }
+            ledger
+                .quote_shop(target)
+                .map_err(|_| "상점 견적을 계산할 수 없습니다".into())
+        }
+        CanonicalShopSession::Unavailable(reason) => Err(reason),
+        CanonicalShopSession::Online {
+            account_id,
+            cycle_id,
+            access_token,
+        } => {
+            if matches!(target, QuoteTarget::RemoveNatural { .. }) {
+                return Err("자연 개체 제거는 서버 상점 연결 후 지원됩니다".into());
+            }
+            ensure_shop_context(ledger, &account_id, &cycle_id)?;
+            let rpc = rpc.ok_or("온라인 상점 연결을 사용할 수 없습니다")?;
+            let quote = rpc
+                .quote_action(&access_token, target)
+                .await
+                .map_err(sync_error_reason)?;
+            ensure_shop_context(ledger, &account_id, &cycle_id)?;
+            if &quote.target != target {
+                return Err("서버 견적 대상이 요청과 다릅니다".into());
+            }
+            Ok(quote)
+        }
+    }
+}
+
+fn store_remote_shop_state(
+    ledger: &Mutex<Ledger>,
+    account_id: &str,
+    captured_cycle_id: &str,
+    shop: &ShopState,
+    allow_server_cycle_change: bool,
+) -> Result<(), String> {
+    if shop.account_id != account_id
+        || (!allow_server_cycle_change && shop.current_cycle_id != captured_cycle_id)
+    {
+        return Err("서버 상점 응답의 계정 또는 행성 주기가 다릅니다".into());
+    }
+    let mut ledger = ledger.lock().map_err(|_| "상점 저장소 오류")?;
+    let actual_account = ledger
+        .cosmetic_account_id()
+        .map_err(|_| "상점 계정 정보를 읽을 수 없습니다")?;
+    let actual_cycle = ledger
+        .planet_cycle_id()
+        .map_err(|_| "행성 주기를 읽을 수 없습니다")?;
+    if actual_account != account_id || actual_cycle != captured_cycle_id {
+        return Err("계정 또는 행성 주기가 변경되어 상점 응답을 반영할 수 없습니다".into());
+    }
+    ledger
+        .store_confirmed_shop_state(shop)
+        .map_err(|_| "상점 상태를 저장할 수 없습니다".into())
+}
+
+async fn apply_shop_request_for_session(
+    ledger: &Mutex<Ledger>,
+    session: CanonicalShopSession,
+    rpc: Option<&dyn ShopRpc>,
+    request: &ShopRequest,
+) -> Result<ShopActionResult, String> {
+    match session {
+        CanonicalShopSession::Guest => {
+            let mut ledger = ledger.lock().map_err(|_| "상점 저장소 오류")?;
+            if ledger
+                .cosmetic_account_id()
+                .map_err(|_| "상점 계정 정보를 읽을 수 없습니다")?
+                .starts_with("account:")
+            {
+                return Err("로그인 계정의 상점은 서버 연결 후 이용할 수 있습니다".into());
+            }
+            ledger
+                .apply_guest_shop_request(request, chrono::Utc::now())
+                .map_err(|_| "상점 요청을 처리할 수 없습니다".into())
+        }
+        CanonicalShopSession::Unavailable(reason) => {
+            offline_shop_action(ledger, request, &reason)
+        }
+        CanonicalShopSession::Online {
+            account_id,
+            cycle_id,
+            access_token,
+        } => {
+            ensure_shop_context(ledger, &account_id, &cycle_id)?;
+            if matches!(
+                request,
+                ShopRequest::RemoveNatural { .. } | ShopRequest::ResetPlanet { .. }
+            ) {
+                let reason = match request {
+                    ShopRequest::RemoveNatural { .. } => {
+                        "자연 개체 제거는 서버 상점 연결 후 지원됩니다"
+                    }
+                    _ => "행성 초기화는 서버 상점 연결 후 지원됩니다",
+                };
+                return offline_shop_action(ledger, request, reason);
+            }
+            let rpc = rpc.ok_or("온라인 상점 연결을 사용할 수 없습니다")?;
+            let result = rpc
+                .apply_action(&access_token, request)
+                .await
+                .map_err(sync_error_reason)?;
+            if result.request_id != request_id(request) {
+                return Err("서버 상점 응답의 요청 ID가 다릅니다".into());
+            }
+            store_remote_shop_state(
+                ledger,
+                &account_id,
+                &cycle_id,
+                &result.state,
+                result.status == ShopActionStatus::CycleMismatch,
+            )?;
+            Ok(result)
+        }
+    }
+}
 
 enum ShopSession {
     Guest,
@@ -218,7 +527,139 @@ fn stale_equip_result(
 }
 
 #[tauri::command]
-pub async fn get_shop_state(state: State<'_, AppState>) -> Result<CosmeticShopState, String> {
+pub async fn get_shop_state(state: State<'_, AppState>) -> Result<ShopState, String> {
+    let _gate = state.sync_gate.lock().await;
+    match shop_session(&state).await? {
+        ShopSession::Guest => {
+            get_shop_state_for_session(&state.ledger, CanonicalShopSession::Guest, None).await
+        }
+        ShopSession::Unavailable(reason) => {
+            get_shop_state_for_session(
+                &state.ledger,
+                CanonicalShopSession::Unavailable(reason.into()),
+                None,
+            )
+            .await
+        }
+        ShopSession::Online { config, session } => {
+            let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
+            let canonical_session = online_shop_context(
+                &state.ledger,
+                &session.user.id,
+                &session.access_token,
+            )?;
+            get_shop_state_for_session(&state.ledger, canonical_session, Some(&client)).await
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn quote_shop_action(
+    target: QuoteTarget,
+    state: State<'_, AppState>,
+) -> Result<ShopQuote, String> {
+    let _gate = state.sync_gate.lock().await;
+    match shop_session(&state).await? {
+        ShopSession::Guest => {
+            quote_shop_action_for_session(&state.ledger, CanonicalShopSession::Guest, None, &target)
+                .await
+        }
+        ShopSession::Unavailable(reason) => {
+            quote_shop_action_for_session(
+                &state.ledger,
+                CanonicalShopSession::Unavailable(reason.into()),
+                None,
+                &target,
+            )
+            .await
+        }
+        ShopSession::Online { config, session } => {
+            let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
+            if matches!(target, QuoteTarget::RemoveNatural { .. }) {
+                return Err("자연 개체 제거는 서버 상점 연결 후 지원됩니다".into());
+            }
+            let canonical_session = online_shop_context(
+                &state.ledger,
+                &session.user.id,
+                &session.access_token,
+            )?;
+            if let Some(reason) = sharing_pause_reason(&state, &client, &session.access_token).await {
+                return Err(reason);
+            }
+            quote_shop_action_for_session(
+                &state.ledger,
+                canonical_session,
+                Some(&client),
+                &target,
+            )
+            .await
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn apply_shop_action(
+    request: ShopRequest,
+    state: State<'_, AppState>,
+) -> Result<ShopActionResult, String> {
+    let _gate = state.sync_gate.lock().await;
+    match shop_session(&state).await? {
+        ShopSession::Guest => {
+            apply_shop_request_for_session(
+                &state.ledger,
+                CanonicalShopSession::Guest,
+                None,
+                &request,
+            )
+            .await
+        }
+        ShopSession::Unavailable(reason) => {
+            apply_shop_request_for_session(
+                &state.ledger,
+                CanonicalShopSession::Unavailable(reason.into()),
+                None,
+                &request,
+            )
+            .await
+        }
+        ShopSession::Online { config, session } => {
+            let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
+            let canonical_session = online_shop_context(
+                &state.ledger,
+                &session.user.id,
+                &session.access_token,
+            )?;
+            if !matches!(
+                request,
+                ShopRequest::RemoveNatural { .. } | ShopRequest::ResetPlanet { .. }
+            ) {
+                if let Some(reason) = sharing_pause_reason(&state, &client, &session.access_token).await {
+                    if let CanonicalShopSession::Online {
+                        account_id,
+                        cycle_id,
+                        ..
+                    } = &canonical_session
+                    {
+                        ensure_shop_context(&state.ledger, account_id, cycle_id)?;
+                    }
+                    return offline_shop_action(&state.ledger, &request, &reason);
+                }
+            }
+            apply_shop_request_for_session(
+                &state.ledger,
+                canonical_session,
+                Some(&client),
+                &request,
+            )
+            .await
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn get_legacy_cosmetic_shop_state(
+    state: State<'_, AppState>,
+) -> Result<CosmeticShopState, String> {
     let _gate = state.sync_gate.lock().await;
     match shop_session(&state).await? {
         ShopSession::Guest => local_shop_state(&state, None),
@@ -372,10 +813,628 @@ pub async fn equip_cosmetic(
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::stale_equip_result;
-    use crate::domain::cosmetic_shop::{
-        CosmeticEquipStatus, CosmeticShopState, CosmeticSlot, EquippedCosmetic,
+    use super::{
+        apply_shop_request_for_session, get_shop_state_for_session, quote_shop_action_for_session,
+        stale_equip_result, CanonicalShopSession, ShopRpc, ShopRpcFuture,
     };
+    use crate::domain::cosmetic_shop::{
+        ActiveEffects, AvatarEquipment, AvatarEquipmentItem, CosmeticEquipStatus,
+        CosmeticShopState, CosmeticSlot, EquippedCosmetic, NaturalObjectKey, QuoteTarget,
+        RewardState, ShopActionResult, ShopActionStatus, ShopQuote, ShopRequest, ShopState,
+    };
+    use crate::storage::ledger::Ledger;
+    use crate::sync::client::SyncError;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct TestShopRpc {
+        get_result: Mutex<Option<Result<ShopState, SyncError>>>,
+        get_calls: Mutex<Vec<String>>,
+        quote_result: Mutex<Option<Result<ShopQuote, SyncError>>>,
+        quote_calls: Mutex<Vec<(String, QuoteTarget)>>,
+        apply_result: Mutex<Option<Result<ShopActionResult, SyncError>>>,
+        apply_calls: Mutex<Vec<(String, ShopRequest)>>,
+    }
+
+    impl ShopRpc for TestShopRpc {
+        fn get_state<'a>(&'a self, access_token: &'a str) -> ShopRpcFuture<'a, ShopState> {
+            self.get_calls.lock().unwrap().push(access_token.to_owned());
+            let result = self.get_result.lock().unwrap().take().unwrap();
+            Box::pin(async move { result })
+        }
+
+        fn quote_action<'a>(
+            &'a self,
+            access_token: &'a str,
+            target: &'a QuoteTarget,
+        ) -> ShopRpcFuture<'a, ShopQuote> {
+            self.quote_calls
+                .lock()
+                .unwrap()
+                .push((access_token.to_owned(), target.clone()));
+            let result = self.quote_result.lock().unwrap().take().unwrap();
+            Box::pin(async move { result })
+        }
+
+        fn apply_action<'a>(
+            &'a self,
+            access_token: &'a str,
+            request: &'a ShopRequest,
+        ) -> ShopRpcFuture<'a, ShopActionResult> {
+            self.apply_calls
+                .lock()
+                .unwrap()
+                .push((access_token.to_owned(), request.clone()));
+            let result = self.apply_result.lock().unwrap().take().unwrap();
+            Box::pin(async move { result })
+        }
+    }
+
+    fn test_ledger() -> (tempfile::TempDir, Mutex<Ledger>) {
+        let directory = tempfile::tempdir().unwrap();
+        let ledger = Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC)
+            .unwrap();
+        (directory, Mutex::new(ledger))
+    }
+
+    fn canonical_state(account_id: &str, cycle_id: &str, revision: u64) -> ShopState {
+        let empty_item = || AvatarEquipmentItem {
+            sku: None,
+            version: 0,
+        };
+        ShopState {
+            account_id: account_id.into(),
+            current_cycle_id: cycle_id.into(),
+            catalog_revision: 1,
+            state_revision: revision,
+            available_balance: 12_345,
+            products: vec![],
+            landscape_instances: vec![],
+            placements: vec![],
+            removed_natural_keys: vec![],
+            avatar_owned_skus: vec![],
+            avatar_equipment: AvatarEquipment {
+                head: empty_item(),
+                outfit: empty_item(),
+                face: empty_item(),
+                back: empty_item(),
+            },
+            effects: ActiveEffects::default(),
+            reward_state: RewardState::default(),
+            action_unavailable_reason: None,
+            guest_import_pending: false,
+            guest_import_error: None,
+        }
+    }
+
+    fn online_session(ledger: &Mutex<Ledger>, access_token: &str) -> CanonicalShopSession {
+        let ledger = ledger.lock().unwrap();
+        CanonicalShopSession::Online {
+            account_id: ledger.cosmetic_account_id().unwrap(),
+            cycle_id: ledger.planet_cycle_id().unwrap(),
+            access_token: access_token.into(),
+        }
+    }
+
+    fn placement_request(cycle_id: &str) -> ShopRequest {
+        ShopRequest::Place {
+            request_id: "request-42".into(),
+            cycle_id: cycle_id.into(),
+            instance_id: "instance-1".into(),
+            expected_version: 7,
+            x: 0.25,
+            y: 0.75,
+        }
+    }
+
+    #[test]
+    fn online_getter_caches_the_authenticated_canonical_state() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let rpc = TestShopRpc::default();
+        *rpc.get_result.lock().unwrap() = Some(Ok(canonical_state("account:alice", &cycle_id, 4)));
+
+        let state = tauri::async_runtime::block_on(get_shop_state_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+        ))
+        .unwrap();
+
+        assert_eq!(state.state_revision, 4);
+        assert_eq!(*rpc.get_calls.lock().unwrap(), vec!["alice-token"]);
+        assert_eq!(ledger.lock().unwrap().shop_state().unwrap().state_revision, 4);
+    }
+
+    #[test]
+    fn online_getter_accepts_server_cycle_without_resetting_local_cycle() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let rpc = TestShopRpc::default();
+        *rpc.get_result.lock().unwrap() = Some(Ok(canonical_state(
+            "account:alice",
+            "foreign-cycle",
+            4,
+        )));
+
+        let state = tauri::async_runtime::block_on(get_shop_state_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+        ))
+        .unwrap();
+
+        assert_eq!(state.current_cycle_id, "foreign-cycle");
+        let ledger = ledger.lock().unwrap();
+        let cached_json: String = ledger
+            .connection
+            .query_row("SELECT state_json FROM shop_remote_state", [], |row| row.get(0))
+            .unwrap();
+        let cached: ShopState = serde_json::from_str(&cached_json).unwrap();
+        assert_eq!(cached.current_cycle_id, "foreign-cycle");
+        assert_eq!(cycle_id, ledger.planet_cycle_id().unwrap());
+    }
+
+    #[test]
+    fn online_quote_uses_the_authenticated_target_and_returns_matching_quote() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let target = QuoteTarget::Purchase {
+            sku: "land_pond".into(),
+        };
+        let expected_quote = ShopQuote {
+            target: target.clone(),
+            catalog_revision: 3,
+            effect_revision: 5,
+            price: 4_500_000,
+        };
+        let rpc = TestShopRpc::default();
+        *rpc.quote_result.lock().unwrap() = Some(Ok(expected_quote.clone()));
+
+        let quote = tauri::async_runtime::block_on(quote_shop_action_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &target,
+        ))
+        .unwrap();
+
+        assert_eq!(quote, expected_quote);
+        assert_eq!(
+            *rpc.quote_calls.lock().unwrap(),
+            vec![("alice-token".into(), target)]
+        );
+    }
+
+    #[test]
+    fn online_quote_rejects_a_server_quote_for_a_different_target() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let target = QuoteTarget::Purchase {
+            sku: "land_pond".into(),
+        };
+        let rpc = TestShopRpc::default();
+        *rpc.quote_result.lock().unwrap() = Some(Ok(ShopQuote {
+            target: QuoteTarget::Purchase {
+                sku: "land_well".into(),
+            },
+            catalog_revision: 3,
+            effect_revision: 5,
+            price: 15_000_000,
+        }));
+
+        let result = tauri::async_runtime::block_on(quote_shop_action_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &target,
+        ));
+
+        assert!(result.is_err());
+        assert_eq!(rpc.quote_calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn server_only_natural_removal_quote_is_not_sent_from_a_signed_client() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let target = QuoteTarget::RemoveNatural {
+            key: NaturalObjectKey {
+                cycle_id,
+                stage: 0,
+                ordinal: 0,
+            },
+        };
+        let rpc = TestShopRpc::default();
+
+        let result = tauri::async_runtime::block_on(quote_shop_action_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &target,
+        ));
+
+        assert!(result.is_err());
+        assert!(rpc.quote_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn signed_offline_getter_returns_only_the_confirmed_local_projection() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+
+        let state = tauri::async_runtime::block_on(get_shop_state_for_session(
+            &ledger,
+            CanonicalShopSession::Unavailable("서버에 연결할 수 없습니다".into()),
+            None,
+        ))
+        .unwrap();
+
+        assert_eq!(state.account_id, "account:alice");
+        assert_eq!(state.available_balance, 0);
+        assert_eq!(
+            state.action_unavailable_reason.as_deref(),
+            Some("서버에 연결할 수 없습니다")
+        );
+        assert!(state.landscape_instances.is_empty());
+    }
+
+    #[test]
+    fn online_natural_removal_and_reset_are_unavailable_without_rpc_or_local_mutation() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let before = ledger.lock().unwrap().shop_state().unwrap();
+        let quote = ShopQuote {
+            target: QuoteTarget::RemoveNatural {
+                key: NaturalObjectKey {
+                    cycle_id: cycle_id.clone(),
+                    stage: 0,
+                    ordinal: 0,
+                },
+            },
+            catalog_revision: 1,
+            effect_revision: 1,
+            price: 100_000,
+        };
+        let requests = [
+            ShopRequest::RemoveNatural {
+                request_id: "remove-1".into(),
+                key: NaturalObjectKey {
+                    cycle_id: cycle_id.clone(),
+                    stage: 0,
+                    ordinal: 0,
+                },
+                expected_version: 0,
+                quote,
+            },
+            ShopRequest::ResetPlanet {
+                request_id: "reset-1".into(),
+                cycle_id: cycle_id.clone(),
+            },
+        ];
+        let rpc = TestShopRpc::default();
+
+        for request in requests {
+            let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+                &ledger,
+                online_session(&ledger, "alice-token"),
+                Some(&rpc),
+                &request,
+            ))
+            .unwrap();
+            assert_eq!(result.status, ShopActionStatus::Unavailable);
+            assert_eq!(result.request_id, super::request_id(&request));
+        }
+
+        assert!(rpc.apply_calls.lock().unwrap().is_empty());
+        assert_eq!(ledger.lock().unwrap().planet_cycle_id().unwrap(), cycle_id);
+        let after = ledger.lock().unwrap().shop_state().unwrap();
+        assert_eq!(after.available_balance, before.available_balance);
+        assert_eq!(after.landscape_instances, before.landscape_instances);
+    }
+
+    #[test]
+    fn online_action_rejects_a_response_with_a_different_request_id_before_caching() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let request = placement_request(&cycle_id);
+        let rpc = TestShopRpc::default();
+        *rpc.apply_result.lock().unwrap() = Some(Ok(ShopActionResult {
+            status: ShopActionStatus::Placed,
+            request_id: "another-request".into(),
+            confirmed_quote: None,
+            state: canonical_state("account:alice", &cycle_id, 8),
+        }));
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &request,
+        ));
+
+        assert!(result.is_err());
+        let cached_count: i64 = ledger
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cached_count, 0);
+    }
+
+    #[test]
+    fn online_action_does_not_send_after_captured_account_context_changes() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let request = placement_request(&cycle_id);
+        let rpc = TestShopRpc::default();
+        let session = CanonicalShopSession::Online {
+            account_id: "account:bob".into(),
+            cycle_id,
+            access_token: "alice-token".into(),
+        };
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            session,
+            Some(&rpc),
+            &request,
+        ));
+
+        assert!(result.is_err());
+        assert!(rpc.apply_calls.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn guest_shop_purchase_uses_the_local_ledger_without_an_rpc() {
+        let (_directory, ledger) = test_ledger();
+        ledger
+            .lock()
+            .unwrap()
+            .connection
+            .execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+                 VALUES ('seed-wallet',5000000,'2026-09-30T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+        let target = QuoteTarget::Purchase {
+            sku: "land_pond".into(),
+        };
+        let quote = tauri::async_runtime::block_on(quote_shop_action_for_session(
+            &ledger,
+            CanonicalShopSession::Guest,
+            None,
+            &target,
+        ))
+        .unwrap();
+        assert_eq!(quote.price, 5_000_000);
+        let request = ShopRequest::Purchase {
+            request_id: "guest-purchase-1".into(),
+            quote,
+        };
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            CanonicalShopSession::Guest,
+            None,
+            &request,
+        ))
+        .unwrap();
+
+        assert_eq!(result.status, ShopActionStatus::Purchased);
+        assert_eq!(result.state.account_id, "local");
+        assert_eq!(result.state.available_balance, 0);
+        assert_eq!(result.state.landscape_instances.len(), 1);
+        assert_eq!(result.state.landscape_instances[0].sku, "land_pond");
+        assert_eq!(result.request_id, "guest-purchase-1");
+    }
+
+    #[test]
+    fn online_shop_action_sends_the_same_request_and_caches_only_the_confirmed_state() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let request = placement_request(&cycle_id);
+        let rpc = TestShopRpc::default();
+        *rpc.apply_result.lock().unwrap() = Some(Ok(ShopActionResult {
+            status: ShopActionStatus::Placed,
+            request_id: "request-42".into(),
+            confirmed_quote: None,
+            state: canonical_state("account:alice", &cycle_id, 8),
+        }));
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &request,
+        ))
+        .unwrap();
+
+        assert_eq!(result.status, ShopActionStatus::Placed);
+        assert_eq!(result.request_id, "request-42");
+        assert_eq!(
+            *rpc.apply_calls.lock().unwrap(),
+            vec![("alice-token".into(), request)]
+        );
+        let cached = ledger.lock().unwrap().shop_state().unwrap();
+        assert_eq!(cached.state_revision, 8);
+        assert_eq!(cached.available_balance, 12_345);
+    }
+
+    #[test]
+    fn online_shop_action_rejects_foreign_state_before_caching() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let request = placement_request(&cycle_id);
+        let rpc = TestShopRpc::default();
+        *rpc.apply_result.lock().unwrap() = Some(Ok(ShopActionResult {
+            status: ShopActionStatus::Placed,
+            request_id: "request-42".into(),
+            confirmed_quote: None,
+            state: canonical_state("account:bob", &cycle_id, 8),
+        }));
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &request,
+        ));
+
+        assert!(result.is_err());
+        let cached_count: i64 = ledger
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cached_count, 0);
+    }
+
+    #[test]
+    fn online_action_rejects_unexpected_cycle_state_for_non_mismatch_status() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let request = placement_request(&cycle_id);
+        let rpc = TestShopRpc::default();
+        *rpc.apply_result.lock().unwrap() = Some(Ok(ShopActionResult {
+            status: ShopActionStatus::Placed,
+            request_id: "request-42".into(),
+            confirmed_quote: None,
+            state: canonical_state("account:alice", "unexpected-cycle", 8),
+        }));
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &request,
+        ));
+
+        assert!(result.is_err());
+        let cached_count: i64 = ledger
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(cached_count, 0);
+        assert_eq!(ledger.lock().unwrap().planet_cycle_id().unwrap(), cycle_id);
+    }
+
+    #[test]
+    fn cycle_mismatch_action_can_cache_server_cycle_without_local_reset() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let old_cycle = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let request = placement_request(&old_cycle);
+        let rpc = TestShopRpc::default();
+        *rpc.apply_result.lock().unwrap() = Some(Ok(ShopActionResult {
+            status: ShopActionStatus::CycleMismatch,
+            request_id: "request-42".into(),
+            confirmed_quote: None,
+            state: canonical_state("account:alice", "new-server-cycle", 8),
+        }));
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &request,
+        ))
+        .unwrap();
+
+        assert_eq!(result.status, ShopActionStatus::CycleMismatch);
+        assert_eq!(result.state.current_cycle_id, "new-server-cycle");
+        assert_eq!(ledger.lock().unwrap().planet_cycle_id().unwrap(), old_cycle);
+        let cached_json: String = ledger
+            .lock()
+            .unwrap()
+            .connection
+            .query_row("SELECT state_json FROM shop_remote_state", [], |row| row.get(0))
+            .unwrap();
+        let cached: ShopState = serde_json::from_str(&cached_json).unwrap();
+        assert_eq!(cached.current_cycle_id, "new-server-cycle");
+    }
+
+    #[test]
+    fn uncertain_online_shop_action_is_not_retried_or_assigned_a_new_request_id() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
+        let request = placement_request(&cycle_id);
+        let rpc = TestShopRpc::default();
+        *rpc.apply_result.lock().unwrap() = Some(Err(SyncError::Transport));
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &request,
+        ));
+
+        assert!(result.is_err());
+        let calls = rpc.apply_calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].1, request);
+        match &calls[0].1 {
+            ShopRequest::Place { request_id, .. } => assert_eq!(request_id, "request-42"),
+            _ => panic!("the original request must be retried unchanged"),
+        }
+    }
+
+    #[test]
+    fn offline_signed_shop_action_is_unavailable_without_writing_guest_receipts() {
+        let (_directory, ledger) = test_ledger();
+        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        let before = ledger.lock().unwrap().shop_state().unwrap();
+        let request = ShopRequest::Purchase {
+            request_id: "retry-this-request".into(),
+            quote: ShopQuote {
+                target: QuoteTarget::Purchase {
+                    sku: "land_pond".into(),
+                },
+                catalog_revision: before.catalog_revision,
+                effect_revision: 0,
+                price: 5_000_000,
+            },
+        };
+
+        let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
+            &ledger,
+            CanonicalShopSession::Unavailable("서버에 연결할 수 없습니다".into()),
+            None,
+            &request,
+        ))
+        .unwrap();
+
+        assert_eq!(result.status, ShopActionStatus::Unavailable);
+        assert_eq!(result.request_id, "retry-this-request");
+        assert_eq!(result.state.account_id, "account:alice");
+        assert_eq!(result.state.available_balance, before.available_balance);
+        assert!(result.state.landscape_instances.is_empty());
+        assert_eq!(
+            result.state.action_unavailable_reason.as_deref(),
+            Some("서버에 연결할 수 없습니다")
+        );
+        let ledger = ledger.lock().unwrap();
+        let guest_receipts: i64 = ledger
+            .connection
+            .query_row("SELECT count(*) FROM shop_action_request", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(guest_receipts, 0);
+    }
 
     #[test]
     fn stale_equip_request_returns_latest_cycle_and_slot_without_reapplying() {
