@@ -813,6 +813,61 @@ impl Ledger {
             .transpose()
     }
 
+    /// Returns true while a guest shop payload still needs a complete import.
+    /// The legacy cosmetic importer is only a partial migration, so its
+    /// imported marker does not stand in for the newer shop ownership state.
+    pub fn has_unimported_guest_shop_state(&self) -> Result<bool, ScanError> {
+        let account_id = active_account_id(&self.connection)?;
+        if !account_id.starts_with("account:") {
+            return Ok(false);
+        }
+        if self.pending_guest_cosmetic_import()?.is_some() {
+            return Ok(true);
+        }
+
+        let has_local_shop_rows: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM shop_account_state WHERE account_id='local' AND state_revision>0
+                 UNION ALL SELECT 1 FROM shop_purchase WHERE account_id='local'
+                 UNION ALL SELECT 1 FROM shop_action_request WHERE account_id='local'
+                 UNION ALL SELECT 1 FROM shop_landscape_instance WHERE account_id='local'
+                 UNION ALL SELECT 1 FROM shop_landscape_placement WHERE account_id='local'
+                 UNION ALL SELECT 1 FROM shop_avatar_owned WHERE account_id='local'
+                 UNION ALL SELECT 1 FROM shop_avatar_equipment
+                   WHERE account_id='local' AND (sku IS NOT NULL OR version>0)
+                 UNION ALL SELECT 1 FROM shop_natural_removal WHERE account_id='local'
+                 UNION ALL SELECT 1 FROM shop_natural_removal_debit WHERE account_id='local'
+                 UNION ALL SELECT 1 FROM shop_game_reward WHERE account_id='local'
+                 UNION ALL SELECT 1 FROM shop_wallet_credit WHERE account_id='local' AND amount>0
+                 UNION ALL SELECT 1 FROM shop_cycle_settlement WHERE account_id='local'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        if has_local_shop_rows {
+            return Ok(true);
+        }
+
+        let mut statement = self.connection.prepare(
+            "SELECT active_instance_ids_json,effects_json FROM shop_effect_history
+             WHERE account_id='local'",
+        )?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (active_ids_json, effects_json) = row?;
+            let active_ids: Vec<String> =
+                serde_json::from_str(&active_ids_json).map_err(|_| ScanError::Database)?;
+            let effects: ActiveEffects =
+                serde_json::from_str(&effects_json).map_err(|_| ScanError::Database)?;
+            if !active_ids.is_empty() || effects != ActiveEffects::default() {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn store_confirmed_cosmetic_state(
         &mut self,
         state: &CosmeticShopState,
@@ -1777,6 +1832,13 @@ mod tests {
     };
     use crate::storage::ledger::Ledger;
     use rusqlite::params;
+
+    fn signed_sync_is_held_for_local_shop_row(statement: &str) -> bool {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger.connection.execute_batch(statement).unwrap();
+        ledger.ensure_planet_account("00000000-0000-0000-0000-000000000053").unwrap();
+        ledger.has_unimported_guest_shop_state().unwrap()
+    }
 
     #[test]
     fn local_catalog_exposes_all_forty_eight_shop_products() {
@@ -2830,6 +2892,150 @@ mod tests {
             |row| Ok((row.get(0)?, row.get(1)?)),
         ).unwrap();
         assert_eq!(stored, ("future_slot".into(), "future_item".into()));
+    }
+
+    #[test]
+    fn unimported_guest_shop_state_without_legacy_import_row_blocks_signed_sync() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let local_account = super::active_account_id(&ledger.connection).unwrap();
+        let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+             VALUES (?1,'guest-tree','land_tree',0,'seed',1,'2026-10-01T00:00:00Z')",
+            [&local_account],
+        ).unwrap();
+
+        ledger.ensure_planet_account("00000000-0000-0000-0000-000000000051").unwrap();
+
+        assert!(ledger.pending_guest_cosmetic_import().unwrap().is_none());
+        assert!(ledger.has_unimported_guest_shop_state().unwrap());
+        assert_eq!(ledger.planet_cycle_id().unwrap(), cycle_id);
+    }
+
+    #[test]
+    fn empty_guest_shop_baseline_allows_signed_cold_bootstrap() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger.ensure_planet_account("00000000-0000-0000-0000-000000000052").unwrap();
+
+        assert!(ledger.pending_guest_cosmetic_import().unwrap().is_none());
+        assert!(!ledger.has_unimported_guest_shop_state().unwrap());
+    }
+
+    #[test]
+    fn raw_only_guest_era_bookkeeping_allows_first_signed_cold_bootstrap() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle_id = ledger.planet_cycle_id().unwrap();
+        let occurred_at = ledger.planet_activation_at().unwrap() + chrono::Duration::seconds(1);
+        ledger.insert(&crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: "raw-only-era-progress".into(),
+            occurred_at_utc: occurred_at,
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(4_000_000),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }).unwrap();
+
+        // This is the same contribution/reward lifecycle run by AppState::scan.
+        ledger.rebuild_shop_contributions().unwrap();
+        ledger.settle_guest_rewards(occurred_at + chrono::Duration::minutes(1)).unwrap();
+        assert!(ledger.shop_growth_credit_by_date().unwrap().values().sum::<f64>()
+            >= crate::growth::STAGE_THRESHOLDS[0]);
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM shop_era_progress WHERE account_id='local'",
+            [], |row| row.get(0),
+        ).unwrap(), 1, "the real guest lifecycle records zero-value era progress");
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM shop_game_reward WHERE account_id='local' AND amount>0",
+            [], |row| row.get(0),
+        ).unwrap(), 0);
+        for table in [
+            "shop_landscape_instance",
+            "shop_landscape_placement",
+            "shop_avatar_owned",
+            "shop_purchase",
+            "shop_action_request",
+            "shop_natural_removal",
+        ] {
+            let count: i64 = ledger.connection.query_row(
+                &format!("SELECT count(*) FROM {table} WHERE account_id='local'"),
+                [], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(count, 0, "raw usage must not create {table} state");
+        }
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM shop_wallet_credit WHERE account_id='local' AND amount>0",
+            [], |row| row.get(0),
+        ).unwrap(), 0);
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM shop_cycle_settlement WHERE account_id='local' AND amount>0",
+            [], |row| row.get(0),
+        ).unwrap(), 0);
+        {
+            let mut effects = ledger.connection.prepare(
+                "SELECT effects_json FROM shop_effect_history WHERE account_id='local'",
+            ).unwrap();
+            for row in effects.query_map([], |row| row.get::<_, String>(0)).unwrap() {
+                let decoded: crate::domain::cosmetic_shop::ActiveEffects =
+                    serde_json::from_str(&row.unwrap()).unwrap();
+                assert_eq!(decoded, crate::domain::cosmetic_shop::ActiveEffects::default());
+            }
+        }
+
+        ledger.ensure_planet_account("00000000-0000-0000-0000-000000000055").unwrap();
+
+        assert!(ledger.pending_guest_cosmetic_import().unwrap().is_none());
+        assert_eq!(ledger.planet_cycle_id().unwrap(), cycle_id);
+        assert_eq!(ledger.planet_usage_totals().unwrap().1, 4_000_000);
+        assert!(!ledger.has_unimported_guest_shop_state().unwrap());
+    }
+
+    #[test]
+    fn unimported_guest_avatar_receipts_removals_rewards_and_effects_hold_signed_sync() {
+        let local_rows = [
+            "INSERT INTO shop_avatar_owned(account_id,sku,purchase_id,price,acquired_at_utc)
+             VALUES ('local','avatar_hat','avatar-purchase',100,'2026-10-01T00:00:00Z')",
+            "INSERT INTO shop_purchase(account_id,purchase_id,sku,price,purchased_at_utc)
+             VALUES ('local','shop-purchase','land_tree',100,'2026-10-01T00:00:00Z')",
+            "INSERT INTO shop_action_request(account_id,request_id,payload_json,result_json,created_at_utc)
+             VALUES ('local','action-receipt','{}','{}','2026-10-01T00:00:00Z')",
+            "INSERT INTO shop_natural_removal(account_id,cycle_id,stage,ordinal,version,removed_at_utc)
+             VALUES ('local','local-cycle',0,0,1,'2026-10-01T00:00:00Z')",
+            "INSERT INTO shop_natural_removal_debit(account_id,request_id,amount,created_at_utc)
+             VALUES ('local','removal-debit',100,'2026-10-01T00:00:00Z')",
+            "INSERT INTO shop_game_reward(account_id,reward_id,trigger_key,kind,cycle_id,amount,effect_snapshot_json,awarded_at_utc)
+             VALUES ('local','reward','reward-trigger','era','local-cycle',100,'{}','2026-10-01T00:00:00Z')",
+            "INSERT INTO shop_wallet_credit(account_id,credit_id,trigger_key,cycle_id,amount,created_at_utc)
+             VALUES ('local','credit','credit-trigger','local-cycle',100,'2026-10-01T00:00:00Z')",
+            "INSERT INTO shop_cycle_settlement(account_id,cycle_id,amount,settled_at_utc)
+             VALUES ('local','local-cycle',0,'2026-10-01T00:00:00Z')",
+            "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,active_instance_ids_json,effects_json)
+             VALUES ('local','local-cycle',1,'2026-10-01T00:00:00Z','[]',
+               '{\"token_earning_bps\":100,\"civilization_growth_bps\":0,\"shop_discount_bps\":0,\"reset_cooldown_bps\":0,\"natural_removal_discount_bps\":0,\"era_reward_tokens\":0,\"streak_reward_tokens\":0}')",
+        ];
+
+        for row in local_rows {
+            assert!(signed_sync_is_held_for_local_shop_row(row), "missed local state row: {row}");
+        }
+    }
+
+    #[test]
+    fn pending_legacy_guest_import_holds_sync_even_when_full_import_is_not_available() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES ('legacy-cycle',100,'2026-10-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        ledger.ensure_planet_account("00000000-0000-0000-0000-000000000054").unwrap();
+
+        assert!(ledger.pending_guest_cosmetic_import().unwrap().is_some());
+        assert!(ledger.has_unimported_guest_shop_state().unwrap());
     }
 
     #[test]
