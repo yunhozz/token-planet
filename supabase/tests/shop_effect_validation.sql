@@ -13,15 +13,21 @@ select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000971
 select lives_ok($$select public.upsert_my_planet_state(
   pg_temp.planet_state('Validation Owner', 'validation-cycle', '2026-09-29T18:00:00Z'),
   pg_temp.planet_device(
-    '30000000-0000-0000-0000-000000000971', 'validation-cycle', 100000
+    '30000000-0000-0000-0000-000000000971', 'validation-cycle', 0
+  ) || jsonb_build_object(
+    'canonical_version', 0,
+    'daily_segments', '[]'::jsonb,
+    'activity_days', '[]'::jsonb
   )
 )$$, 'raw state is initialized before direct private-validator checks');
 reset role;
 
 insert into private.shop_account_state(user_id, reward_timezone)
-values ('00000000-0000-0000-0000-000000000971', 'UTC');
+values ('00000000-0000-0000-0000-000000000971', 'UTC')
+on conflict (user_id) do nothing;
 insert into private.shop_cycle_effect_baseline(user_id, cycle_id, started_at)
-values ('00000000-0000-0000-0000-000000000971', 'validation-cycle', '2026-09-29T18:00:00Z');
+values ('00000000-0000-0000-0000-000000000971', 'validation-cycle', '2026-09-29T18:00:00Z')
+on conflict (user_id, cycle_id) do nothing;
 insert into private.shop_effect_history(
   user_id, cycle_id, revision, started_at, ended_at, active_instance_ids, effects
 ) values (

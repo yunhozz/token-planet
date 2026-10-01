@@ -6,6 +6,9 @@ select no_plan();
 insert into auth.users(id) values
   ('00000000-0000-0000-0000-000000000951'),
   ('00000000-0000-0000-0000-000000000952');
+insert into private.planet_wallet_credits(user_id, previous_cycle_id, amount, created_at) values
+  ('00000000-0000-0000-0000-000000000951', 'action-credit', 200000000, '2026-09-30T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000952', 'discount-credit', 1000000000, '2026-09-30T00:00:00Z');
 create function pg_temp.shop_apply(p_request jsonb) returns jsonb
 language plpgsql as $$
 declare
@@ -23,7 +26,8 @@ select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000951
 select lives_ok($$select public.upsert_my_planet_state(
   pg_temp.planet_state('Action Buyer', 'action-cycle', null,
     '[{"previous_cycle_id":"action-credit","amount":200000000,"created_at_utc":"2026-09-30T00:00:00Z"}]'::jsonb),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000951', 'action-cycle', 0))$$,
+  pg_temp.planet_device('30000000-0000-0000-0000-000000000951', 'action-cycle', 0)
+    || jsonb_build_object('canonical_version', 0, 'daily_segments', '[]'::jsonb, 'activity_days', '[]'::jsonb))$$,
   'purchase fixture has a funded canonical account');
 
 select ok(to_regprocedure('public.apply_shop_action(jsonb)') is not null,
@@ -135,7 +139,8 @@ select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000952
 select lives_ok($$select public.upsert_my_planet_state(
   pg_temp.planet_state('Discount Buyer', 'discount-cycle', null,
     '[{"previous_cycle_id":"discount-credit","amount":1000000000,"created_at_utc":"2026-09-30T00:00:00Z"}]'::jsonb),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000952', 'discount-cycle', 0))$$,
+  pg_temp.planet_device('30000000-0000-0000-0000-000000000952', 'discount-cycle', 0)
+    || jsonb_build_object('canonical_version', 0, 'daily_segments', '[]'::jsonb, 'activity_days', '[]'::jsonb))$$,
   'discount fixture has an independent funded account');
 reset role;
 

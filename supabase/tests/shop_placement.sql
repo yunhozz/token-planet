@@ -6,6 +6,9 @@ select no_plan();
 insert into auth.users(id) values
   ('00000000-0000-0000-0000-000000000953'),
   ('00000000-0000-0000-0000-000000000954');
+insert into private.planet_wallet_credits(user_id, previous_cycle_id, amount, created_at) values
+  ('00000000-0000-0000-0000-000000000953', 'placement-credit', 500000000, '2026-09-30T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000954', 'other-credit', 100000000, '2026-09-30T00:00:00Z');
 create function pg_temp.shop_apply(p_request jsonb) returns jsonb
 language plpgsql as $$
 declare
@@ -30,10 +33,38 @@ select lives_ok($$select public.upsert_my_planet_state(
   jsonb_set(pg_temp.planet_state('Placement Owner', 'placement-cycle', null,
     '[{"previous_cycle_id":"placement-credit","amount":500000000,"created_at_utc":"2026-09-30T00:00:00Z"}]'::jsonb),
     '{objects}', '[{"stage":4,"ordinal":37,"kind":"rocket","x":100,"y":100,"seed":18446744073709551615}]'::jsonb),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000953', 'placement-cycle', 0))$$,
+  pg_temp.planet_device('30000000-0000-0000-0000-000000000953', 'placement-cycle', 0)
+    || jsonb_build_object('canonical_version', 0, 'daily_segments', '[]'::jsonb, 'activity_days', '[]'::jsonb))$$,
   'funded account has a current planet cycle');
+select lives_ok($$select public.upsert_my_planet_state(
+  pg_temp.planet_state('Placement Owner', 'placement-cycle', null,
+    '[{"previous_cycle_id":"placement-credit","amount":500000000,"created_at_utc":"2026-09-30T00:00:00Z"}]'::jsonb),
+  jsonb_build_object(
+    'device_id', '30000000-0000-0000-0000-000000000953',
+    'current_cycle_id', 'placement-cycle',
+    'lifetime_tokens', 100000, 'current_planet_tokens', 100000,
+    'daily_tokens', '{"2026-09-26":100000}'::jsonb,
+    'incomplete', false, 'canonical_version', 1,
+    'daily_segments', '[{"cycle_id":"placement-cycle","date":"2026-09-26","effect_revision":0,"tokens":100000}]'::jsonb,
+    'activity_days', '[{"cycle_id":"placement-cycle","reward_date":"2026-09-26","first_occurred_at_utc":"2026-09-26T12:00:00Z","tokens":100000}]'::jsonb
+  )
+)$$, 'positive canonical growth creates a server-owned natural-object basis');
 create temporary table natural_basis_before as
 select public.get_my_planet_state()->'objects' as objects;
+reset role;
+select is((select jsonb_array_length(objects) from natural_basis_before), 1,
+  'placement fixture starts with a nonempty canonical natural-object basis');
+select is((select objects->0 from natural_basis_before),
+  private.shop_canonical_planet_object('placement-cycle', 0, 0),
+  'placement fixture basis contains the Rust-compatible generated natural object');
+select ok((select objects @> jsonb_build_array(
+  private.shop_canonical_planet_object('placement-cycle', 0, 0)
+) from natural_basis_before),
+  'the current-cycle server-generated stage-zero object exists');
+select is((select count(*)::bigint from natural_basis_before n
+  cross join lateral jsonb_array_elements(n.objects) o(value)
+  where o.value->>'stage' = '4' and o.value->>'ordinal' = '37'), 0::bigint,
+  'the forged legacy stage-four ordinal is not persisted');
 
 reset role;
 set local role authenticated;
@@ -41,7 +72,8 @@ select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000954
 select lives_ok($$select public.upsert_my_planet_state(
   pg_temp.planet_state('Other Owner', 'placement-cycle', null,
     '[{"previous_cycle_id":"other-credit","amount":100000000,"created_at_utc":"2026-09-30T00:00:00Z"}]'::jsonb),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000954', 'placement-cycle', 0))$$,
+  pg_temp.planet_device('30000000-0000-0000-0000-000000000954', 'placement-cycle', 0)
+    || jsonb_build_object('canonical_version', 0, 'daily_segments', '[]'::jsonb, 'activity_days', '[]'::jsonb))$$,
   'second account has an independent current cycle');
 
 reset role;
@@ -277,7 +309,7 @@ select is((select result->>'status' from sky_beyond_boundary), 'invalid_placemen
 
 select is((pg_temp.shop_apply(jsonb_build_object(
   'kind', 'place', 'request_id', 'placement-natural-key',
-  'cycle_id', 'placement-cycle', 'instance_id', 'stage4:37',
+  'cycle_id', 'placement-cycle', 'instance_id', 'stage0:0',
   'expected_version', 0, 'x', 160, 'y', 200
 ))->>'status'), 'not_owned', 'generated natural keys cannot be moved as purchases');
 select is((public.get_my_planet_state()->'objects'), (select objects from natural_basis_before),

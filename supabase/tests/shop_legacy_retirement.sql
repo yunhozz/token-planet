@@ -5,13 +5,17 @@ select no_plan();
 
 insert into auth.users(id) values
   ('00000000-0000-0000-0000-000000000957');
+insert into private.planet_wallet_credits(user_id, previous_cycle_id, amount, created_at)
+values ('00000000-0000-0000-0000-000000000957', 'legacy-credit', 2000000,
+  '2026-09-30T00:00:00Z');
 
 set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000957', true);
 select lives_ok($$select public.upsert_my_planet_state(
   pg_temp.planet_state('Legacy Retention', 'legacy-cycle', null,
     '[{"previous_cycle_id":"legacy-credit","amount":2000000,"created_at_utc":"2026-09-30T00:00:00Z"}]'::jsonb),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000957', 'legacy-cycle', 0))$$,
+  pg_temp.planet_device('30000000-0000-0000-0000-000000000957', 'legacy-cycle', 0)
+    || jsonb_build_object('canonical_version', 0, 'daily_segments', '[]'::jsonb, 'activity_days', '[]'::jsonb))$$,
   'legacy account fixture retains its base wallet credit');
 reset role;
 
