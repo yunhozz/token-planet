@@ -237,13 +237,15 @@ impl Ledger {
                 Ok((date,weighted_growth(tokens,&[]).map_err(|_|ScanError::InvalidShopState)?))
             }).collect();
         }
+        let current_cycle = current_cycle_id(&self.connection)?;
         let mut totals = BTreeMap::new();
         let mut statement = self.connection.prepare(
             "SELECT device_id,cycle_id,date,effect_revision,tokens,growth_bps,wallet_bps
-             FROM shop_effect_contribution WHERE account_id=?1 AND date=?2 ORDER BY device_id,cycle_id,effect_revision",
+             FROM shop_effect_contribution WHERE account_id=?1 AND cycle_id=?2 AND date=?3
+             ORDER BY device_id,cycle_id,effect_revision",
         )?;
         for (date,total_tokens) in daily {
-            let rows = statement.query_map(params![account_id,date],|row|Ok(EffectContribution {
+            let rows = statement.query_map(params![account_id,current_cycle,date],|row|Ok(EffectContribution {
                 device_id:row.get(0)?,cycle_id:row.get(1)?,date:row.get(2)?,
                 effect_revision:row.get(3)?,tokens:row.get(4)?,
                 growth_bps:row.get(5)?,wallet_bps:row.get(6)?,
@@ -726,6 +728,32 @@ mod tests {
             "SELECT count(*) FROM shop_effect_contribution", [], |row| row.get(0),
         ).unwrap();
         assert_eq!(remaining,0,"disabled source rows must be removed from canonical effects");
+    }
+
+    #[test]
+    fn same_day_reset_growth_uses_only_the_current_cycle_contributions() {
+        let mut ledger = ledger();
+        add_effect_history(&ledger,1,"2026-09-24T00:00:00Z",ActiveEffects {
+            civilization_growth_bps: 2_000,
+            ..ActiveEffects::default()
+        });
+        add_event(&mut ledger,"same-day-old-cycle","2026-09-25T08:00:00Z",50_000);
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        let reset_at = DateTime::parse_from_rfc3339("2026-09-25T12:00:00Z").unwrap().with_timezone(&Utc);
+        let reset = ledger.reset_guest_planet("same-day-cycle-reset",&old_cycle,reset_at).unwrap();
+        assert_eq!(reset.status,crate::domain::cosmetic_shop::ShopActionStatus::Reset);
+
+        add_event(&mut ledger,"same-day-new-cycle","2026-09-25T18:00:00Z",25_000);
+        ledger.rebuild_shop_contributions().unwrap();
+        let current_cycle = ledger.planet_cycle_id().unwrap();
+        let same_date = contribution_rows(&ledger,"2026-09-25");
+        assert!(same_date.iter().any(|segment| segment.cycle_id == old_cycle));
+        assert!(same_date.iter().any(|segment| segment.cycle_id == current_cycle));
+        assert_eq!(ledger.planet_usage_totals().unwrap().0["2026-09-25"],25_000);
+
+        let growth = ledger.shop_growth_credit_by_date().unwrap();
+        let expected = weighted_growth(25_000,&[]).unwrap();
+        assert!((growth["2026-09-25"]-expected).abs()<1e-12);
     }
 
     #[test]

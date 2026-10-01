@@ -2394,11 +2394,42 @@ mod tests {
         ).unwrap();
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
             .unwrap().with_timezone(&chrono::Utc);
-        ledger.settle_guest_rewards(now).unwrap();
+        ledger.connection.execute_batch(
+            "CREATE TRIGGER fail_guest_reset_wallet
+             BEFORE INSERT ON planet_wallet_credit
+             BEGIN SELECT RAISE(ABORT, 'injected reset body failure'); END;",
+        ).unwrap();
+        assert!(matches!(
+            ledger.reset_guest_planet("reset-cycle-one",&old_cycle,now),
+            Err(crate::storage::ledger::ScanError::Database),
+        ));
+        assert_eq!(ledger.planet_cycle_id().unwrap(),old_cycle);
+        assert_eq!(ledger.reset_available_at().unwrap(),None);
+        assert_eq!(ledger.shop_state().unwrap().placements.len(),10);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_action_request WHERE account_id=?1 AND request_id='reset-cycle-one'",
+            [&account],|row|row.get(0),
+        ).unwrap(),0);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_effect_history WHERE account_id=?1 AND cycle_id=?2 AND ended_at_utc IS NULL",
+            rusqlite::params![account,old_cycle],|row|row.get(0),
+        ).unwrap(),1);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM planet_wallet_credit WHERE previous_cycle_id=?1",
+            [&old_cycle],|row|row.get(0),
+        ).unwrap(),0);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT amount FROM shop_cycle_settlement WHERE account_id=?1 AND cycle_id=?2",
+            rusqlite::params![account,old_cycle],|row|row.get(0),
+        ).unwrap(),1);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_game_reward WHERE account_id=?1 AND kind='cycle_token' AND amount=1",
+            [&account],|row|row.get(0),
+        ).unwrap(),1);
+        ledger.connection.execute_batch("DROP TRIGGER fail_guest_reset_wallet;").unwrap();
 
-        let result = ledger.apply_guest_shop_request(&ShopRequest::ResetPlanet {
-            request_id: "reset-cycle-one".into(), cycle_id: old_cycle.clone(),
-        }, now).unwrap();
+        // Pre-reset reward settlement survives the failed reset, and the same request can safely retry.
+        let result = ledger.reset_guest_planet("reset-cycle-one",&old_cycle,now).unwrap();
 
         assert_eq!(result.status, ShopActionStatus::Reset);
         assert_ne!(result.state.current_cycle_id, old_cycle);
