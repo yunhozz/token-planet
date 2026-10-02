@@ -270,4 +270,8 @@ AvatarSprite에 착용 데이터와 레이어를 추가하고 기본 모습, 좌
 
 ### 2026-10-02 최종 로컬 기준점
 
-로그인 초기화 결과의 단일 SQLite 원자 저장과 reset/timeline 시작 시각 경계 검증은 `4c1d18e`로 검증·커밋했다. 다만 authenticated worker 연결 패치는 자동 검토에서 거절돼 최종 코드에서 제거했으며, 현재 `sync_once`는 기존 동작 그대로다. 개인 timeline/client API와 로컬 cache/storage 완료를 실제 worker 연결 완료로 해석하지 않는다. 로그인 reset UI는 계속 비활성이다. 전체 guest import/public share 및 실제 화면 검증도 미완료다. 최종 독립 로컬 QA frontend315/Rust191(기존 HTTP3 제외)/TypeScript/Vite/checklib/diffcheck는 통과했지만 전체 기능 완료 판정은 아니다.
+로그인 초기화 결과의 단일 SQLite 원자 저장과 reset/timeline 시작 시각 경계 검증은 `4c1d18e`로 검증·커밋했다. 이후 사용자 `허용`으로 같은 Supabase의 `get_my_planet_state` 응답만 그대로 재전송하는 범위가 추가 승인됐다. `sync_once`는 개인 타임라인 조회·검증·로컬 재구축과 정확한 9키 집계 업로드에 연결됐다. 전송하는 PlanetState는 서버 응답에서만 가져오며 wallet_balance/credits는 0/[]이고, 서버 None이면 bootstrap을 보류한다. 로컬 프로필·풍경이나 지갑 청구를 전송하지 않는다.
+
+게스트 상점 가져오기가 남으면 중앙 계정 전환과 worker를 보류한다. 같은 계정 복원은 허용하고, 시작·정기·수동·소스 스캔은 명시적 가져오기 보류에 한해 로컬 계정에서 계속한다. 실제 keyring/DB 오류는 전파한다. 로컬 또는 서버 공유 일시정지 중에는 타임라인 조회·로컬 재구축만 수행하고 집계 upsert도 보류한다. 기존 upsert가 공개 행성도 갱신하므로 개인 집계와 공개 표시를 독립 갱신하는 구현으로 해석하지 않는다. `HeldForSharingPause`는 초기화 사전 업로드 완료가 아니다.
+
+독립 QA는 계정 전환4/worker14/전체 Rust202(기존 HTTP3 제외), checklib/diffcheck를 확인했고 Reviewer의 첫 로그인·공유 일시정지·startup 복원 결함은 해결됐다. 로그인 reset 명령/UI와 영속 요청 복구는 미연결이다. 전체 guest import/public share 및 실제 화면 검증도 미완료다. 호스팅 DB 적용·실사용 집계 전송·실제 제거 거래·배포를 실행하지 않았으며 전체 기능 완료 판정은 아니다.

@@ -407,25 +407,216 @@ mod window_mode_tests {
     }
 }
 
+#[cfg(test)]
+mod account_switch_tests {
+    use super::{
+        allow_local_scan_on_guest_shop_hold, AppState, PlanetAccountSwitchError, WindowMode,
+    };
+    use crate::collectors::discovery::SourceConfig;
+    use crate::collectors::{ParsedRecord, RecordKind};
+    use crate::domain::planet::PlanetAvatar;
+    use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
+    use crate::storage::ledger::Ledger;
+    use chrono::{DateTime, Utc};
+    use std::{
+        path::Path,
+        sync::{atomic::AtomicBool, Mutex},
+    };
+
+    const USER_ID: &str = "00000000-0000-0000-0000-000000000071";
+
+    fn test_state(ledger: Ledger) -> AppState {
+        AppState {
+            config: Mutex::new(SourceConfig {
+                codex_root: Path::new("/private/tmp/token-planet-account-switch-codex").to_path_buf(),
+                claude_root: Path::new("/private/tmp/token-planet-account-switch-claude").to_path_buf(),
+                timezone: chrono_tz::UTC,
+            }),
+            ledger: Mutex::new(ledger),
+            latest: Mutex::new(None),
+            usage_scan_failed: AtomicBool::new(false),
+            sync_failed: Mutex::new(false),
+            sync_gate: tokio::sync::Mutex::new(()),
+            window_mode: Mutex::new(WindowMode::Popup),
+            mode_transitioning: AtomicBool::new(false),
+            tray_press_pending: AtomicBool::new(false),
+        }
+    }
+
+    fn insert_local_usage(ledger: &mut Ledger, event_key: &str) {
+        ledger
+            .insert(&ParsedRecord {
+                agent: Agent::Codex,
+                kind: RecordKind::Response,
+                event_key: event_key.into(),
+                occurred_at_utc: DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+                    .unwrap()
+                    .with_timezone(&Utc),
+                usage: TokenUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_tokens: Some(1_000),
+                    coverage: UsageCoverage::Complete,
+                },
+            })
+            .unwrap();
+    }
+
+    fn insert_local_shop_instance(ledger: &Ledger) {
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+                 VALUES ('local','guest-tree','land_tree',0,'guest-seed',1,'2026-10-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn first_login_guest_shop_hold_preserves_local_account_raw_usage_profile_and_snapshot() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger
+            .set_planet_profile("Guest planet", PlanetAvatar::Masculine)
+            .unwrap();
+        insert_local_usage(&mut ledger, "guest-owned-usage");
+        insert_local_shop_instance(&ledger);
+        let original_cycle = ledger.planet_cycle_id().unwrap();
+        let original_usage = ledger.planet_usage_totals().unwrap();
+        let original_profile = ledger.planet_profile().unwrap();
+
+        let state = test_state(ledger);
+        state.scan().unwrap();
+        let original_snapshot = serde_json::to_value(
+            state.latest.lock().unwrap().as_ref().unwrap(),
+        )
+        .unwrap();
+
+        let result = state.switch_planet_account(USER_ID);
+
+        assert!(result.is_err(), "first-login account transition must hold for guest shop state");
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+        assert_eq!(ledger.planet_cycle_id().unwrap(), original_cycle);
+        assert_eq!(ledger.planet_usage_totals().unwrap(), original_usage);
+        assert_eq!(ledger.planet_profile().unwrap(), original_profile);
+        assert_eq!(ledger.connection.query_row::<String, _, _>(
+            "SELECT account_id FROM planet_usage_owner WHERE event_key='guest-owned-usage'",
+            [],
+            |row| row.get(0),
+        ).unwrap(), "local");
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM shop_landscape_instance WHERE account_id='local' AND instance_id='guest-tree'",
+            [],
+            |row| row.get(0),
+        ).unwrap(), 1);
+        assert_eq!(ledger.connection.query_row::<i64, _, _>(
+            "SELECT count(*) FROM planet_account_state WHERE account_id=?1",
+            [format!("account:{USER_ID}")],
+            |row| row.get(0),
+        ).unwrap(), 0);
+        let current_snapshot = serde_json::to_value(
+            state.latest.lock().unwrap().as_ref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(current_snapshot, original_snapshot, "a denied transition must not invalidate the local scan snapshot");
+    }
+
+    #[test]
+    fn pending_guest_restore_keeps_local_scan_available_and_other_restore_errors_visible() {
+        let ledger = Ledger::open(Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        insert_local_shop_instance(&ledger);
+        let original_cycle = ledger.planet_cycle_id().unwrap();
+        let state = test_state(ledger);
+
+        let restore = state.switch_planet_account(USER_ID).map(|_| ());
+        allow_local_scan_on_guest_shop_hold(restore).unwrap();
+        let snapshot = state.scan().unwrap();
+
+        assert_eq!(snapshot.planet.current_cycle_id, original_cycle);
+        assert_eq!(state.ledger.lock().unwrap().cosmetic_account_id().unwrap(), "local");
+        assert!(state.latest.lock().unwrap().is_some());
+        assert_eq!(
+            allow_local_scan_on_guest_shop_hold(Err(PlanetAccountSwitchError::Other(
+                "keychain failure".into(),
+            ))),
+            Err("keychain failure".into()),
+            "scan-only restore must not swallow real keychain errors",
+        );
+    }
+
+    #[test]
+    fn raw_only_local_usage_and_zero_revision_shop_baseline_allow_first_login() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        insert_local_usage(&mut ledger, "raw-only-usage");
+        assert!(!ledger.has_local_guest_shop_state().unwrap());
+        let state = test_state(ledger);
+
+        assert!(state.switch_planet_account(USER_ID).unwrap());
+
+        let ledger = state.ledger.lock().unwrap();
+        let account_id = format!("account:{USER_ID}");
+        assert_eq!(ledger.cosmetic_account_id().unwrap(), account_id);
+        assert_eq!(ledger.connection.query_row::<String, _, _>(
+            "SELECT account_id FROM planet_usage_owner WHERE event_key='raw-only-usage'",
+            [],
+            |row| row.get(0),
+        ).unwrap(), account_id);
+    }
+
+    #[test]
+    fn already_active_signed_account_can_restore_even_with_local_guest_rows() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger.ensure_planet_account(USER_ID).unwrap();
+        insert_local_shop_instance(&ledger);
+        let state = test_state(ledger);
+
+        assert!(!state.switch_planet_account(USER_ID).unwrap());
+        assert_eq!(state.ledger.lock().unwrap().cosmetic_account_id().unwrap(), format!("account:{USER_ID}"));
+    }
+}
+
 impl AppState {
     pub(crate) fn select_planet_account(&self, user_id: &str) -> Result<(), String> {
-        if self.switch_planet_account(user_id)? {
+        if self
+            .switch_planet_account(user_id)
+            .map_err(PlanetAccountSwitchError::into_message)?
+        {
             self.scan()?;
         }
         Ok(())
     }
 
-    fn switch_planet_account(&self, user_id: &str) -> Result<bool, String> {
-        let changed = self
+    fn switch_planet_account(
+        &self,
+        user_id: &str,
+    ) -> Result<bool, PlanetAccountSwitchError> {
+        let mut ledger = self
             .ledger
             .lock()
-            .map_err(|_| "local ledger unavailable")?
+            .map_err(|_| PlanetAccountSwitchError::Other("local ledger unavailable".into()))?;
+        let current_account = ledger
+            .cosmetic_account_id()
+            .map_err(|_| PlanetAccountSwitchError::Other("행성 계정을 확인할 수 없습니다".into()))?;
+        let target_account = format!("account:{user_id}");
+        if current_account != target_account
+            && sync::worker::guest_shop_import_pending(&ledger)
+                .map_err(PlanetAccountSwitchError::Other)?
+        {
+            return Err(PlanetAccountSwitchError::GuestShopImportPending);
+        }
+        let changed = ledger
             .ensure_planet_account(user_id)
-            .map_err(|_| "행성 계정을 변경할 수 없습니다")?;
+            .map_err(|_| PlanetAccountSwitchError::Other("행성 계정을 변경할 수 없습니다".into()))?;
+        drop(ledger);
         if changed {
             // Invalidate the previous account's frontend snapshot before any
             // fallible scan, so it can never become an upload for this account.
-            *self.latest.lock().map_err(|_| "usage status unavailable")? = None;
+            *self.latest.lock().map_err(|_| {
+                PlanetAccountSwitchError::Other("usage status unavailable".into())
+            })? = None;
             self.usage_scan_failed.store(false, Ordering::SeqCst);
         }
         Ok(changed)
@@ -494,22 +685,59 @@ impl AppState {
     }
 }
 
-fn restore_saved_planet_account(state: &AppState) -> Result<(), String> {
+#[derive(Debug, Eq, PartialEq)]
+enum PlanetAccountSwitchError {
+    GuestShopImportPending,
+    Other(String),
+}
+
+impl PlanetAccountSwitchError {
+    fn into_message(self) -> String {
+        match self {
+            Self::GuestShopImportPending => {
+                "게스트 상점 가져오기를 완료한 뒤 계정을 전환할 수 있습니다".into()
+            }
+            Self::Other(message) => message,
+        }
+    }
+}
+
+fn restore_saved_planet_account_inner(state: &AppState) -> Result<(), PlanetAccountSwitchError> {
     let Some(config) = AuthConfig::from_env() else {
         return Ok(());
     };
-    let store = SessionStore::new(&config).map_err(|_| "로그인 정보 오류".to_string())?;
-    if let Some(saved) = store.load().map_err(|_| "로그인 정보 오류".to_string())? {
+    let store = SessionStore::new(&config)
+        .map_err(|_| PlanetAccountSwitchError::Other("로그인 정보 오류".into()))?;
+    if let Some(saved) = store.load().map_err(|_| {
+        PlanetAccountSwitchError::Other("로그인 정보 오류".into())
+    })? {
         state.switch_planet_account(&saved.user.id)?;
     }
     Ok(())
+}
+
+fn restore_saved_planet_account(state: &AppState) -> Result<(), String> {
+    restore_saved_planet_account_inner(state).map_err(PlanetAccountSwitchError::into_message)
+}
+
+fn allow_local_scan_on_guest_shop_hold(
+    restore_result: Result<(), PlanetAccountSwitchError>,
+) -> Result<(), String> {
+    match restore_result {
+        Ok(()) | Err(PlanetAccountSwitchError::GuestShopImportPending) => Ok(()),
+        Err(PlanetAccountSwitchError::Other(message)) => Err(message),
+    }
+}
+
+fn restore_saved_planet_account_for_scan(state: &AppState) -> Result<(), String> {
+    allow_local_scan_on_guest_shop_hold(restore_saved_planet_account_inner(state))
 }
 
 #[tauri::command]
 async fn refresh_usage(app: AppHandle) -> Result<WorldSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
-        restore_saved_planet_account(&state)?;
+        restore_saved_planet_account_for_scan(&state)?;
         let snapshot = state.scan()?;
         let _ = platform::tray::refresh_status(&app, &snapshot);
         Ok(snapshot)
@@ -597,7 +825,7 @@ fn set_source_enabled(
     state: State<'_, AppState>,
     app: AppHandle,
 ) -> Result<WorldSnapshot, String> {
-    restore_saved_planet_account(&state)?;
+    restore_saved_planet_account_for_scan(&state)?;
     state
         .ledger
         .lock()
@@ -615,7 +843,7 @@ async fn choose_source_folder(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<Option<WorldSnapshot>, String> {
-    restore_saved_planet_account(&state)?;
+    restore_saved_planet_account_for_scan(&state)?;
     let title = match agent {
         Agent::Codex => "Codex sessions 폴더 선택",
         Agent::ClaudeCode => "Claude Code projects 폴더 선택",
@@ -653,7 +881,7 @@ async fn choose_source_folder(
             Agent::ClaudeCode => config.claude_root = folder,
         }
     }
-    restore_saved_planet_account(&state)?;
+    restore_saved_planet_account_for_scan(&state)?;
     let snapshot = state.scan()?;
     let _ = platform::tray::refresh_status(&app, &snapshot);
     Ok(Some(snapshot))
@@ -767,8 +995,8 @@ pub fn run() {
                     let worker_handle = handle.clone();
                     std::thread::spawn(move || {
                         let state = worker_handle.state::<AppState>();
-                        let initial_scan =
-                            restore_saved_planet_account(&state).and_then(|_| state.scan());
+                        let initial_scan = restore_saved_planet_account_for_scan(&state)
+                            .and_then(|_| state.scan());
                         state
                             .usage_scan_failed
                             .store(initial_scan.is_err(), Ordering::SeqCst);
@@ -804,7 +1032,7 @@ pub fn run() {
                         loop {
                             let state = worker_handle.state::<AppState>();
                             if !first_cycle {
-                                match restore_saved_planet_account(&state)
+                                match restore_saved_planet_account_for_scan(&state)
                                     .and_then(|_| state.scan())
                                 {
                                     Ok(snapshot) => {

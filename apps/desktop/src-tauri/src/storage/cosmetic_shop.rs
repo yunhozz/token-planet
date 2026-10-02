@@ -836,6 +836,12 @@ impl Ledger {
             return Ok(true);
         }
 
+        self.has_local_guest_shop_state()
+    }
+
+    /// Checks guest shop ownership while the active planet account is still
+    /// local, before first login can move local planet data to a signed account.
+    pub fn has_local_guest_shop_state(&self) -> Result<bool, ScanError> {
         let has_local_shop_rows: bool = self.connection.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM shop_account_state WHERE account_id='local' AND state_revision>0
@@ -2916,6 +2922,9 @@ mod tests {
             [&local_account],
         ).unwrap();
 
+        assert!(!ledger.has_unimported_guest_shop_state().unwrap());
+        assert!(ledger.has_local_guest_shop_state().unwrap());
+
         ledger.ensure_planet_account("00000000-0000-0000-0000-000000000051").unwrap();
 
         assert!(ledger.pending_guest_cosmetic_import().unwrap().is_none());
@@ -2955,6 +2964,7 @@ mod tests {
         // This is the same contribution/reward lifecycle run by AppState::scan.
         ledger.rebuild_shop_contributions().unwrap();
         ledger.settle_guest_rewards(occurred_at + chrono::Duration::minutes(1)).unwrap();
+        assert!(!ledger.has_local_guest_shop_state().unwrap());
         assert!(ledger.shop_growth_credit_by_date().unwrap().values().sum::<f64>()
             >= crate::growth::STAGE_THRESHOLDS[0]);
         assert_eq!(ledger.connection.query_row::<i64, _, _>(

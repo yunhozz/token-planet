@@ -377,4 +377,12 @@ Rust와 SQL은 checked integer/numeric 중간 연산을 사용한다. JS number�
 - API `251f72a`, 원자 reset 저장 `4c1d18e`, 로컬 guard `dfc2c65`를 유지한다. 미등록 import draft 2개는 작성자가 자신의 미완 draft임을 확인한 뒤 제거했으며 import 기능은 구현되지 않았다.
 - 최종 독립 QA: frontend 315/315(18파일), TypeScript, 임시 출력 경로 Vite build, worker 7/7, Rust 전체191/191(기존 loopback HTTP mock3개 제외), offline checklib, diffcheck PASS. 기존 미사용 helper 경고2개는 실제 연결 미완 상태를 반영한다. Primary checkout은 clean이다.
 - 남은 기능: authenticated private timeline fetch→apply→rebuild→canonical aggregate upload의 실제 worker 연결, 로그인 reset preupload/native command/UI, 완전 guest import 및 공개 share 계약 연결, 실제 Tauri·브라우저 시각 검증. 로그인 자연 제거 UI는 기존 승인된 quote/apply만 연결했고, 로그인 reset UI는 비활성 유지한다.
+
+### 2026-10-02 추가 승인 이후 인증 worker 검증
+
+- 사용자 `허용`은 같은 프로젝트의 `get_my_planet_state`가 반환한 16필드 상태만 p_state로 재사용하고 wallet_balance/credits를 0/[]로 보내는 범위를 승인한다. 승인된 9키 집계와 개인 timeline을 연결하며 로컬 profile/object/wallet 청구는 전송하지 않는다. 서버 None은 bootstrap 보류다. 이전 거절 패치를 우회하지 않고 새 승인 원문을 Coder가 직접 조회한 뒤 정상 검토 경로에서 구현했다.
+- worker는 guest hold→계정/세션→개인 상태/timeline 검증→로컬 재구축→canonical contribution upsert에 연결됐다. Reviewer P1인 active local 첫 로그인 검사 누락과 공유 일시정지 중 공개 projection 갱신을 각각 RED/GREEN으로 수정했다. 로컬/server policy pause 모두 typed Held 및 0 upsert이며 초기화 preupload 성공으로 간주할 수 없다. 대기 공개 스냅샷도 두 pause 조건을 따른다.
+- startup/명령 restore가 worker보다 먼저 계정을 바꾸는 잔여 경로도 실제 switch RED로 재현한 뒤 중앙 guard로 막았다. 대상이 다른 계정일 때 원본·profile·shop·cycle·account table·latest snapshot 변경 전에 보류하고, 같은 계정 복원은 허용한다. scan-only restore는 명시적 GuestShopImportPending만 허용하므로 시작/주기/수동/소스 수집이 로컬 계정에서 계속되고 실제 keyring/DB 오류는 전파한다.
+- 최종 독립 QA: account_switch4/4, worker14/14, 전체Rust202/202(기존 localhost bind3 제외), checklib/diffcheck PASS. 로그는 `/private/tmp/shop-sync-qa-startup-account.log`, `shop-sync-qa-startup-worker.log`, `shop-sync-qa-startup-full.log`이다. Reviewer가 첫 로그인·pause·startup 복원 P1 해결과 추가 P1/P2 없음 확인했다. 호스팅 DB·실사용 전송·실거래·배포는 수행하지 않았다.
+- 남은 기능: signed reset 영속 UUID/이전 주기 intent 및 receipt 우선 복구→preupload/native/UI 연결, 완전 guest import/public sharing, 실제 Tauri/browser 시각 검증. 기존 reset RPC/client와 원자 cache를 완료된 reset UI로 해석하지 않는다. Task8/9 전체 체크를 완료로 변경하지 않는다.
 - Hosted DB 적용·실제 사용자 집계 전송·실제 원격 제거 거래·push/배포는 실행하지 않았다. 이 기준점은 검증된 로컬 구현 결과이며 전체 개편 완료 또는 출시 가능 판정이 아니다.
