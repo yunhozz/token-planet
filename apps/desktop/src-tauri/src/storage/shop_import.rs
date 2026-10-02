@@ -7,15 +7,15 @@ use sha2::{Digest, Sha256};
 
 use crate::domain::cosmetic_shop::{
     ActiveEffects, GuestActivityDay, GuestAvatarEquipment, GuestAvatarOwned,
-    GuestCosmeticEquipment, GuestCycleSettlement, GuestEffectContribution, GuestEffectTimelineState, GuestEraProgress,
-    GuestGameReward, GuestGrowthJournalCycle, GuestGrowthJournalEntry, GuestGrowthJournalState,
-    GuestLandscapeEditVersion, GuestLandscapeInstance, GuestLandscapePlacement,
-    GuestNaturalObject, GuestNaturalRemoval, GuestPlanetProfile, GuestRemovalDebit, GuestRemovalProof,
-    GuestPurchaseOwnershipProof, GuestPurchaseProof, GuestResetSettlementProof, GuestShopCycle,
-    GuestShopImportData, GuestShopImportDisposition,
-    GuestPendingPurchase, GuestShopImportSnapshot, GuestShopImportStatus, GuestShopPurchase, GuestShopWalletCredit,
-    GuestShopImportIntegrityIssue, GuestUnverifiedWalletClaim, GuestUsageAggregate,
-    GuestDailyAgentTotal,
+    GuestCosmeticEquipment, GuestCycleSettlement, GuestDailyAgentTotal, GuestEffectContribution,
+    GuestEffectTimelineState, GuestEraProgress, GuestGameReward, GuestGrowthJournalCycle,
+    GuestGrowthJournalEntry, GuestGrowthJournalState, GuestLandscapeEditVersion,
+    GuestLandscapeInstance, GuestLandscapePlacement, GuestNaturalObject, GuestNaturalRemoval,
+    GuestPendingPurchase, GuestPlanetProfile, GuestPurchaseOwnershipProof, GuestPurchaseProof,
+    GuestRemovalDebit, GuestRemovalProof, GuestResetSettlementProof, GuestShopCycle,
+    GuestShopImportData, GuestShopImportDisposition, GuestShopImportIntegrityIssue,
+    GuestShopImportSnapshot, GuestShopImportStatus, GuestShopPurchase, GuestShopWalletCredit,
+    GuestUnverifiedWalletClaim, GuestUsageAggregate,
 };
 use crate::domain::cosmetic_shop::{ShopActionResult, ShopActionStatus, ShopCategory, ShopRequest};
 use crate::domain::landscape_geometry::{terrain_bounds, validate_placement, LandscapePoint};
@@ -204,11 +204,7 @@ where
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
-fn query_all<T, F>(
-    connection: &Connection,
-    sql: &str,
-    mapper: F,
-) -> Result<Vec<T>, ScanError>
+fn query_all<T, F>(connection: &Connection, sql: &str, mapper: F) -> Result<Vec<T>, ScanError>
 where
     F: FnMut(&Row<'_>) -> rusqlite::Result<T>,
 {
@@ -261,9 +257,10 @@ fn disposition(data: &GuestShopImportData) -> GuestShopImportDisposition {
         || data.legacy_partial_import_pending
         || !data.integrity_issues.is_empty()
         || (!data.effect_history.is_empty() && !data.effect_cycle_bounds_authoritative)
-        || data.daily_agent_totals.iter().any(|aggregate| {
-            aggregate.total_tokens.is_none() || aggregate.coverage != "complete"
-        })
+        || data
+            .daily_agent_totals
+            .iter()
+            .any(|aggregate| aggregate.total_tokens.is_none() || aggregate.coverage != "complete")
         || data
             .usage_aggregates
             .iter()
@@ -354,12 +351,7 @@ fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanErro
         .query_row(
             "SELECT generation,deleted_at_utc FROM growth_journal_state WHERE account_id='local'",
             [],
-            |row| {
-                Ok((
-                    to_u64(row.get(0)?)?,
-                    row.get::<_, Option<String>>(1)?,
-                ))
-            },
+            |row| Ok((to_u64(row.get(0)?)?, row.get::<_, Option<String>>(1)?)),
         )
         .optional()?
         .map(|(generation, deleted_at_utc)| GuestGrowthJournalState {
@@ -571,12 +563,8 @@ fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanErro
             })
         },
     )?;
-    let purchase_proofs = purchase_proofs(
-        connection,
-        &purchases,
-        &landscape_instances,
-        &avatar_owned,
-    )?;
+    let purchase_proofs =
+        purchase_proofs(connection, &purchases, &landscape_instances, &avatar_owned)?;
     let natural_removals = query_rows(
         connection,
         "SELECT cycle_id,stage,ordinal,version,removed_at_utc FROM shop_natural_removal
@@ -653,7 +641,8 @@ fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanErro
                 kind: row.get(2)?,
                 cycle_id: row.get(3)?,
                 amount: to_u64(row.get(4)?)?,
-                effects: serde_json::from_str(&effects).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                effects: serde_json::from_str(&effects)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 awarded_at_utc: row.get(6)?,
             })
         },
@@ -709,7 +698,8 @@ fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanErro
                 cycle_id: row.get(0)?,
                 stage: to_u8(row.get(1)?)?,
                 trigger_key: row.get(2)?,
-                effects: serde_json::from_str(&effects).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                effects: serde_json::from_str(&effects)
+                    .map_err(|_| rusqlite::Error::InvalidQuery)?,
                 awarded_at_utc: row.get(4)?,
             })
         },
@@ -751,20 +741,22 @@ fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanErro
     }
     let usage_aggregates = aggregate_rows
         .into_iter()
-        .map(|(bucket_date, agent, event_count, total_tokens, coverage)| {
-            let matching_cycles = cycles_for_usage.get(&(bucket_date.clone(), agent.clone()));
-            let cycle_id = matching_cycles
-                .filter(|cycles| cycles.len() == 1)
-                .and_then(|cycles| cycles.iter().next().cloned());
-            GuestUsageAggregate {
-                cycle_id,
-                bucket_date,
-                agent,
-                event_count,
-                total_tokens,
-                coverage,
-            }
-        })
+        .map(
+            |(bucket_date, agent, event_count, total_tokens, coverage)| {
+                let matching_cycles = cycles_for_usage.get(&(bucket_date.clone(), agent.clone()));
+                let cycle_id = matching_cycles
+                    .filter(|cycles| cycles.len() == 1)
+                    .and_then(|cycles| cycles.iter().next().cloned());
+                GuestUsageAggregate {
+                    cycle_id,
+                    bucket_date,
+                    agent,
+                    event_count,
+                    total_tokens,
+                    coverage,
+                }
+            },
+        )
         .collect::<Vec<_>>();
     let daily_agent_totals = usage_aggregates
         .iter()
@@ -775,11 +767,9 @@ fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanErro
             coverage: aggregate.coverage.clone(),
         })
         .collect::<Vec<_>>();
-    let lifetime_usage_tokens = usage_aggregates
-        .iter()
-        .try_fold(0_u64, |total, aggregate| {
-            total.checked_add(aggregate.total_tokens?)
-        });
+    let lifetime_usage_tokens = usage_aggregates.iter().try_fold(0_u64, |total, aggregate| {
+        total.checked_add(aggregate.total_tokens?)
+    });
     let current_cycle_usage_tokens = if usage_aggregates
         .iter()
         .any(|aggregate| aggregate.cycle_id.is_none() || aggregate.total_tokens.is_none())
@@ -805,10 +795,12 @@ fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanErro
     }
     let cycle_usage_totals = cycle_totals
         .into_iter()
-        .map(|(cycle_id, total_tokens)| crate::domain::cosmetic_shop::GuestCycleUsageTotal {
-            cycle_id,
-            total_tokens,
-        })
+        .map(
+            |(cycle_id, total_tokens)| crate::domain::cosmetic_shop::GuestCycleUsageTotal {
+                cycle_id,
+                total_tokens,
+            },
+        )
         .collect::<Vec<_>>();
 
     let natural_objects = query_all(
@@ -830,24 +822,25 @@ fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanErro
     )?;
 
     let mut cycle_map = BTreeMap::<String, GuestShopCycle>::new();
-    let mut merge_cycle = |cycle_id: String, started: Option<String>, ended: Option<String>, settled: Option<u64>| {
-        let cycle = cycle_map.entry(cycle_id.clone()).or_insert(GuestShopCycle {
-            cycle_id,
-            started_at_utc: None,
-            ended_at_utc: None,
-            is_current: false,
-            settled_bonus_tokens: None,
-        });
-        if cycle.started_at_utc.is_none() {
-            cycle.started_at_utc = started;
-        }
-        if ended.is_some() {
-            cycle.ended_at_utc = ended;
-        }
-        if settled.is_some() {
-            cycle.settled_bonus_tokens = settled;
-        }
-    };
+    let mut merge_cycle =
+        |cycle_id: String, started: Option<String>, ended: Option<String>, settled: Option<u64>| {
+            let cycle = cycle_map.entry(cycle_id.clone()).or_insert(GuestShopCycle {
+                cycle_id,
+                started_at_utc: None,
+                ended_at_utc: None,
+                is_current: false,
+                settled_bonus_tokens: None,
+            });
+            if cycle.started_at_utc.is_none() {
+                cycle.started_at_utc = started;
+            }
+            if ended.is_some() {
+                cycle.ended_at_utc = ended;
+            }
+            if settled.is_some() {
+                cycle.settled_bonus_tokens = settled;
+            }
+        };
     for cycle in &growth_journal_cycles {
         merge_cycle(
             cycle.cycle_id.clone(),
@@ -975,7 +968,9 @@ fn purchase_proofs(
     landscape_instances: &[GuestLandscapeInstance],
     avatar_owned: &[GuestAvatarOwned],
 ) -> Result<Vec<GuestPurchaseProof>, ScanError> {
-    use crate::domain::cosmetic_shop::{shop_products, GuestPurchaseOwnershipProof::*, QuoteTarget};
+    use crate::domain::cosmetic_shop::{
+        shop_products, GuestPurchaseOwnershipProof::*, QuoteTarget,
+    };
 
     let receipts = query_rows(
         connection,
@@ -997,7 +992,11 @@ fn purchase_proofs(
     let mut proofs_by_id = BTreeMap::<String, GuestPurchaseProof>::new();
     let mut landscape_receipts = BTreeMap::<
         String,
-        Vec<(String, crate::domain::cosmetic_shop::ShopQuote, Vec<crate::domain::cosmetic_shop::LandscapeInstance>)>,
+        Vec<(
+            String,
+            crate::domain::cosmetic_shop::ShopQuote,
+            Vec<crate::domain::cosmetic_shop::LandscapeInstance>,
+        )>,
     >::new();
 
     for purchase in purchases {
@@ -1041,7 +1040,13 @@ fn purchase_proofs(
                         && owned.sku == sku
                         && owned.price == purchase.price
                 });
-                if directly_owned && result.state.avatar_owned_skus.iter().any(|owned| owned == &sku) {
+                if directly_owned
+                    && result
+                        .state
+                        .avatar_owned_skus
+                        .iter()
+                        .any(|owned| owned == &sku)
+                {
                     proofs_by_id.insert(
                         purchase.purchase_id.clone(),
                         GuestPurchaseProof {
@@ -1060,16 +1065,20 @@ fn purchase_proofs(
                     .into_iter()
                     .filter(|instance| instance.sku == sku)
                     .collect();
-                landscape_receipts
-                    .entry(sku.clone())
-                    .or_default()
-                    .push((purchase.purchase_id.clone(), quote, instances));
+                landscape_receipts.entry(sku.clone()).or_default().push((
+                    purchase.purchase_id.clone(),
+                    quote,
+                    instances,
+                ));
             }
         }
     }
 
     for (sku, mut receipts) in landscape_receipts {
-        let purchase_count = purchases.iter().filter(|purchase| purchase.sku == sku).count();
+        let purchase_count = purchases
+            .iter()
+            .filter(|purchase| purchase.sku == sku)
+            .count();
         let final_owned = landscape_instances
             .iter()
             .filter(|instance| instance.sku == sku)
@@ -1082,7 +1091,8 @@ fn purchase_proofs(
             continue;
         }
         receipts.sort_by_key(|(_, _, instances)| instances.len());
-        let mut previous = BTreeMap::<String, crate::domain::cosmetic_shop::LandscapeInstance>::new();
+        let mut previous =
+            BTreeMap::<String, crate::domain::cosmetic_shop::LandscapeInstance>::new();
         let mut group_proofs = Vec::with_capacity(receipts.len());
         let mut sequence_is_complete = true;
         for (position, (request_id, quote, instances)) in receipts.into_iter().enumerate() {
@@ -1100,7 +1110,9 @@ fn purchase_proofs(
                 .filter(|instance_id| !previous.contains_key(*instance_id))
                 .cloned()
                 .collect::<Vec<_>>();
-            let removed = previous.keys().any(|instance_id| !current.contains_key(instance_id));
+            let removed = previous
+                .keys()
+                .any(|instance_id| !current.contains_key(instance_id));
             if added.len() != 1 || removed {
                 sequence_is_complete = false;
                 break;
@@ -1301,26 +1313,33 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
     };
     let terrain = (!layout_over_capacity).then(|| terrain_bounds(&current_natural_objects));
 
-    let check_timestamp = |issues: &mut Vec<GuestShopImportIntegrityIssue>, field: String, value: Option<&str>| {
-        if value.is_some_and(|value| DateTime::parse_from_rfc3339(value).is_err()) {
-            issues.push(GuestShopImportIntegrityIssue::InvalidTimestamp { field });
-        }
-    };
-    let check_date = |issues: &mut Vec<GuestShopImportIntegrityIssue>, field: String, value: &str| {
-        if NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err() {
-            issues.push(GuestShopImportIntegrityIssue::InvalidTimestamp { field });
-        }
-    };
-    let check_timezone = |issues: &mut Vec<GuestShopImportIntegrityIssue>, field: String, value: &str| {
-        if value.parse::<chrono_tz::Tz>().is_err() {
-            issues.push(GuestShopImportIntegrityIssue::InvalidTimezone { field });
-        }
-    };
+    let check_timestamp =
+        |issues: &mut Vec<GuestShopImportIntegrityIssue>, field: String, value: Option<&str>| {
+            if value.is_some_and(|value| DateTime::parse_from_rfc3339(value).is_err()) {
+                issues.push(GuestShopImportIntegrityIssue::InvalidTimestamp { field });
+            }
+        };
+    let check_date =
+        |issues: &mut Vec<GuestShopImportIntegrityIssue>, field: String, value: &str| {
+            if NaiveDate::parse_from_str(value, "%Y-%m-%d").is_err() {
+                issues.push(GuestShopImportIntegrityIssue::InvalidTimestamp { field });
+            }
+        };
+    let check_timezone =
+        |issues: &mut Vec<GuestShopImportIntegrityIssue>, field: String, value: &str| {
+            if value.parse::<chrono_tz::Tz>().is_err() {
+                issues.push(GuestShopImportIntegrityIssue::InvalidTimezone { field });
+            }
+        };
 
     check_timezone(&mut issues, "world_timezone".into(), &data.world_timezone);
     check_timezone(&mut issues, "planet_timezone".into(), &data.planet_timezone);
     check_timezone(&mut issues, "reward_timezone".into(), &data.reward_timezone);
-    check_timestamp(&mut issues, "activation_at_utc".into(), Some(&data.activation_at_utc));
+    check_timestamp(
+        &mut issues,
+        "activation_at_utc".into(),
+        Some(&data.activation_at_utc),
+    );
     check_timestamp(
         &mut issues,
         "current_cycle.started_at_utc".into(),
@@ -1331,15 +1350,39 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
         "current_cycle.ended_at_utc".into(),
         data.current_cycle.ended_at_utc.as_deref(),
     );
-    check_timestamp(&mut issues, "last_reset_at_utc".into(), data.last_reset_at_utc.as_deref());
-    check_timestamp(&mut issues, "reset_available_at_utc".into(), data.reset_available_at_utc.as_deref());
+    check_timestamp(
+        &mut issues,
+        "last_reset_at_utc".into(),
+        data.last_reset_at_utc.as_deref(),
+    );
+    check_timestamp(
+        &mut issues,
+        "reset_available_at_utc".into(),
+        data.reset_available_at_utc.as_deref(),
+    );
     for (index, cycle) in data.historical_cycles.iter().enumerate() {
-        check_timestamp(&mut issues, format!("historical_cycles[{index}].started_at_utc"), cycle.started_at_utc.as_deref());
-        check_timestamp(&mut issues, format!("historical_cycles[{index}].ended_at_utc"), cycle.ended_at_utc.as_deref());
+        check_timestamp(
+            &mut issues,
+            format!("historical_cycles[{index}].started_at_utc"),
+            cycle.started_at_utc.as_deref(),
+        );
+        check_timestamp(
+            &mut issues,
+            format!("historical_cycles[{index}].ended_at_utc"),
+            cycle.ended_at_utc.as_deref(),
+        );
     }
     if let Some(timeline) = &data.effect_timeline_state {
-        check_timestamp(&mut issues, "effect_timeline_state.server_time_utc".into(), Some(&timeline.server_time_utc));
-        check_timezone(&mut issues, "effect_timeline_state.reward_timezone".into(), &timeline.reward_timezone);
+        check_timestamp(
+            &mut issues,
+            "effect_timeline_state.server_time_utc".into(),
+            Some(&timeline.server_time_utc),
+        );
+        check_timezone(
+            &mut issues,
+            "effect_timeline_state.reward_timezone".into(),
+            &timeline.reward_timezone,
+        );
         if timeline.current_cycle_id != data.current_cycle.cycle_id
             || timeline.reward_timezone != data.reward_timezone
         {
@@ -1349,77 +1392,202 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
         }
     }
     for (index, instance) in data.landscape_instances.iter().enumerate() {
-        check_timestamp(&mut issues, format!("landscape_instances[{index}].acquired_at_utc"), Some(&instance.acquired_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("landscape_instances[{index}].acquired_at_utc"),
+            Some(&instance.acquired_at_utc),
+        );
     }
     for (index, owned) in data.avatar_owned.iter().enumerate() {
-        check_timestamp(&mut issues, format!("avatar_owned[{index}].acquired_at_utc"), Some(&owned.acquired_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("avatar_owned[{index}].acquired_at_utc"),
+            Some(&owned.acquired_at_utc),
+        );
     }
-    for (index, purchase) in data.cosmetic_purchases.iter().chain(&data.purchases).enumerate() {
-        check_timestamp(&mut issues, format!("purchases[{index}].purchased_at_utc"), Some(&purchase.purchased_at_utc));
+    for (index, purchase) in data
+        .cosmetic_purchases
+        .iter()
+        .chain(&data.purchases)
+        .enumerate()
+    {
+        check_timestamp(
+            &mut issues,
+            format!("purchases[{index}].purchased_at_utc"),
+            Some(&purchase.purchased_at_utc),
+        );
     }
     for (index, purchase) in data.pending_purchases.iter().enumerate() {
-        check_timestamp(&mut issues, format!("pending_purchases[{index}].created_at_utc"), Some(&purchase.created_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("pending_purchases[{index}].created_at_utc"),
+            Some(&purchase.created_at_utc),
+        );
     }
     for (index, removal) in data.natural_removals.iter().enumerate() {
-        check_timestamp(&mut issues, format!("natural_removals[{index}].removed_at_utc"), Some(&removal.removed_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("natural_removals[{index}].removed_at_utc"),
+            Some(&removal.removed_at_utc),
+        );
     }
     for (index, debit) in data.removal_debits.iter().enumerate() {
-        check_timestamp(&mut issues, format!("removal_debits[{index}].created_at_utc"), Some(&debit.created_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("removal_debits[{index}].created_at_utc"),
+            Some(&debit.created_at_utc),
+        );
     }
     for (index, bound) in data.effect_cycle_bounds.iter().enumerate() {
-        check_timestamp(&mut issues, format!("effect_cycle_bounds[{index}].started_at_utc"), Some(&bound.started_at_utc));
-        check_timestamp(&mut issues, format!("effect_cycle_bounds[{index}].ended_at_utc"), bound.ended_at_utc.as_deref());
+        check_timestamp(
+            &mut issues,
+            format!("effect_cycle_bounds[{index}].started_at_utc"),
+            Some(&bound.started_at_utc),
+        );
+        check_timestamp(
+            &mut issues,
+            format!("effect_cycle_bounds[{index}].ended_at_utc"),
+            bound.ended_at_utc.as_deref(),
+        );
     }
     for (index, interval) in data.effect_history.iter().enumerate() {
-        check_timestamp(&mut issues, format!("effect_history[{index}].started_at_utc"), Some(&interval.started_at_utc));
-        check_timestamp(&mut issues, format!("effect_history[{index}].ended_at_utc"), interval.ended_at_utc.as_deref());
+        check_timestamp(
+            &mut issues,
+            format!("effect_history[{index}].started_at_utc"),
+            Some(&interval.started_at_utc),
+        );
+        check_timestamp(
+            &mut issues,
+            format!("effect_history[{index}].ended_at_utc"),
+            interval.ended_at_utc.as_deref(),
+        );
     }
     for (index, contribution) in data.effect_contributions.iter().enumerate() {
-        check_date(&mut issues, format!("effect_contributions[{index}].date"), &contribution.date);
+        check_date(
+            &mut issues,
+            format!("effect_contributions[{index}].date"),
+            &contribution.date,
+        );
     }
     for (index, activity) in data.activity_days.iter().enumerate() {
-        check_date(&mut issues, format!("activity_days[{index}].reward_date"), &activity.reward_date);
-        check_timestamp(&mut issues, format!("activity_days[{index}].first_occurred_at_utc"), Some(&activity.first_occurred_at_utc));
+        check_date(
+            &mut issues,
+            format!("activity_days[{index}].reward_date"),
+            &activity.reward_date,
+        );
+        check_timestamp(
+            &mut issues,
+            format!("activity_days[{index}].first_occurred_at_utc"),
+            Some(&activity.first_occurred_at_utc),
+        );
     }
     for (index, reward) in data.game_rewards.iter().enumerate() {
-        check_timestamp(&mut issues, format!("game_rewards[{index}].awarded_at_utc"), Some(&reward.awarded_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("game_rewards[{index}].awarded_at_utc"),
+            Some(&reward.awarded_at_utc),
+        );
     }
     for (index, credit) in data.wallet_credits.iter().enumerate() {
-        check_timestamp(&mut issues, format!("wallet_credits[{index}].created_at_utc"), Some(&credit.created_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("wallet_credits[{index}].created_at_utc"),
+            Some(&credit.created_at_utc),
+        );
     }
     for (index, claim) in data.unverified_planet_wallet_claims.iter().enumerate() {
-        check_timestamp(&mut issues, format!("unverified_planet_wallet_claims[{index}].created_at_utc"), Some(&claim.created_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("unverified_planet_wallet_claims[{index}].created_at_utc"),
+            Some(&claim.created_at_utc),
+        );
     }
     for (index, settlement) in data.cycle_settlements.iter().enumerate() {
-        check_timestamp(&mut issues, format!("cycle_settlements[{index}].settled_at_utc"), Some(&settlement.settled_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("cycle_settlements[{index}].settled_at_utc"),
+            Some(&settlement.settled_at_utc),
+        );
     }
     for (index, progress) in data.era_progress.iter().enumerate() {
-        check_timestamp(&mut issues, format!("era_progress[{index}].awarded_at_utc"), Some(&progress.awarded_at_utc));
+        check_timestamp(
+            &mut issues,
+            format!("era_progress[{index}].awarded_at_utc"),
+            Some(&progress.awarded_at_utc),
+        );
     }
     for (index, aggregate) in data.daily_agent_totals.iter().enumerate() {
-        check_date(&mut issues, format!("daily_agent_totals[{index}].bucket_date"), &aggregate.bucket_date);
+        check_date(
+            &mut issues,
+            format!("daily_agent_totals[{index}].bucket_date"),
+            &aggregate.bucket_date,
+        );
     }
     for (index, aggregate) in data.usage_aggregates.iter().enumerate() {
-        check_date(&mut issues, format!("usage_aggregates[{index}].bucket_date"), &aggregate.bucket_date);
+        check_date(
+            &mut issues,
+            format!("usage_aggregates[{index}].bucket_date"),
+            &aggregate.bucket_date,
+        );
     }
     if let Some(state) = &data.growth_journal_state {
-        check_timestamp(&mut issues, "growth_journal_state.deleted_at_utc".into(), state.deleted_at_utc.as_deref());
+        check_timestamp(
+            &mut issues,
+            "growth_journal_state.deleted_at_utc".into(),
+            state.deleted_at_utc.as_deref(),
+        );
     }
     for (index, cycle) in data.growth_journal_cycles.iter().enumerate() {
-        check_timestamp(&mut issues, format!("growth_journal_cycles[{index}].started_at_utc"), cycle.started_at_utc.as_deref());
-        check_timestamp(&mut issues, format!("growth_journal_cycles[{index}].ended_at_utc"), cycle.ended_at_utc.as_deref());
-        check_timestamp(&mut issues, format!("growth_journal_cycles[{index}].wallet_credit_at_utc"), cycle.wallet_credit_at_utc.as_deref());
+        check_timestamp(
+            &mut issues,
+            format!("growth_journal_cycles[{index}].started_at_utc"),
+            cycle.started_at_utc.as_deref(),
+        );
+        check_timestamp(
+            &mut issues,
+            format!("growth_journal_cycles[{index}].ended_at_utc"),
+            cycle.ended_at_utc.as_deref(),
+        );
+        check_timestamp(
+            &mut issues,
+            format!("growth_journal_cycles[{index}].wallet_credit_at_utc"),
+            cycle.wallet_credit_at_utc.as_deref(),
+        );
     }
     for (index, entry) in data.growth_journal_entries.iter().enumerate() {
-        check_date(&mut issues, format!("growth_journal_entries[{index}].bucket_date"), &entry.bucket_date);
+        check_date(
+            &mut issues,
+            format!("growth_journal_entries[{index}].bucket_date"),
+            &entry.bucket_date,
+        );
     }
     for (index, proof) in data.reset_settlement_proofs.iter().enumerate() {
-        check_timestamp(&mut issues, format!("reset_settlement_proofs[{index}].reset_at_utc"), Some(&proof.reset_at_utc));
-        check_timestamp(&mut issues, format!("reset_settlement_proofs[{index}].old_cycle_started_at_utc"), proof.old_cycle_started_at_utc.as_deref());
-        check_timestamp(&mut issues, format!("reset_settlement_proofs[{index}].new_cycle_started_at_utc"), proof.new_cycle_started_at_utc.as_deref());
-        check_timestamp(&mut issues, format!("reset_settlement_proofs[{index}].reset_available_at_utc"), proof.reset_available_at_utc.as_deref());
+        check_timestamp(
+            &mut issues,
+            format!("reset_settlement_proofs[{index}].reset_at_utc"),
+            Some(&proof.reset_at_utc),
+        );
+        check_timestamp(
+            &mut issues,
+            format!("reset_settlement_proofs[{index}].old_cycle_started_at_utc"),
+            proof.old_cycle_started_at_utc.as_deref(),
+        );
+        check_timestamp(
+            &mut issues,
+            format!("reset_settlement_proofs[{index}].new_cycle_started_at_utc"),
+            proof.new_cycle_started_at_utc.as_deref(),
+        );
+        check_timestamp(
+            &mut issues,
+            format!("reset_settlement_proofs[{index}].reset_available_at_utc"),
+            proof.reset_available_at_utc.as_deref(),
+        );
         if let Some(claim) = &proof.raw_wallet_claim {
-            check_timestamp(&mut issues, format!("reset_settlement_proofs[{index}].raw_wallet_claim.created_at_utc"), Some(&claim.created_at_utc));
+            check_timestamp(
+                &mut issues,
+                format!("reset_settlement_proofs[{index}].raw_wallet_claim.created_at_utc"),
+                Some(&claim.created_at_utc),
+            );
         }
     }
 
@@ -1553,7 +1721,10 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
                 false
             } else {
                 match (&proof.ownership, category) {
-                    (GuestPurchaseOwnershipProof::Landscape { instance_id }, Some(ShopCategory::Landscape)) => {
+                    (
+                        GuestPurchaseOwnershipProof::Landscape { instance_id },
+                        Some(ShopCategory::Landscape),
+                    ) => {
                         let owned = data.landscape_instances.iter().any(|instance| {
                             instance.instance_id == *instance_id && instance.sku == purchase.sku
                         });
@@ -1593,9 +1764,11 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
     }
     for instance in &data.landscape_instances {
         if !proven_landscape_ids.contains(&instance.instance_id) {
-            issues.push(GuestShopImportIntegrityIssue::LandscapeOwnershipUnverifiable {
-                instance_id: instance.instance_id.clone(),
-            });
+            issues.push(
+                GuestShopImportIntegrityIssue::LandscapeOwnershipUnverifiable {
+                    instance_id: instance.instance_id.clone(),
+                },
+            );
         }
     }
     for owned in &data.avatar_owned {
@@ -1669,11 +1842,13 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
             tombstone.stage,
             tombstone.ordinal,
         )) {
-            issues.push(GuestShopImportIntegrityIssue::NaturalTombstoneUnverifiable {
-                cycle_id: tombstone.cycle_id.clone(),
-                stage: tombstone.stage,
-                ordinal: tombstone.ordinal,
-            });
+            issues.push(
+                GuestShopImportIntegrityIssue::NaturalTombstoneUnverifiable {
+                    cycle_id: tombstone.cycle_id.clone(),
+                    stage: tombstone.stage,
+                    ordinal: tombstone.ordinal,
+                },
+            );
         }
     }
     let legacy_skus = crate::domain::cosmetic_shop::legacy_cosmetic_products()
@@ -1745,9 +1920,11 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
     for interval in &data.effect_history {
         for instance_id in &interval.active_instance_ids {
             if !instance_ids.contains(instance_id.as_str()) {
-                issues.push(GuestShopImportIntegrityIssue::EffectReferencesUnknownInstance {
-                    instance_id: instance_id.clone(),
-                });
+                issues.push(
+                    GuestShopImportIntegrityIssue::EffectReferencesUnknownInstance {
+                        instance_id: instance_id.clone(),
+                    },
+                );
             }
         }
         let started_at = DateTime::parse_from_rfc3339(&interval.started_at_utc)
@@ -1785,7 +1962,8 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
             continue;
         };
         if started_at < *bound_start
-            || ended_at.is_some_and(|ended_at| bound_end.is_some_and(|bound_end| ended_at > bound_end))
+            || ended_at
+                .is_some_and(|ended_at| bound_end.is_some_and(|bound_end| ended_at > bound_end))
             || (bound_end.is_some() && ended_at.is_none())
         {
             issues.push(GuestShopImportIntegrityIssue::InvalidEffectTimeline {
@@ -1821,7 +1999,9 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
     }
     if parsed_intervals
         .last()
-        .is_some_and(|(interval, _, ended_at)| ended_at.is_none() && interval.cycle_id != data.current_cycle.cycle_id)
+        .is_some_and(|(interval, _, ended_at)| {
+            ended_at.is_none() && interval.cycle_id != data.current_cycle.cycle_id
+        })
     {
         issues.push(GuestShopImportIntegrityIssue::InvalidEffectTimeline {
             reason: "open_interval_not_current_cycle".into(),
@@ -1831,23 +2011,56 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
     let mut known_cycles = BTreeSet::from([data.current_cycle.cycle_id.as_str()]);
     known_cycles.extend(bound_cycles.iter().copied());
     known_cycles.extend(data.historical_cycles.iter().filter_map(|cycle| {
-        (cycle.started_at_utc.is_some() || cycle.ended_at_utc.is_some() || cycle.settled_bonus_tokens.is_some())
-            .then_some(cycle.cycle_id.as_str())
+        (cycle.started_at_utc.is_some()
+            || cycle.ended_at_utc.is_some()
+            || cycle.settled_bonus_tokens.is_some())
+        .then_some(cycle.cycle_id.as_str())
     }));
     known_cycles.extend(data.natural_objects.iter().map(|row| row.cycle_id.as_str()));
-    known_cycles.extend(data.natural_removals.iter().map(|row| row.cycle_id.as_str()));
-    known_cycles.extend(data.effect_contributions.iter().map(|row| row.cycle_id.as_str()));
+    known_cycles.extend(
+        data.natural_removals
+            .iter()
+            .map(|row| row.cycle_id.as_str()),
+    );
+    known_cycles.extend(
+        data.effect_contributions
+            .iter()
+            .map(|row| row.cycle_id.as_str()),
+    );
     known_cycles.extend(data.effect_history.iter().map(|row| row.cycle_id.as_str()));
     known_cycles.extend(data.game_rewards.iter().map(|row| row.cycle_id.as_str()));
     known_cycles.extend(data.wallet_credits.iter().map(|row| row.cycle_id.as_str()));
-    known_cycles.extend(data.cycle_settlements.iter().map(|row| row.cycle_id.as_str()));
+    known_cycles.extend(
+        data.cycle_settlements
+            .iter()
+            .map(|row| row.cycle_id.as_str()),
+    );
     known_cycles.extend(data.era_progress.iter().map(|row| row.cycle_id.as_str()));
-    known_cycles.extend(data.usage_aggregates.iter().filter_map(|row| row.cycle_id.as_deref()));
-    known_cycles.extend(data.cycle_usage_totals.iter().map(|row| row.cycle_id.as_str()));
-    known_cycles.extend(data.growth_journal_cycles.iter().map(|row| row.cycle_id.as_str()));
-    known_cycles.extend(data.growth_journal_entries.iter().map(|row| row.cycle_id.as_str()));
+    known_cycles.extend(
+        data.usage_aggregates
+            .iter()
+            .filter_map(|row| row.cycle_id.as_deref()),
+    );
+    known_cycles.extend(
+        data.cycle_usage_totals
+            .iter()
+            .map(|row| row.cycle_id.as_str()),
+    );
+    known_cycles.extend(
+        data.growth_journal_cycles
+            .iter()
+            .map(|row| row.cycle_id.as_str()),
+    );
+    known_cycles.extend(
+        data.growth_journal_entries
+            .iter()
+            .map(|row| row.cycle_id.as_str()),
+    );
     known_cycles.extend(data.reset_settlement_proofs.iter().flat_map(|proof| {
-        [proof.previous_cycle_id.as_str(), proof.new_cycle_id.as_str()]
+        [
+            proof.previous_cycle_id.as_str(),
+            proof.new_cycle_id.as_str(),
+        ]
     }));
     for activity in &data.activity_days {
         if !known_cycles.contains(activity.cycle_id.as_str()) {
@@ -1861,7 +2074,9 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
         {
             if let Ok(occurred_at) = DateTime::parse_from_rfc3339(&activity.first_occurred_at_utc) {
                 let occurred_at = occurred_at.with_timezone(&Utc);
-                if occurred_at < *started_at || ended_at.is_some_and(|ended_at| occurred_at >= ended_at) {
+                if occurred_at < *started_at
+                    || ended_at.is_some_and(|ended_at| occurred_at >= ended_at)
+                {
                     issues.push(GuestShopImportIntegrityIssue::InvalidEffectTimeline {
                         reason: "activity_outside_cycle_bound".into(),
                     });
@@ -1927,9 +2142,8 @@ fn add_reset_proof_integrity_issues(
                 && proof.reset_available_at_utc.is_some()
         };
         if !complete {
-            issues.push(GuestShopImportIntegrityIssue::ResetProofUnverifiable {
-                previous_cycle_id,
-            });
+            issues
+                .push(GuestShopImportIntegrityIssue::ResetProofUnverifiable { previous_cycle_id });
         }
     }
 }
@@ -2070,8 +2284,7 @@ fn reset_proofs(
         !proofs
             .iter()
             .any(|proof| proof.previous_cycle_id == claim.previous_cycle_id)
-    })
-    {
+    }) {
         unverifiable = true;
     }
     Ok((proofs, unverifiable))
@@ -2108,7 +2321,10 @@ mod native_empty_bootstrap_capture_tests {
         assert_eq!(data.growth_journal_state.as_ref().unwrap().generation, 0);
 
         let wire = serde_json::json!({ "schema_version": 1, "snapshot": status.snapshot });
-        println!("NATIVE_EMPTY_CAPTURE={}", serde_json::to_string(&wire).unwrap());
+        println!(
+            "NATIVE_EMPTY_CAPTURE={}",
+            serde_json::to_string(&wire).unwrap()
+        );
     }
 
     #[test]

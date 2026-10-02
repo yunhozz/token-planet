@@ -296,8 +296,10 @@ fn validate_natural_removal_response(
     {
         return Err("서버 제거 결과의 확인 견적이 요청과 다릅니다".into());
     }
-    if matches!(result.status, ShopActionStatus::Removed | ShopActionStatus::AlreadyRemoved)
-        && !result.state.removed_natural_keys.contains(key)
+    if matches!(
+        result.status,
+        ShopActionStatus::Removed | ShopActionStatus::AlreadyRemoved
+    ) && !result.state.removed_natural_keys.contains(key)
     {
         return Err("서버 제거 결과에 정식 제거 상태가 없습니다".into());
     }
@@ -324,9 +326,7 @@ async fn apply_shop_request_for_session(
                 .apply_guest_shop_request(request, chrono::Utc::now())
                 .map_err(|_| "상점 요청을 처리할 수 없습니다".into())
         }
-        CanonicalShopSession::Unavailable(reason) => {
-            offline_shop_action(ledger, request, &reason)
-        }
+        CanonicalShopSession::Unavailable(reason) => offline_shop_action(ledger, request, &reason),
         CanonicalShopSession::Online {
             account_id,
             cycle_id,
@@ -391,7 +391,8 @@ async fn shop_session(state: &AppState) -> Result<ShopSession, String> {
         });
     };
     let store = SessionStore::new(&config).map_err(|_| "보안 저장소를 열 수 없습니다")?;
-    let Some(saved) = store.load().map_err(|_| "로그인 정보를 읽을 수 없습니다")? else {
+    let Some(saved) = store.load().map_err(|_| "로그인 정보를 읽을 수 없습니다")?
+    else {
         return Ok(if account_id.starts_with("account:") {
             ShopSession::Unavailable("로그인 계정의 상점은 서버 연결 후 이용할 수 있습니다")
         } else {
@@ -399,7 +400,10 @@ async fn shop_session(state: &AppState) -> Result<ShopSession, String> {
         });
     };
     state.select_planet_account(&saved.user.id)?;
-    match SupabaseAuthClient::new(config.clone()).session(&store).await {
+    match SupabaseAuthClient::new(config.clone())
+        .session(&store)
+        .await
+    {
         Ok(session) => {
             state.select_planet_account(&session.user.id)?;
             Ok(ShopSession::Online { config, session })
@@ -423,10 +427,7 @@ fn local_shop_state(state: &AppState, reason: Option<&str>) -> Result<CosmeticSh
     Ok(shop)
 }
 
-fn save_remote_shop_state(
-    state: &AppState,
-    shop: &CosmeticShopState,
-) -> Result<(), String> {
+fn save_remote_shop_state(state: &AppState, shop: &CosmeticShopState) -> Result<(), String> {
     state
         .ledger
         .lock()
@@ -455,7 +456,9 @@ async fn sharing_pause_reason(
         .ok()
         .and_then(|ledger| ledger.sharing_paused().ok())
     {
-        Some(true) => return Some("동기화가 일시정지되어 구매와 장착 변경을 할 수 없습니다".into()),
+        Some(true) => {
+            return Some("동기화가 일시정지되어 구매와 장착 변경을 할 수 없습니다".into())
+        }
         Some(false) => {}
         None => return Some("동기화 상태를 확인할 수 없습니다".into()),
     }
@@ -592,11 +595,8 @@ pub async fn get_shop_state(state: State<'_, AppState>) -> Result<ShopState, Str
         }
         ShopSession::Online { config, session } => {
             let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
-            let canonical_session = online_shop_context(
-                &state.ledger,
-                &session.user.id,
-                &session.access_token,
-            )?;
+            let canonical_session =
+                online_shop_context(&state.ledger, &session.user.id, &session.access_token)?;
             get_shop_state_for_session(&state.ledger, canonical_session, Some(&client)).await
         }
     }
@@ -624,11 +624,8 @@ pub async fn quote_shop_action(
         }
         ShopSession::Online { config, session } => {
             let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
-            let canonical_session = online_shop_context(
-                &state.ledger,
-                &session.user.id,
-                &session.access_token,
-            )?;
+            let canonical_session =
+                online_shop_context(&state.ledger, &session.user.id, &session.access_token)?;
             if !matches!(target, QuoteTarget::RemoveNatural { .. }) {
                 if let Some(reason) =
                     sharing_pause_reason(&state, &client, &session.access_token).await
@@ -636,13 +633,8 @@ pub async fn quote_shop_action(
                     return Err(reason);
                 }
             }
-            quote_shop_action_for_session(
-                &state.ledger,
-                canonical_session,
-                Some(&client),
-                &target,
-            )
-            .await
+            quote_shop_action_for_session(&state.ledger, canonical_session, Some(&client), &target)
+                .await
         }
     }
 }
@@ -674,16 +666,15 @@ pub async fn apply_shop_action(
         }
         ShopSession::Online { config, session } => {
             let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
-            let canonical_session = online_shop_context(
-                &state.ledger,
-                &session.user.id,
-                &session.access_token,
-            )?;
+            let canonical_session =
+                online_shop_context(&state.ledger, &session.user.id, &session.access_token)?;
             if !matches!(
                 request,
                 ShopRequest::RemoveNatural { .. } | ShopRequest::ResetPlanet { .. }
             ) {
-                if let Some(reason) = sharing_pause_reason(&state, &client, &session.access_token).await {
+                if let Some(reason) =
+                    sharing_pause_reason(&state, &client, &session.access_token).await
+                {
                     if let CanonicalShopSession::Online {
                         account_id,
                         cycle_id,
@@ -800,7 +791,9 @@ pub async fn equip_cosmetic(
                 let shop = ledger
                     .cosmetic_shop_state()
                     .map_err(|_| "상점 상태를 읽을 수 없습니다")?;
-                if let Some(result) = stale_equip_result(&cycle_id, expected_version, &shop, &slot_id) {
+                if let Some(result) =
+                    stale_equip_result(&cycle_id, expected_version, &shop, &slot_id)
+                {
                     return Ok(result);
                 }
                 let version = ledger
@@ -923,9 +916,7 @@ mod tests {
 
     struct DeferredApplyRpc {
         started: mpsc::Sender<()>,
-        result: Mutex<
-            Option<tokio::sync::oneshot::Receiver<Result<ShopActionResult, SyncError>>>,
-        >,
+        result: Mutex<Option<tokio::sync::oneshot::Receiver<Result<ShopActionResult, SyncError>>>>,
     }
 
     impl ShopRpc for DeferredApplyRpc {
@@ -954,8 +945,8 @@ mod tests {
 
     fn test_ledger() -> (tempfile::TempDir, Mutex<Ledger>) {
         let directory = tempfile::tempdir().unwrap();
-        let ledger = Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC)
-            .unwrap();
+        let ledger =
+            Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
         (directory, Mutex::new(ledger))
     }
 
@@ -1031,7 +1022,11 @@ mod tests {
     #[test]
     fn online_getter_caches_the_authenticated_canonical_state() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let rpc = TestShopRpc::default();
         *rpc.get_result.lock().unwrap() = Some(Ok(canonical_state("account:alice", &cycle_id, 4)));
@@ -1045,20 +1040,24 @@ mod tests {
 
         assert_eq!(state.state_revision, 4);
         assert_eq!(*rpc.get_calls.lock().unwrap(), vec!["alice-token"]);
-        assert_eq!(ledger.lock().unwrap().shop_state().unwrap().state_revision, 4);
+        assert_eq!(
+            ledger.lock().unwrap().shop_state().unwrap().state_revision,
+            4
+        );
     }
 
     #[test]
     fn online_getter_accepts_server_cycle_without_resetting_local_cycle() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let rpc = TestShopRpc::default();
-        *rpc.get_result.lock().unwrap() = Some(Ok(canonical_state(
-            "account:alice",
-            "foreign-cycle",
-            4,
-        )));
+        *rpc.get_result.lock().unwrap() =
+            Some(Ok(canonical_state("account:alice", "foreign-cycle", 4)));
 
         let state = tauri::async_runtime::block_on(get_shop_state_for_session(
             &ledger,
@@ -1071,7 +1070,9 @@ mod tests {
         let ledger = ledger.lock().unwrap();
         let cached_json: String = ledger
             .connection
-            .query_row("SELECT state_json FROM shop_remote_state", [], |row| row.get(0))
+            .query_row("SELECT state_json FROM shop_remote_state", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let cached: ShopState = serde_json::from_str(&cached_json).unwrap();
         assert_eq!(cached.current_cycle_id, "foreign-cycle");
@@ -1081,7 +1082,11 @@ mod tests {
     #[test]
     fn online_quote_uses_the_authenticated_target_and_returns_matching_quote() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let target = QuoteTarget::Purchase {
             sku: "land_pond".into(),
         };
@@ -1112,7 +1117,11 @@ mod tests {
     #[test]
     fn online_quote_rejects_a_server_quote_for_a_different_target() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let target = QuoteTarget::Purchase {
             sku: "land_pond".into(),
         };
@@ -1140,7 +1149,11 @@ mod tests {
     #[test]
     fn signed_natural_removal_quote_uses_the_authenticated_shop_rpc() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let target = QuoteTarget::RemoveNatural {
             key: NaturalObjectKey {
@@ -1175,7 +1188,11 @@ mod tests {
     #[test]
     fn signed_natural_removal_quote_rejects_a_different_cycle_before_rpc() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let target = QuoteTarget::RemoveNatural {
             key: NaturalObjectKey {
                 cycle_id: "other-cycle".into(),
@@ -1199,7 +1216,11 @@ mod tests {
     #[test]
     fn signed_natural_removal_rejects_a_request_quote_for_another_key_before_rpc() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let mut request = natural_removal_request(&cycle_id);
         if let ShopRequest::RemoveNatural { quote, .. } = &mut request {
@@ -1227,7 +1248,11 @@ mod tests {
     #[test]
     fn signed_offline_getter_returns_only_the_confirmed_local_projection() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
 
         let state = tauri::async_runtime::block_on(get_shop_state_for_session(
             &ledger,
@@ -1248,7 +1273,11 @@ mod tests {
     #[test]
     fn online_reset_stays_unavailable_without_rpc_or_local_mutation() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let before = ledger.lock().unwrap().shop_state().unwrap();
         let request = ShopRequest::ResetPlanet {
@@ -1258,12 +1287,12 @@ mod tests {
         let rpc = TestShopRpc::default();
 
         let result = tauri::async_runtime::block_on(apply_shop_request_for_session(
-                &ledger,
-                online_session(&ledger, "alice-token"),
-                Some(&rpc),
-                &request,
-            ))
-            .unwrap();
+            &ledger,
+            online_session(&ledger, "alice-token"),
+            Some(&rpc),
+            &request,
+        ))
+        .unwrap();
         assert_eq!(result.status, ShopActionStatus::Unavailable);
         assert_eq!(result.request_id, super::request_id(&request));
 
@@ -1277,7 +1306,11 @@ mod tests {
     #[test]
     fn signed_natural_removal_applies_and_caches_only_the_confirmed_tombstone() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = natural_removal_request(&cycle_id);
         let key = match &request {
@@ -1321,16 +1354,29 @@ mod tests {
             .lock()
             .unwrap()
             .connection
-            .query_row("SELECT count(*) FROM planet_wallet_credit", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM planet_wallet_credit", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(client_wallet_rows, 0);
     }
 
     #[test]
     fn signed_natural_removal_rejects_mismatched_server_results_before_caching() {
-        for mismatch in ["request", "account", "cycle", "target", "quote", "tombstone"] {
+        for mismatch in [
+            "request",
+            "account",
+            "cycle",
+            "target",
+            "quote",
+            "tombstone",
+        ] {
             let (_directory, ledger) = test_ledger();
-            ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+            ledger
+                .lock()
+                .unwrap()
+                .ensure_planet_account("alice")
+                .unwrap();
             let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
             let request = natural_removal_request(&cycle_id);
             let (key, quote) = match &request {
@@ -1350,14 +1396,13 @@ mod tests {
                 "account" => result.state.account_id = "account:bob".into(),
                 "cycle" => result.state.current_cycle_id = "other-cycle".into(),
                 "target" => {
-                    result.confirmed_quote.as_mut().unwrap().target =
-                        QuoteTarget::RemoveNatural {
-                            key: NaturalObjectKey {
-                                cycle_id: cycle_id.clone(),
-                                stage: 1,
-                                ordinal: 0,
-                            },
-                        };
+                    result.confirmed_quote.as_mut().unwrap().target = QuoteTarget::RemoveNatural {
+                        key: NaturalObjectKey {
+                            cycle_id: cycle_id.clone(),
+                            stage: 1,
+                            ordinal: 0,
+                        },
+                    };
                 }
                 "quote" => result.confirmed_quote.as_mut().unwrap().price += 1,
                 "tombstone" => result.state.removed_natural_keys.clear(),
@@ -1373,12 +1418,17 @@ mod tests {
                 &request,
             ));
 
-            assert!(response.is_err(), "unexpectedly accepted {mismatch} mismatch");
+            assert!(
+                response.is_err(),
+                "unexpectedly accepted {mismatch} mismatch"
+            );
             let cached_count: i64 = ledger
                 .lock()
                 .unwrap()
                 .connection
-                .query_row("SELECT count(*) FROM shop_remote_state", [], |row| row.get(0))
+                .query_row("SELECT count(*) FROM shop_remote_state", [], |row| {
+                    row.get(0)
+                })
                 .unwrap();
             assert_eq!(cached_count, 0, "cached {mismatch} mismatch response");
         }
@@ -1388,7 +1438,11 @@ mod tests {
     fn signed_natural_removal_context_switch_during_rpc_does_not_change_cache() {
         for switch_account in [false, true] {
             let (_directory, ledger) = test_ledger();
-            ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+            ledger
+                .lock()
+                .unwrap()
+                .ensure_planet_account("alice")
+                .unwrap();
             let ledger = Arc::new(ledger);
             let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
             let original_state = canonical_state("account:alice", &cycle_id, 3);
@@ -1474,7 +1528,11 @@ mod tests {
     #[test]
     fn signed_natural_removal_transport_error_preserves_cache_and_retry_keeps_request_id() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = natural_removal_request(&cycle_id);
         let before = canonical_state("account:alice", &cycle_id, 4);
@@ -1528,7 +1586,9 @@ mod tests {
         let (_directory, ledger) = test_ledger();
         {
             let ledger = ledger.lock().unwrap();
-            ledger.ensure_planet_object(0, 0, "tree", 50, 50, 17).unwrap();
+            ledger
+                .ensure_planet_object(0, 0, "tree", 50, 50, 17)
+                .unwrap();
             ledger
                 .connection
                 .execute(
@@ -1576,7 +1636,11 @@ mod tests {
     #[test]
     fn online_action_rejects_a_response_with_a_different_request_id_before_caching() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = placement_request(&cycle_id);
         let rpc = TestShopRpc::default();
@@ -1599,7 +1663,9 @@ mod tests {
             .lock()
             .unwrap()
             .connection
-            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(cached_count, 0);
     }
@@ -1607,7 +1673,11 @@ mod tests {
     #[test]
     fn online_action_does_not_send_after_captured_account_context_changes() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = placement_request(&cycle_id);
         let rpc = TestShopRpc::default();
@@ -1676,7 +1746,11 @@ mod tests {
     #[test]
     fn online_shop_action_sends_the_same_request_and_caches_only_the_confirmed_state() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = placement_request(&cycle_id);
         let rpc = TestShopRpc::default();
@@ -1709,7 +1783,11 @@ mod tests {
     #[test]
     fn online_shop_action_rejects_foreign_state_before_caching() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = placement_request(&cycle_id);
         let rpc = TestShopRpc::default();
@@ -1732,7 +1810,9 @@ mod tests {
             .lock()
             .unwrap()
             .connection
-            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(cached_count, 0);
     }
@@ -1740,7 +1820,11 @@ mod tests {
     #[test]
     fn online_action_rejects_unexpected_cycle_state_for_non_mismatch_status() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = placement_request(&cycle_id);
         let rpc = TestShopRpc::default();
@@ -1763,7 +1847,9 @@ mod tests {
             .lock()
             .unwrap()
             .connection
-            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM shop_remote_state", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(cached_count, 0);
         assert_eq!(ledger.lock().unwrap().planet_cycle_id().unwrap(), cycle_id);
@@ -1772,7 +1858,11 @@ mod tests {
     #[test]
     fn cycle_mismatch_action_can_cache_server_cycle_without_local_reset() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let old_cycle = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = placement_request(&old_cycle);
         let rpc = TestShopRpc::default();
@@ -1798,7 +1888,9 @@ mod tests {
             .lock()
             .unwrap()
             .connection
-            .query_row("SELECT state_json FROM shop_remote_state", [], |row| row.get(0))
+            .query_row("SELECT state_json FROM shop_remote_state", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         let cached: ShopState = serde_json::from_str(&cached_json).unwrap();
         assert_eq!(cached.current_cycle_id, "new-server-cycle");
@@ -1807,7 +1899,11 @@ mod tests {
     #[test]
     fn uncertain_online_shop_action_is_not_retried_or_assigned_a_new_request_id() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let cycle_id = ledger.lock().unwrap().planet_cycle_id().unwrap();
         let request = placement_request(&cycle_id);
         let rpc = TestShopRpc::default();
@@ -1833,7 +1929,11 @@ mod tests {
     #[test]
     fn offline_signed_shop_action_is_unavailable_without_writing_guest_receipts() {
         let (_directory, ledger) = test_ledger();
-        ledger.lock().unwrap().ensure_planet_account("alice").unwrap();
+        ledger
+            .lock()
+            .unwrap()
+            .ensure_planet_account("alice")
+            .unwrap();
         let before = ledger.lock().unwrap().shop_state().unwrap();
         let request = ShopRequest::Purchase {
             request_id: "retry-this-request".into(),
@@ -1867,7 +1967,9 @@ mod tests {
         let ledger = ledger.lock().unwrap();
         let guest_receipts: i64 = ledger
             .connection
-            .query_row("SELECT count(*) FROM shop_action_request", [], |row| row.get(0))
+            .query_row("SELECT count(*) FROM shop_action_request", [], |row| {
+                row.get(0)
+            })
             .unwrap();
         assert_eq!(guest_receipts, 0);
     }

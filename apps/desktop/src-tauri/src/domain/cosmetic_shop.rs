@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
-use serde::{Deserialize, Serialize};
 use super::planet::{PlanetAvatar, PlanetState, PlanetWalletCredit};
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -468,28 +468,78 @@ pub struct GuestShopImportData {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum GuestShopImportIntegrityIssue {
-    UnknownLandscapeSku { sku: String },
-    UnknownAvatarSku { sku: String },
-    UnknownPurchaseSku { sku: String },
-    UnknownLegacyCosmeticSku { sku: String },
-    TooManyLandscapeInstances { sku: String, count: u64 },
-    PlacementMissingInstance { instance_id: String },
-    PlacementCycleMismatch { instance_id: String, cycle_id: String },
-    InvalidPlacementGeometry { instance_id: String },
-    InvalidTimestamp { field: String },
-    InvalidTimezone { field: String },
-    InvalidEffectTimeline { reason: String },
-    ActivityCycleUnknown { cycle_id: String },
-    TooManyNaturalObjects { count: usize },
-    PurchaseProofUnverifiable { purchase_id: String },
-    RemovalProofUnverifiable { request_id: String },
-    ResetProofUnverifiable { previous_cycle_id: String },
-    NaturalTombstoneUnverifiable { cycle_id: String, stage: u8, ordinal: u32 },
-    LandscapeOwnershipUnverifiable { instance_id: String },
-    AvatarOwnershipUnverifiable { purchase_id: String },
-    AvatarEquipmentNotOwned { slot: String, sku: String },
-    AvatarEquipmentSlotMismatch { slot: String, sku: String },
-    EffectReferencesUnknownInstance { instance_id: String },
+    UnknownLandscapeSku {
+        sku: String,
+    },
+    UnknownAvatarSku {
+        sku: String,
+    },
+    UnknownPurchaseSku {
+        sku: String,
+    },
+    UnknownLegacyCosmeticSku {
+        sku: String,
+    },
+    TooManyLandscapeInstances {
+        sku: String,
+        count: u64,
+    },
+    PlacementMissingInstance {
+        instance_id: String,
+    },
+    PlacementCycleMismatch {
+        instance_id: String,
+        cycle_id: String,
+    },
+    InvalidPlacementGeometry {
+        instance_id: String,
+    },
+    InvalidTimestamp {
+        field: String,
+    },
+    InvalidTimezone {
+        field: String,
+    },
+    InvalidEffectTimeline {
+        reason: String,
+    },
+    ActivityCycleUnknown {
+        cycle_id: String,
+    },
+    TooManyNaturalObjects {
+        count: usize,
+    },
+    PurchaseProofUnverifiable {
+        purchase_id: String,
+    },
+    RemovalProofUnverifiable {
+        request_id: String,
+    },
+    ResetProofUnverifiable {
+        previous_cycle_id: String,
+    },
+    NaturalTombstoneUnverifiable {
+        cycle_id: String,
+        stage: u8,
+        ordinal: u32,
+    },
+    LandscapeOwnershipUnverifiable {
+        instance_id: String,
+    },
+    AvatarOwnershipUnverifiable {
+        purchase_id: String,
+    },
+    AvatarEquipmentNotOwned {
+        slot: String,
+        sku: String,
+    },
+    AvatarEquipmentSlotMismatch {
+        slot: String,
+        sku: String,
+    },
+    EffectReferencesUnknownInstance {
+        instance_id: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -861,19 +911,23 @@ pub fn cosmetic_slots() -> Vec<CosmeticSlot> {
         ("surface", "지표"),
         ("forecourt", "앞마당"),
     ]
-        .into_iter()
-        .map(|(slot_id, display_name)| CosmeticSlot {
-            slot_id: slot_id.into(),
-            display_name: display_name.into(),
-        })
-        .collect()
+    .into_iter()
+    .map(|(slot_id, display_name)| CosmeticSlot {
+        slot_id: slot_id.into(),
+        display_name: display_name.into(),
+    })
+    .collect()
 }
 
 pub fn cosmetic_products() -> Vec<CosmeticProduct> {
     shop_products()
         .into_iter()
         .map(|product| {
-            let slot_id = match (product.category, product.placement_zone, product.avatar_slot) {
+            let slot_id = match (
+                product.category,
+                product.placement_zone,
+                product.avatar_slot,
+            ) {
                 (ShopCategory::Landscape, Some(PlacementZone::Sky), _) => "sky",
                 (ShopCategory::Landscape, _, _) => "surface",
                 (_, _, Some(AvatarSlot::Head)) => "head",
@@ -922,7 +976,8 @@ pub fn legacy_cosmetic_products() -> Vec<CosmeticProduct> {
         ("greenhouse", "forecourt", "온실", 5_000_000, true),
     ]
     .into_iter()
-        .map(|(sku, slot_id, display_name, price, purchasable)| CosmeticProduct {
+    .map(
+        |(sku, slot_id, display_name, price, purchasable)| CosmeticProduct {
             sku: sku.into(),
             slot_id: slot_id.into(),
             display_name: display_name.into(),
@@ -933,8 +988,9 @@ pub fn legacy_cosmetic_products() -> Vec<CosmeticProduct> {
             avatar_slot: None,
             effect_type: None,
             effect_value: 0,
-        })
-        .collect()
+        },
+    )
+    .collect()
 }
 
 pub fn shop_products() -> Vec<ShopProduct> {
@@ -948,38 +1004,86 @@ pub fn shop_products() -> Vec<ShopProduct> {
 
     let mut products = Vec::with_capacity(48);
     let landscape = [
-        ("token_earning", TokenEarning, [
-            ("land_pond", "연못", Ground), ("land_well", "우물", Ground),
-            ("land_greenhouse", "온실", Ground), ("land_reservoir", "저수지", Ground),
-        ]),
-        ("civilization_growth", CivilizationGrowth, [
-            ("land_crystal", "수정탑", Ground), ("land_school", "학교", Ground),
-            ("land_observatory", "천문대", Ground), ("land_laboratory", "연구소", Ground),
-        ]),
-        ("shop_discount", ShopDiscount, [
-            ("land_market", "시장", Ground), ("land_trading_post", "교역소", Ground),
-            ("land_freight", "화물 터미널", Ground), ("land_bazaar", "대형 상가", Ground),
-        ]),
-        ("reset_cooldown", ResetCooldown, [
-            ("land_rover", "탐사 로버", Ground), ("land_clocktower", "시계탑", Ground),
-            ("land_launchpad", "발사대", Ground), ("land_portal", "포털", Ground),
-        ]),
-        ("natural_removal_discount", NaturalRemovalDiscount, [
-            ("land_toolbox", "정리 도구함", Ground), ("land_excavator", "굴착기", Ground),
-            ("land_cutter", "암석 절단기", Ground), ("land_recycler", "재활용 로봇", Ground),
-        ]),
-        ("era_reward", EraReward, [
-            ("land_flag", "깃발", Ground), ("land_thin_ring", "얇은 고리", Sky),
-            ("land_double_ring", "이중 고리", Sky), ("land_moonlets", "작은 위성들", Sky),
-        ]),
-        ("streak_reward", StreakReward, [
-            ("land_lantern", "등불", Ground), ("land_stars", "별무리", Sky),
-            ("land_aurora", "오로라", Sky), ("land_meteors", "유성우", Sky),
-        ]),
-        ("civilization_growth_extra", CivilizationGrowth, [
-            ("land_garden", "꽃 정원", Ground), ("land_tree", "장식 나무", Ground),
-            ("land_bench", "벤치", Ground), ("land_fountain", "분수", Ground),
-        ]),
+        (
+            "token_earning",
+            TokenEarning,
+            [
+                ("land_pond", "연못", Ground),
+                ("land_well", "우물", Ground),
+                ("land_greenhouse", "온실", Ground),
+                ("land_reservoir", "저수지", Ground),
+            ],
+        ),
+        (
+            "civilization_growth",
+            CivilizationGrowth,
+            [
+                ("land_crystal", "수정탑", Ground),
+                ("land_school", "학교", Ground),
+                ("land_observatory", "천문대", Ground),
+                ("land_laboratory", "연구소", Ground),
+            ],
+        ),
+        (
+            "shop_discount",
+            ShopDiscount,
+            [
+                ("land_market", "시장", Ground),
+                ("land_trading_post", "교역소", Ground),
+                ("land_freight", "화물 터미널", Ground),
+                ("land_bazaar", "대형 상가", Ground),
+            ],
+        ),
+        (
+            "reset_cooldown",
+            ResetCooldown,
+            [
+                ("land_rover", "탐사 로버", Ground),
+                ("land_clocktower", "시계탑", Ground),
+                ("land_launchpad", "발사대", Ground),
+                ("land_portal", "포털", Ground),
+            ],
+        ),
+        (
+            "natural_removal_discount",
+            NaturalRemovalDiscount,
+            [
+                ("land_toolbox", "정리 도구함", Ground),
+                ("land_excavator", "굴착기", Ground),
+                ("land_cutter", "암석 절단기", Ground),
+                ("land_recycler", "재활용 로봇", Ground),
+            ],
+        ),
+        (
+            "era_reward",
+            EraReward,
+            [
+                ("land_flag", "깃발", Ground),
+                ("land_thin_ring", "얇은 고리", Sky),
+                ("land_double_ring", "이중 고리", Sky),
+                ("land_moonlets", "작은 위성들", Sky),
+            ],
+        ),
+        (
+            "streak_reward",
+            StreakReward,
+            [
+                ("land_lantern", "등불", Ground),
+                ("land_stars", "별무리", Sky),
+                ("land_aurora", "오로라", Sky),
+                ("land_meteors", "유성우", Sky),
+            ],
+        ),
+        (
+            "civilization_growth_extra",
+            CivilizationGrowth,
+            [
+                ("land_garden", "꽃 정원", Ground),
+                ("land_tree", "장식 나무", Ground),
+                ("land_bench", "벤치", Ground),
+                ("land_fountain", "분수", Ground),
+            ],
+        ),
     ];
     let prices = [5_000_000_u64, 15_000_000, 40_000_000, 100_000_000];
     let reward_values = [500_000_u64, 1_500_000, 4_000_000, 10_000_000];
@@ -1008,22 +1112,42 @@ pub fn shop_products() -> Vec<ShopProduct> {
     }
 
     let avatars = [
-        (Head, [
-            ("avatar_explorer_hat", "탐험가 모자"), ("avatar_crown", "왕관"),
-            ("avatar_space_helmet", "우주 헬멧"), ("avatar_halo", "홀로그램 관"),
-        ]),
-        (Outfit, [
-            ("avatar_workwear", "작업복"), ("avatar_labwear", "연구복"),
-            ("avatar_spacesuit", "우주복"), ("avatar_nebula_suit", "성운 의상"),
-        ]),
-        (Face, [
-            ("avatar_glasses", "안경"), ("avatar_sunglasses", "선글라스"),
-            ("avatar_goggles", "고글"), ("avatar_hud", "HUD 바이저"),
-        ]),
-        (Back, [
-            ("avatar_backpack", "배낭"), ("avatar_cape", "망토"),
-            ("avatar_jetpack", "제트팩"), ("avatar_wings", "에너지 날개"),
-        ]),
+        (
+            Head,
+            [
+                ("avatar_explorer_hat", "탐험가 모자"),
+                ("avatar_crown", "왕관"),
+                ("avatar_space_helmet", "우주 헬멧"),
+                ("avatar_halo", "홀로그램 관"),
+            ],
+        ),
+        (
+            Outfit,
+            [
+                ("avatar_workwear", "작업복"),
+                ("avatar_labwear", "연구복"),
+                ("avatar_spacesuit", "우주복"),
+                ("avatar_nebula_suit", "성운 의상"),
+            ],
+        ),
+        (
+            Face,
+            [
+                ("avatar_glasses", "안경"),
+                ("avatar_sunglasses", "선글라스"),
+                ("avatar_goggles", "고글"),
+                ("avatar_hud", "HUD 바이저"),
+            ],
+        ),
+        (
+            Back,
+            [
+                ("avatar_backpack", "배낭"),
+                ("avatar_cape", "망토"),
+                ("avatar_jetpack", "제트팩"),
+                ("avatar_wings", "에너지 날개"),
+            ],
+        ),
     ];
     let avatar_prices = [100_000_000_u64, 200_000_000, 350_000_000, 500_000_000];
     for (slot, items) in avatars {

@@ -214,7 +214,9 @@ mod tests {
                 agent,
                 kind: RecordKind::Response,
                 event_key: key.into(),
-                occurred_at_utc: DateTime::parse_from_rfc3339(at).unwrap().with_timezone(&Utc),
+                occurred_at_utc: DateTime::parse_from_rfc3339(at)
+                    .unwrap()
+                    .with_timezone(&Utc),
                 usage: usage(Some(tokens), UsageCoverage::Complete),
             })
             .unwrap();
@@ -239,15 +241,17 @@ mod tests {
     #[test]
     fn planet_wallet_balance_reflects_cosmetic_purchase() {
         let mut ledger = fixture_ledger();
-        ledger.connection.execute(
-            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
              VALUES ('wallet-cycle',500000,'2026-09-25T00:00:00Z')",
-            [],
-        ).unwrap();
-        ledger.purchase_guest_cosmetic(
-            "77777777-7777-4777-8777-777777777777",
-            "star_cluster_v2",
-        ).unwrap();
+                [],
+            )
+            .unwrap();
+        ledger
+            .purchase_guest_cosmetic("77777777-7777-4777-8777-777777777777", "star_cluster_v2")
+            .unwrap();
 
         let world = world_snapshot(
             &ledger,
@@ -255,7 +259,8 @@ mod tests {
                 usage(Some(0), UsageCoverage::Complete),
                 usage(Some(0), UsageCoverage::Complete),
             ),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(world.planet.wallet_balance, 0);
     }
 
@@ -307,7 +312,11 @@ mod tests {
                 "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
                  active_instance_ids_json,effects_json) VALUES (?1,?2,1,'2026-09-25T12:00:00Z',
                  '[\"placed-instance\"]',?3)",
-                rusqlite::params![account_id, cycle_id, serde_json::to_string(&effects).unwrap()],
+                rusqlite::params![
+                    account_id,
+                    cycle_id,
+                    serde_json::to_string(&effects).unwrap()
+                ],
             )
             .unwrap();
         insert_at(

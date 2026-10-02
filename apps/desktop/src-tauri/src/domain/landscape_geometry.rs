@@ -65,8 +65,22 @@ pub fn terrain_bounds(objects: &[PlanetObject]) -> LandscapeBounds {
     const Y_ORIGIN: f64 = 33.0;
     let mut ordered = objects.to_vec();
     ordered.sort_by(|left, right| {
-        (left.stage, left.ordinal, left.x, left.y, left.seed, &left.kind)
-            .cmp(&(right.stage, right.ordinal, right.x, right.y, right.seed, &right.kind))
+        (
+            left.stage,
+            left.ordinal,
+            left.x,
+            left.y,
+            left.seed,
+            &left.kind,
+        )
+            .cmp(&(
+                right.stage,
+                right.ordinal,
+                right.x,
+                right.y,
+                right.seed,
+                &right.kind,
+            ))
     });
     let mut occupied = [false; COLUMNS * ROWS];
     let (mut max_right, mut max_bottom) = (0.0_f64, 0.0_f64);
@@ -75,12 +89,16 @@ pub fn terrain_bounds(objects: &[PlanetObject]) -> LandscapeBounds {
         let y = f64::from(object.y.min(100));
         let source_column = ((x / 100.0) * USABLE_COLUMNS as f64).floor() as usize;
         let source_row = ((y / 100.0) * ROWS as f64).floor() as usize;
-        let balanced_column = (object.ordinal as usize * 13 + object.stage as usize * 7) % USABLE_COLUMNS;
+        let balanced_column =
+            (object.ordinal as usize * 13 + object.stage as usize * 7) % USABLE_COLUMNS;
         let balanced_row = (object.ordinal as usize * 3 + object.stage as usize * 2) % ROWS;
         let column_offset = ((source_column + object.seed as usize % 3) % 3) as isize - 1;
         let row_offset = ((source_row + (object.seed / 3) as usize % 3) % 3) as isize - 1;
         let modulo = |value: isize, divisor: isize| ((value % divisor) + divisor) % divisor;
-        let mut column = modulo(balanced_column as isize + column_offset, USABLE_COLUMNS as isize) as usize;
+        let mut column = modulo(
+            balanced_column as isize + column_offset,
+            USABLE_COLUMNS as isize,
+        ) as usize;
         let mut row = modulo(balanced_row as isize + row_offset, ROWS as isize) as usize;
         loop {
             let index = row * COLUMNS + column;
@@ -151,7 +169,9 @@ pub fn validate_placement(
     let in_horizontal_bounds = footprint.x >= terrain.x && footprint.x + footprint.width <= right;
     let in_zone = match zone {
         PlacementZone::Ground => {
-            in_horizontal_bounds && footprint.y >= terrain.y && footprint.y + footprint.height <= bottom
+            in_horizontal_bounds
+                && footprint.y >= terrain.y
+                && footprint.y + footprint.height <= bottom
         }
         PlacementZone::Sky => {
             in_horizontal_bounds
@@ -171,20 +191,73 @@ mod tests {
     use crate::domain::cosmetic_shop::{shop_products, ShopError};
 
     fn terrain() -> LandscapeBounds {
-        LandscapeBounds { x: 0.0, y: 0.0, width: 1420.0, height: 548.0 }
+        LandscapeBounds {
+            x: 0.0,
+            y: 0.0,
+            width: 1420.0,
+            height: 548.0,
+        }
     }
 
     #[test]
     fn placement_checks_the_whole_sprite_and_reserved_walkways() {
         let products = shop_products();
-        let ground = products.iter().find(|product| product.sku == "land_pond").unwrap();
-        let sky = products.iter().find(|product| product.sku == "land_stars").unwrap();
-        assert_eq!(validate_placement(ground, LandscapePoint { x: 160.0, y: 200.0 }, terrain()), Ok(()));
-        assert_eq!(validate_placement(ground, LandscapePoint { x: 1390.0, y: 500.0 }, terrain()), Err(ShopError::InvalidPlacement));
-        assert_eq!(validate_placement(ground, LandscapePoint { x: 160.0, y: 140.0 }, terrain()), Err(ShopError::InvalidPlacement));
-        assert_eq!(validate_placement(ground, LandscapePoint { x: 50.0, y: 200.0 }, terrain()), Err(ShopError::InvalidPlacement));
-        assert_eq!(validate_placement(sky, LandscapePoint { x: 100.0, y: -100.0 }, terrain()), Ok(()));
-        assert_eq!(validate_placement(sky, LandscapePoint { x: 100.0, y: -40.0 }, terrain()), Err(ShopError::InvalidPlacement));
-        assert_eq!(validate_placement(ground, LandscapePoint { x: f64::INFINITY, y: 200.0 }, terrain()), Err(ShopError::InvalidPlacement));
+        let ground = products
+            .iter()
+            .find(|product| product.sku == "land_pond")
+            .unwrap();
+        let sky = products
+            .iter()
+            .find(|product| product.sku == "land_stars")
+            .unwrap();
+        assert_eq!(
+            validate_placement(ground, LandscapePoint { x: 160.0, y: 200.0 }, terrain()),
+            Ok(())
+        );
+        assert_eq!(
+            validate_placement(
+                ground,
+                LandscapePoint {
+                    x: 1390.0,
+                    y: 500.0
+                },
+                terrain()
+            ),
+            Err(ShopError::InvalidPlacement)
+        );
+        assert_eq!(
+            validate_placement(ground, LandscapePoint { x: 160.0, y: 140.0 }, terrain()),
+            Err(ShopError::InvalidPlacement)
+        );
+        assert_eq!(
+            validate_placement(ground, LandscapePoint { x: 50.0, y: 200.0 }, terrain()),
+            Err(ShopError::InvalidPlacement)
+        );
+        assert_eq!(
+            validate_placement(
+                sky,
+                LandscapePoint {
+                    x: 100.0,
+                    y: -100.0
+                },
+                terrain()
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            validate_placement(sky, LandscapePoint { x: 100.0, y: -40.0 }, terrain()),
+            Err(ShopError::InvalidPlacement)
+        );
+        assert_eq!(
+            validate_placement(
+                ground,
+                LandscapePoint {
+                    x: f64::INFINITY,
+                    y: 200.0
+                },
+                terrain()
+            ),
+            Err(ShopError::InvalidPlacement)
+        );
     }
 }

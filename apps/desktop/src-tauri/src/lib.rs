@@ -272,8 +272,8 @@ fn popup_monitor(
 #[cfg(test)]
 mod window_mode_tests {
     use super::{
-        initial_mode, initial_mode_after_scan, with_guest_planet_reset_authority,
-        should_hide_on_blur, tray_target, WindowMode,
+        initial_mode, initial_mode_after_scan, should_hide_on_blur, tray_target,
+        with_guest_planet_reset_authority, WindowMode,
     };
     use crate::storage::ledger::Ledger;
     use std::path::Path;
@@ -286,21 +286,27 @@ mod window_mode_tests {
             .unwrap();
         let account_id = ledger.cosmetic_account_id().unwrap();
         let cycle_id = ledger.planet_cycle_id().unwrap();
-        ledger.connection.execute(
-            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
              VALUES (?1,42,'2026-10-01T00:00:00Z')",
-            [&cycle_id],
-        ).unwrap();
+                [&cycle_id],
+            )
+            .unwrap();
         ledger.connection.execute(
             "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
              VALUES (?1,'saved-tree','land_tree',0,'saved-seed',1,'2026-10-01T00:00:00Z')",
             [&account_id],
         ).unwrap();
-        ledger.connection.execute(
-            "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
              VALUES (?1,'saved-tree',?2,12.0,18.0,4)",
-            rusqlite::params![account_id, cycle_id],
-        ).unwrap();
+                rusqlite::params![account_id, cycle_id],
+            )
+            .unwrap();
 
         let before_cycle = ledger.planet_cycle_id().unwrap();
         let before_credits = ledger.planet_wallet_credits().unwrap();
@@ -320,12 +326,18 @@ mod window_mode_tests {
         assert_eq!(ledger.planet_cycle_id().unwrap(), before_cycle);
         assert_eq!(ledger.planet_wallet_credits().unwrap(), before_credits);
         assert_eq!(ledger.shop_state().unwrap(), before_shop);
-        assert_eq!(ledger.reset_available_at().unwrap(), before_reset_available_at);
-        let reset_requests: i64 = ledger.connection.query_row(
-            "SELECT count(*) FROM shop_action_request WHERE request_id LIKE 'legacy-reset:%'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        assert_eq!(
+            ledger.reset_available_at().unwrap(),
+            before_reset_available_at
+        );
+        let reset_requests: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM shop_action_request WHERE request_id LIKE 'legacy-reset:%'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(reset_requests, 0);
     }
 
@@ -459,8 +471,10 @@ mod account_switch_tests {
     fn test_state(ledger: Ledger) -> AppState {
         AppState {
             config: Mutex::new(SourceConfig {
-                codex_root: Path::new("/private/tmp/token-planet-account-switch-codex").to_path_buf(),
-                claude_root: Path::new("/private/tmp/token-planet-account-switch-claude").to_path_buf(),
+                codex_root: Path::new("/private/tmp/token-planet-account-switch-codex")
+                    .to_path_buf(),
+                claude_root: Path::new("/private/tmp/token-planet-account-switch-claude")
+                    .to_path_buf(),
                 timezone: chrono_tz::UTC,
             }),
             ledger: Mutex::new(ledger),
@@ -520,39 +534,53 @@ mod account_switch_tests {
 
         let state = test_state(ledger);
         state.scan().unwrap();
-        let original_snapshot = serde_json::to_value(
-            state.latest.lock().unwrap().as_ref().unwrap(),
-        )
-        .unwrap();
+        let original_snapshot =
+            serde_json::to_value(state.latest.lock().unwrap().as_ref().unwrap()).unwrap();
 
         let result = state.switch_planet_account(USER_ID);
 
-        assert!(result.is_err(), "first-login account transition must hold for guest shop state");
+        assert!(
+            result.is_err(),
+            "first-login account transition must hold for guest shop state"
+        );
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
         assert_eq!(ledger.planet_cycle_id().unwrap(), original_cycle);
         assert_eq!(ledger.planet_usage_totals().unwrap(), original_usage);
         assert_eq!(ledger.planet_profile().unwrap(), original_profile);
-        assert_eq!(ledger.connection.query_row::<String, _, _>(
-            "SELECT account_id FROM planet_usage_owner WHERE event_key='guest-owned-usage'",
-            [],
-            |row| row.get(0),
-        ).unwrap(), "local");
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<String, _, _>(
+                    "SELECT account_id FROM planet_usage_owner WHERE event_key='guest-owned-usage'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            "local"
+        );
         assert_eq!(ledger.connection.query_row::<i64, _, _>(
             "SELECT count(*) FROM shop_landscape_instance WHERE account_id='local' AND instance_id='guest-tree'",
             [],
             |row| row.get(0),
         ).unwrap(), 1);
-        assert_eq!(ledger.connection.query_row::<i64, _, _>(
-            "SELECT count(*) FROM planet_account_state WHERE account_id=?1",
-            [format!("account:{USER_ID}")],
-            |row| row.get(0),
-        ).unwrap(), 0);
-        let current_snapshot = serde_json::to_value(
-            state.latest.lock().unwrap().as_ref().unwrap(),
-        )
-        .unwrap();
-        assert_eq!(current_snapshot, original_snapshot, "a denied transition must not invalidate the local scan snapshot");
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM planet_account_state WHERE account_id=?1",
+                    [format!("account:{USER_ID}")],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            0
+        );
+        let current_snapshot =
+            serde_json::to_value(state.latest.lock().unwrap().as_ref().unwrap()).unwrap();
+        assert_eq!(
+            current_snapshot, original_snapshot,
+            "a denied transition must not invalidate the local scan snapshot"
+        );
     }
 
     #[test]
@@ -567,7 +595,10 @@ mod account_switch_tests {
         let snapshot = state.scan().unwrap();
 
         assert_eq!(snapshot.planet.current_cycle_id, original_cycle);
-        assert_eq!(state.ledger.lock().unwrap().cosmetic_account_id().unwrap(), "local");
+        assert_eq!(
+            state.ledger.lock().unwrap().cosmetic_account_id().unwrap(),
+            "local"
+        );
         assert!(state.latest.lock().unwrap().is_some());
         assert_eq!(
             allow_local_scan_on_guest_shop_hold(Err(PlanetAccountSwitchError::Other(
@@ -590,11 +621,17 @@ mod account_switch_tests {
         let ledger = state.ledger.lock().unwrap();
         let account_id = format!("account:{USER_ID}");
         assert_eq!(ledger.cosmetic_account_id().unwrap(), account_id);
-        assert_eq!(ledger.connection.query_row::<String, _, _>(
-            "SELECT account_id FROM planet_usage_owner WHERE event_key='raw-only-usage'",
-            [],
-            |row| row.get(0),
-        ).unwrap(), account_id);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<String, _, _>(
+                    "SELECT account_id FROM planet_usage_owner WHERE event_key='raw-only-usage'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            account_id
+        );
     }
 
     #[test]
@@ -605,7 +642,10 @@ mod account_switch_tests {
         let state = test_state(ledger);
 
         assert!(!state.switch_planet_account(USER_ID).unwrap());
-        assert_eq!(state.ledger.lock().unwrap().cosmetic_account_id().unwrap(), format!("account:{USER_ID}"));
+        assert_eq!(
+            state.ledger.lock().unwrap().cosmetic_account_id().unwrap(),
+            format!("account:{USER_ID}")
+        );
     }
 }
 
@@ -620,17 +660,14 @@ impl AppState {
         Ok(())
     }
 
-    fn switch_planet_account(
-        &self,
-        user_id: &str,
-    ) -> Result<bool, PlanetAccountSwitchError> {
+    fn switch_planet_account(&self, user_id: &str) -> Result<bool, PlanetAccountSwitchError> {
         let mut ledger = self
             .ledger
             .lock()
             .map_err(|_| PlanetAccountSwitchError::Other("local ledger unavailable".into()))?;
-        let current_account = ledger
-            .cosmetic_account_id()
-            .map_err(|_| PlanetAccountSwitchError::Other("행성 계정을 확인할 수 없습니다".into()))?;
+        let current_account = ledger.cosmetic_account_id().map_err(|_| {
+            PlanetAccountSwitchError::Other("행성 계정을 확인할 수 없습니다".into())
+        })?;
         let target_account = format!("account:{user_id}");
         if current_account != target_account
             && sync::worker::guest_shop_import_pending(&ledger)
@@ -638,9 +675,9 @@ impl AppState {
         {
             return Err(PlanetAccountSwitchError::GuestShopImportPending);
         }
-        let changed = ledger
-            .ensure_planet_account(user_id)
-            .map_err(|_| PlanetAccountSwitchError::Other("행성 계정을 변경할 수 없습니다".into()))?;
+        let changed = ledger.ensure_planet_account(user_id).map_err(|_| {
+            PlanetAccountSwitchError::Other("행성 계정을 변경할 수 없습니다".into())
+        })?;
         drop(ledger);
         if changed {
             // Invalidate the previous account's frontend snapshot before any
@@ -739,9 +776,10 @@ fn restore_saved_planet_account_inner(state: &AppState) -> Result<(), PlanetAcco
     };
     let store = SessionStore::new(&config)
         .map_err(|_| PlanetAccountSwitchError::Other("로그인 정보 오류".into()))?;
-    if let Some(saved) = store.load().map_err(|_| {
-        PlanetAccountSwitchError::Other("로그인 정보 오류".into())
-    })? {
+    if let Some(saved) = store
+        .load()
+        .map_err(|_| PlanetAccountSwitchError::Other("로그인 정보 오류".into()))?
+    {
         state.switch_planet_account(&saved.user.id)?;
     }
     Ok(())
@@ -826,9 +864,13 @@ fn require_signed_reset_context(
     expected_cycle_id: &str,
 ) -> Result<(), String> {
     let ledger = state.ledger.lock().map_err(|_| "행성 상태 오류")?;
-    if ledger.cosmetic_account_id().map_err(|_| "행성 계정을 확인할 수 없습니다")?
+    if ledger
+        .cosmetic_account_id()
+        .map_err(|_| "행성 계정을 확인할 수 없습니다")?
         != format!("account:{user_id}")
-        || ledger.planet_cycle_id().map_err(|_| "행성 주기를 확인할 수 없습니다")?
+        || ledger
+            .planet_cycle_id()
+            .map_err(|_| "행성 주기를 확인할 수 없습니다")?
             != expected_cycle_id
     {
         return Err("계정 또는 행성 주기가 변경되어 초기화를 중단했습니다".into());

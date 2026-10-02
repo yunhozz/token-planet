@@ -38,13 +38,27 @@ pub fn capped_effects(
         }
         let value = product.effect_value;
         match product.effect_type.ok_or(ShopError::InvalidProduct)? {
-            ShopEffectType::TokenEarning => add_capped_bps(&mut effects.token_earning_bps, value, 3_000),
-            ShopEffectType::CivilizationGrowth => add_capped_bps(&mut effects.civilization_growth_bps, value, 2_000),
-            ShopEffectType::ShopDiscount => add_capped_bps(&mut effects.shop_discount_bps, value, 1_500),
-            ShopEffectType::ResetCooldown => add_capped_bps(&mut effects.reset_cooldown_bps, value, 2_500),
-            ShopEffectType::NaturalRemovalDiscount => add_capped_bps(&mut effects.natural_removal_discount_bps, value, 3_000),
-            ShopEffectType::EraReward => add_capped(&mut effects.era_reward_tokens, value, 10_000_000),
-            ShopEffectType::StreakReward => add_capped(&mut effects.streak_reward_tokens, value, 500_000),
+            ShopEffectType::TokenEarning => {
+                add_capped_bps(&mut effects.token_earning_bps, value, 3_000)
+            }
+            ShopEffectType::CivilizationGrowth => {
+                add_capped_bps(&mut effects.civilization_growth_bps, value, 2_000)
+            }
+            ShopEffectType::ShopDiscount => {
+                add_capped_bps(&mut effects.shop_discount_bps, value, 1_500)
+            }
+            ShopEffectType::ResetCooldown => {
+                add_capped_bps(&mut effects.reset_cooldown_bps, value, 2_500)
+            }
+            ShopEffectType::NaturalRemovalDiscount => {
+                add_capped_bps(&mut effects.natural_removal_discount_bps, value, 3_000)
+            }
+            ShopEffectType::EraReward => {
+                add_capped(&mut effects.era_reward_tokens, value, 10_000_000)
+            }
+            ShopEffectType::StreakReward => {
+                add_capped(&mut effects.streak_reward_tokens, value, 500_000)
+            }
         }
     }
     Ok(effects)
@@ -93,7 +107,8 @@ pub fn weighted_growth(
     }
 
     let base = (1.0 + total_tokens as f64 / K_TOKENS).log2();
-    let weighted_share = weighted_bps_tokens as f64 / (total_tokens as f64 * BPS_DENOMINATOR as f64);
+    let weighted_share =
+        weighted_bps_tokens as f64 / (total_tokens as f64 * BPS_DENOMINATOR as f64);
     Ok(base * (1.0 + weighted_share))
 }
 
@@ -145,7 +160,10 @@ mod tests {
         let mut placed = Vec::new();
         for index in 0..5 {
             placed.push(instance(&format!("lab-{index}"), "land_laboratory"));
-            placed.push(instance(&format!("observatory-{index}"), "land_observatory"));
+            placed.push(instance(
+                &format!("observatory-{index}"),
+                "land_observatory",
+            ));
             placed.push(instance(&format!("bazaar-{index}"), "land_bazaar"));
             placed.push(instance(&format!("reservoir-{index}"), "land_reservoir"));
             placed.push(instance(&format!("moonlet-{index}"), "land_moonlets"));
@@ -177,24 +195,36 @@ mod tests {
         assert_eq!(discounted_price(1_000, 3_000).unwrap(), 700);
         assert_eq!(discounted_price(1_000, 9_999).unwrap(), 1);
         assert_eq!(discounted_price(0, 0).unwrap(), 1);
-        assert_eq!(discounted_price(1_000, 10_001), Err(ShopError::InvalidDiscount));
-        assert_eq!(discounted_price(u64::MAX, 1_500), Err(ShopError::ArithmeticOverflow));
+        assert_eq!(
+            discounted_price(1_000, 10_001),
+            Err(ShopError::InvalidDiscount)
+        );
+        assert_eq!(
+            discounted_price(u64::MAX, 1_500),
+            Err(ShopError::ArithmeticOverflow)
+        );
     }
 
     #[test]
     fn growth_is_occurrence_weighted_order_independent_and_zero_safe() {
         let segments = [contribution(50_000, 2_000, 0), contribution(50_000, 0, 0)];
         let growth = weighted_growth(100_000, &segments).unwrap();
-        let reverse = weighted_growth(100_000, &segments.into_iter().rev().collect::<Vec<_>>()).unwrap();
+        let reverse =
+            weighted_growth(100_000, &segments.into_iter().rev().collect::<Vec<_>>()).unwrap();
         assert!((growth - 1.1).abs() < 1e-12);
         assert!((reverse - growth).abs() < 1e-12);
         assert_eq!(weighted_growth(0, &[]).unwrap(), 0.0);
-        assert_eq!(weighted_growth(10, &[contribution(11, 100, 0)]), Err(ShopError::InvalidContribution));
+        assert_eq!(
+            weighted_growth(10, &[contribution(11, 100, 0)]),
+            Err(ShopError::InvalidContribution)
+        );
     }
 
     #[test]
     fn cycle_bonus_floors_only_after_all_fractional_segments_are_added() {
-        let segments = (0..100).map(|_| contribution(1, 0, 100)).collect::<Vec<_>>();
+        let segments = (0..100)
+            .map(|_| contribution(1, 0, 100))
+            .collect::<Vec<_>>();
         assert_eq!(cycle_token_bonus(&segments).unwrap(), 1);
     }
 }

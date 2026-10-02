@@ -16,8 +16,7 @@ use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
 
 use super::cosmetic_shop::store_confirmed_shop_state_in_transaction;
 use super::shop_effects::{
-    apply_confirmed_shop_effect_timeline_in_transaction,
-    validate_reset_timeline_current_bound,
+    apply_confirmed_shop_effect_timeline_in_transaction, validate_reset_timeline_current_bound,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -597,7 +596,10 @@ impl Ledger {
     }
 
     pub fn reset_planet(&mut self, now: DateTime<Utc>) -> Result<u64, ScanError> {
-        if self.reset_available_at()?.is_some_and(|available| now < available) {
+        if self
+            .reset_available_at()?
+            .is_some_and(|available| now < available)
+        {
             return Err(ScanError::ResetCooldown);
         }
         let previous_cycle_id = self.planet_cycle_id()?;
@@ -607,10 +609,16 @@ impl Ledger {
             .filter(|(cycle_id, _, _, _)| cycle_id == &previous_cycle_id)
             .map(|(_, remote_tokens, _, _)| local_current_tokens.max(remote_tokens))
             .unwrap_or(local_current_tokens);
-        let reset = self.reset_guest_planet(&format!("legacy-reset:{previous_cycle_id}"),&previous_cycle_id,now)?;
+        let reset = self.reset_guest_planet(
+            &format!("legacy-reset:{previous_cycle_id}"),
+            &previous_cycle_id,
+            now,
+        )?;
         match reset.status {
             crate::domain::cosmetic_shop::ShopActionStatus::Reset => Ok(current_tokens),
-            crate::domain::cosmetic_shop::ShopActionStatus::CycleMismatch => Err(ScanError::ResetCooldown),
+            crate::domain::cosmetic_shop::ShopActionStatus::CycleMismatch => {
+                Err(ScanError::ResetCooldown)
+            }
             _ => Err(ScanError::InvalidShopState),
         }
     }
@@ -1000,8 +1008,8 @@ impl Ledger {
         let expected_account_id = expected_account_id
             .strip_prefix("account:")
             .unwrap_or(expected_account_id);
-        let expected_account_uuid = uuid::Uuid::parse_str(expected_account_id)
-            .map_err(|_| ScanError::InvalidShopState)?;
+        let expected_account_uuid =
+            uuid::Uuid::parse_str(expected_account_id).map_err(|_| ScanError::InvalidShopState)?;
         let actual_account_uuid = account_id
             .strip_prefix("account:")
             .and_then(|id| uuid::Uuid::parse_str(id).ok());
@@ -1172,8 +1180,8 @@ fn pending_signed_reset_intent_in(
         else {
             return Err(ScanError::InvalidShopState);
         };
-        let parsed_request_id = uuid::Uuid::parse_str(&payload_request_id)
-            .map_err(|_| ScanError::InvalidShopState)?;
+        let parsed_request_id =
+            uuid::Uuid::parse_str(&payload_request_id).map_err(|_| ScanError::InvalidShopState)?;
         if parsed_request_id.to_string() != request_id || cycle_id.trim().is_empty() {
             return Err(ScanError::InvalidShopState);
         }
@@ -1286,7 +1294,10 @@ fn apply_confirmed_reset_planet_state_in_transaction(
 
     for (key, value) in [
         ("planet_current_cycle_id", state.current_cycle_id.as_str()),
-        ("planet_cycle_started_at_utc", state.cycle_started_at_utc.as_str()),
+        (
+            "planet_cycle_started_at_utc",
+            state.cycle_started_at_utc.as_str(),
+        ),
         ("planet_last_reset_at_utc", last_reset.to_rfc3339().as_str()),
         (
             "planet_reset_available_at_utc",
@@ -1298,8 +1309,14 @@ fn apply_confirmed_reset_planet_state_in_transaction(
             "planet_remote_current_tokens",
             &state.current_planet_tokens.to_string(),
         ),
-        ("planet_remote_lifetime_tokens", &state.lifetime_tokens.to_string()),
-        ("planet_remote_growth_credit", &state.growth_credit.to_string()),
+        (
+            "planet_remote_lifetime_tokens",
+            &state.lifetime_tokens.to_string(),
+        ),
+        (
+            "planet_remote_growth_credit",
+            &state.growth_credit.to_string(),
+        ),
         ("planet_remote_incomplete", &state.incomplete.to_string()),
     ] {
         set_setting_value(connection, key, value)?;
@@ -1327,7 +1344,11 @@ fn apply_confirmed_reset_planet_state_in_transaction(
         connection.execute(
             "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
              VALUES (?1,?2,?3)",
-            params![credit.previous_cycle_id, as_i64(credit.amount)?, credit.created_at_utc],
+            params![
+                credit.previous_cycle_id,
+                as_i64(credit.amount)?,
+                credit.created_at_utc
+            ],
         )?;
     }
 
@@ -1584,55 +1605,70 @@ mod tests {
     fn remote_reset_deadline_tracks_only_the_accepted_current_cycle() {
         let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
         ledger.ensure_planet_account("reset-deadline-user").unwrap();
-        ledger.connection.execute_batch(
-            "INSERT INTO setting(key,value) VALUES
+        ledger
+            .connection
+            .execute_batch(
+                "INSERT INTO setting(key,value) VALUES
                ('planet_cycle_started_at_utc','2026-10-02T00:00:00Z'),
                ('planet_last_reset_at_utc','2026-10-02T00:00:00Z'),
                ('planet_current_cycle_id','cycle-current'),
                ('planet_remote_cycle_id','cycle-current'),
                ('planet_reset_available_at_utc','2026-10-03T00:00:00Z')
              ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
-        ).unwrap();
+            )
+            .unwrap();
 
-        ledger.merge_remote_planet_state(&remote_planet_state(
-            "cycle-current",
-            "2026-10-02T00:00:00Z",
-            "2026-10-02T00:00:00Z",
-            Some("2026-10-02T18:00:00Z"),
-        )).unwrap();
+        ledger
+            .merge_remote_planet_state(&remote_planet_state(
+                "cycle-current",
+                "2026-10-02T00:00:00Z",
+                "2026-10-02T00:00:00Z",
+                Some("2026-10-02T18:00:00Z"),
+            ))
+            .unwrap();
         assert_eq!(
             reset_deadline_snapshot(&ledger),
-            Some(chrono::DateTime::parse_from_rfc3339("2026-10-02T18:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc)),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-02T18:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            ),
             "the canonical server deadline should replace the old 24-hour fallback",
         );
 
-        ledger.merge_remote_planet_state(&remote_planet_state(
-            "cycle-current",
-            "2026-10-02T00:00:00Z",
-            "2026-10-02T00:00:00Z",
-            None,
-        )).unwrap();
+        ledger
+            .merge_remote_planet_state(&remote_planet_state(
+                "cycle-current",
+                "2026-10-02T00:00:00Z",
+                "2026-10-02T00:00:00Z",
+                None,
+            ))
+            .unwrap();
         assert_eq!(
             reset_deadline_snapshot(&ledger),
-            Some(chrono::DateTime::parse_from_rfc3339("2026-10-03T00:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc)),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-03T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            ),
             "a canonical None removes the override and returns to the legacy fallback",
         );
 
-        ledger.merge_remote_planet_state(&remote_planet_state(
-            "cycle-next",
-            "2026-10-03T00:00:00Z",
-            "2026-10-03T00:00:00Z",
-            Some("2026-10-03T18:00:00Z"),
-        )).unwrap();
+        ledger
+            .merge_remote_planet_state(&remote_planet_state(
+                "cycle-next",
+                "2026-10-03T00:00:00Z",
+                "2026-10-03T00:00:00Z",
+                Some("2026-10-03T18:00:00Z"),
+            ))
+            .unwrap();
         assert_eq!(
             reset_deadline_snapshot(&ledger),
-            Some(chrono::DateTime::parse_from_rfc3339("2026-10-03T18:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc)),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-03T18:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            ),
             "an accepted new cycle uses its own canonical deadline",
         );
 
@@ -1640,17 +1676,21 @@ mod tests {
             "UPDATE setting SET value='2026-10-04T00:00:00Z' WHERE key='planet_reset_available_at_utc'",
             [],
         ).unwrap();
-        ledger.merge_remote_planet_state(&remote_planet_state(
-            "cycle-stale",
-            "2026-10-02T00:00:00Z",
-            "2026-10-02T00:00:00Z",
-            Some("2026-10-02T18:00:00Z"),
-        )).unwrap();
+        ledger
+            .merge_remote_planet_state(&remote_planet_state(
+                "cycle-stale",
+                "2026-10-02T00:00:00Z",
+                "2026-10-02T00:00:00Z",
+                Some("2026-10-02T18:00:00Z"),
+            ))
+            .unwrap();
         assert_eq!(
             reset_deadline_snapshot(&ledger),
-            Some(chrono::DateTime::parse_from_rfc3339("2026-10-04T00:00:00Z")
-                .unwrap()
-                .with_timezone(&chrono::Utc)),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-04T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            ),
             "a rejected stale cycle must not overwrite the active deadline",
         );
     }
@@ -1679,12 +1719,18 @@ mod tests {
             .expect("uncertain reset intent remains available after restart");
         assert_eq!(intent.request_id, request_id);
         assert_eq!(intent.expected_old_cycle_id, original_cycle);
-        assert!(reopened
-            .prepare_signed_reset_intent(uuid::Uuid::new_v4(), &original_cycle)
-            .is_err(), "a pending reset cannot be replaced by a new request id");
-        assert!(reopened
-            .prepare_signed_reset_intent(request_id, "different-old-cycle")
-            .is_err(), "the persisted request id cannot be rebound to another cycle");
+        assert!(
+            reopened
+                .prepare_signed_reset_intent(uuid::Uuid::new_v4(), &original_cycle)
+                .is_err(),
+            "a pending reset cannot be replaced by a new request id"
+        );
+        assert!(
+            reopened
+                .prepare_signed_reset_intent(request_id, "different-old-cycle")
+                .is_err(),
+            "the persisted request id cannot be rebound to another cycle"
+        );
     }
 
     #[test]
@@ -1714,11 +1760,14 @@ mod tests {
         assert_eq!(ledger.planet_cycle_id().unwrap(), alice_cycle_before_reset);
         assert!(ledger.planet_wallet_credits().unwrap().is_empty());
         // Model a server-confirmed wallet snapshot while testing account persistence.
-        ledger.connection.execute(
-            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
              VALUES (?1,42,'2026-10-01T00:00:00Z')",
-            [&alice_cycle_before_reset],
-        ).unwrap();
+                [&alice_cycle_before_reset],
+            )
+            .unwrap();
         ledger
             .ensure_planet_object(0, 0, "tree", 20, 30, 12)
             .unwrap();

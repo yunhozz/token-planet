@@ -1,14 +1,14 @@
 use std::{future::Future, pin::Pin, time::Duration};
 
 use crate::domain::cosmetic_shop::{ResetShopResult, ShopActionStatus, ShopEffectTimeline};
-use crate::domain::planet::{PlanetDeviceContributionSnapshot, PlanetState};
 #[cfg(test)]
 use crate::domain::planet::{PlanetDeviceContribution, PlanetEffectContributionSegment};
+use crate::domain::planet::{PlanetDeviceContributionSnapshot, PlanetState};
 use crate::domain::usage::UsageCoverage;
 use crate::growth::WorldSnapshot;
+use crate::storage::ledger::{Ledger, SignedResetIntent};
 use crate::sync::auth::{AuthConfig, SessionStore, SupabaseAuthClient};
 use crate::sync::client::{SupabaseSyncClient, SyncError};
-use crate::storage::ledger::{Ledger, SignedResetIntent};
 use crate::AppState;
 
 #[derive(Default)]
@@ -202,7 +202,9 @@ impl PrivateEffectSyncOutcome {
     pub(crate) fn require_uploaded(self) -> Result<bool, String> {
         match self {
             Self::Uploaded { can_reset } => Ok(can_reset),
-            Self::HeldForSharingPause => Err("공유 일시 중지로 행성 기여 업로드가 보류되었습니다".into()),
+            Self::HeldForSharingPause => {
+                Err("공유 일시 중지로 행성 기여 업로드가 보류되었습니다".into())
+            }
         }
     }
 }
@@ -212,9 +214,7 @@ fn latest_usage_incomplete(state: &AppState) -> Result<bool, String> {
         .latest
         .lock()
         .map_err(|_| "사용량 상태를 읽을 수 없습니다")?;
-    let snapshot = latest
-        .as_ref()
-        .ok_or("사용량 상태를 준비할 수 없습니다")?;
+    let snapshot = latest.as_ref().ok_or("사용량 상태를 준비할 수 없습니다")?;
     Ok([
         snapshot.usage.codex.coverage,
         snapshot.usage.claude_code.coverage,
@@ -413,11 +413,7 @@ async fn finish_signed_reset_intent<C: SignedResetSyncApi>(
 ) -> Result<SignedResetCompletion, String> {
     {
         let ledger = state.ledger.lock().map_err(|_| "행성 상태 오류")?;
-        require_planet_sync_context(
-            &ledger,
-            &intent.account_id,
-            &intent.expected_old_cycle_id,
-        )?;
+        require_planet_sync_context(&ledger, &intent.account_id, &intent.expected_old_cycle_id)?;
         if ledger
             .pending_signed_reset_intent(&intent.account_id)
             .map_err(|_| "대기 중인 행성 초기화를 확인할 수 없습니다")?
@@ -442,16 +438,14 @@ async fn finish_signed_reset_intent<C: SignedResetSyncApi>(
                 "행성 초기화 HTTP {status_code} 응답을 확인할 수 없습니다. 같은 요청으로 재시도합니다"
             ));
         }
-        Err(_) => return Err("행성 초기화 응답을 확인할 수 없습니다. 같은 요청으로 재시도합니다".into()),
+        Err(_) => {
+            return Err("행성 초기화 응답을 확인할 수 없습니다. 같은 요청으로 재시도합니다".into())
+        }
     };
 
     {
         let ledger = state.ledger.lock().map_err(|_| "행성 상태 오류")?;
-        require_planet_sync_context(
-            &ledger,
-            &intent.account_id,
-            &intent.expected_old_cycle_id,
-        )?;
+        require_planet_sync_context(&ledger, &intent.account_id, &intent.expected_old_cycle_id)?;
     }
     if result.action.request_id != intent.request_id.to_string()
         || result.action.state.current_cycle_id != result.planet_state.current_cycle_id
@@ -460,16 +454,16 @@ async fn finish_signed_reset_intent<C: SignedResetSyncApi>(
     }
     if result.action.status != ShopActionStatus::Reset {
         let status_message = match result.action.status {
-            ShopActionStatus::CycleMismatch => "서버의 행성 주기가 변경되어 초기화 요청을 종료했습니다",
-            ShopActionStatus::RequestConflict => "초기화 요청 ID가 다른 요청과 충돌하여 종료했습니다",
+            ShopActionStatus::CycleMismatch => {
+                "서버의 행성 주기가 변경되어 초기화 요청을 종료했습니다"
+            }
+            ShopActionStatus::RequestConflict => {
+                "초기화 요청 ID가 다른 요청과 충돌하여 종료했습니다"
+            }
             _ => "서버가 행성 초기화를 확정하지 않았습니다",
         };
         let mut ledger = state.ledger.lock().map_err(|_| "행성 상태 오류")?;
-        require_planet_sync_context(
-            &ledger,
-            &intent.account_id,
-            &intent.expected_old_cycle_id,
-        )?;
+        require_planet_sync_context(&ledger, &intent.account_id, &intent.expected_old_cycle_id)?;
         ledger
             .record_rejected_signed_reset_result(&result, intent)
             .map_err(|_| "서버의 초기화 거절을 안전하게 기록할 수 없습니다")?;
@@ -485,11 +479,7 @@ async fn finish_signed_reset_intent<C: SignedResetSyncApi>(
         .map_err(|_| "초기화된 상점 효과 이력을 확인할 수 없습니다. 같은 요청으로 재시도합니다")?;
     {
         let mut ledger = state.ledger.lock().map_err(|_| "행성 상태 오류")?;
-        require_planet_sync_context(
-            &ledger,
-            &intent.account_id,
-            &intent.expected_old_cycle_id,
-        )?;
+        require_planet_sync_context(&ledger, &intent.account_id, &intent.expected_old_cycle_id)?;
         if timeline.account_id != intent.account_id
             || timeline.current_cycle_id != result.planet_state.current_cycle_id
         {
@@ -660,8 +650,8 @@ async fn sync_after_guest_import_check(state: &AppState) -> Result<(), String> {
         ledger
             .prepare_shared_snapshots(&shell.id, &session.user.id, timezone)
             .map_err(|_| "집계 준비 오류")?;
-        let publish_planet = !world_policy_paused
-            && !ledger.sharing_paused().map_err(|_| "동기화 설정 오류")?;
+        let publish_planet =
+            !world_policy_paused && !ledger.sharing_paused().map_err(|_| "동기화 설정 오류")?;
         if !publish_planet {
             return Ok(());
         }
@@ -727,10 +717,11 @@ pub async fn import_pending_guest_cosmetics(
 #[cfg(test)]
 mod tests {
     use super::{
-        bootstrap_contribution_snapshot, require_guest_shop_import_complete,
-        recover_pending_signed_reset, sync_once, sync_private_effect_contribution,
+        bootstrap_contribution_snapshot, recover_pending_signed_reset,
+        require_guest_shop_import_complete, sync_once, sync_private_effect_contribution,
         PrivateEffectSyncApi, PrivateEffectSyncOutcome, RetryDelay, SignedResetSyncApi,
     };
+    use crate::collectors::discovery::SourceConfig;
     use crate::collectors::{ParsedRecord, RecordKind};
     use crate::domain::cosmetic_shop::{
         ActiveEffects, GuestShopImportDisposition, ResetShopResult, ShopActionResult,
@@ -741,7 +732,6 @@ mod tests {
     };
     use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
     use crate::storage::ledger::Ledger;
-    use crate::collectors::discovery::SourceConfig;
     use crate::sync::client::SyncError;
     use crate::{AppState, WindowMode};
     use chrono::{DateTime, Utc};
@@ -788,7 +778,12 @@ mod tests {
             )
             .unwrap();
         ledger.ensure_planet_account(user_id).unwrap();
-        add_usage(&mut ledger, "private-sync-usage", "2026-10-01T12:00:00Z", 100);
+        add_usage(
+            &mut ledger,
+            "private-sync-usage",
+            "2026-10-01T12:00:00Z",
+            100,
+        );
         let cycle_id = ledger.planet_cycle_id().unwrap();
         let state = AppState {
             config: Mutex::new(SourceConfig {
@@ -878,7 +873,8 @@ mod tests {
         fn my_planet_state<'a>(
             &'a self,
             _access_token: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<PlanetState>, SyncError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Option<PlanetState>, SyncError>> + Send + 'a>>
+        {
             self.calls.lock().unwrap().push("planet_state".into());
             let state = self.remote_state.clone();
             Box::pin(async move { Ok(state) })
@@ -887,7 +883,8 @@ mod tests {
         fn get_my_shop_effect_timeline<'a>(
             &'a self,
             _access_token: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<ShopEffectTimeline, SyncError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<ShopEffectTimeline, SyncError>> + Send + 'a>>
+        {
             self.calls.lock().unwrap().push("timeline".into());
             let call_index = {
                 let mut calls = self.timeline_calls.lock().unwrap();
@@ -979,13 +976,21 @@ mod tests {
         let old_cycle_id;
         {
             let mut ledger = Ledger::open(&path, UTC).unwrap();
-            ledger.connection.execute(
-                "UPDATE setting SET value='2026-10-01T00:00:00Z'
+            ledger
+                .connection
+                .execute(
+                    "UPDATE setting SET value='2026-10-01T00:00:00Z'
                  WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
-                [],
-            ).unwrap();
+                    [],
+                )
+                .unwrap();
             ledger.ensure_planet_account(user_id).unwrap();
-            add_usage(&mut ledger, "reset-replay-usage", "2026-10-01T12:00:00Z", 100);
+            add_usage(
+                &mut ledger,
+                "reset-replay-usage",
+                "2026-10-01T12:00:00Z",
+                100,
+            );
             old_cycle_id = ledger.planet_cycle_id().unwrap();
         }
         let state = app_state_from_ledger(Ledger::open(&path, UTC).unwrap());
@@ -993,7 +998,11 @@ mod tests {
         let api = MockResetRecoveryApi {
             ledger: None,
             context_change: None,
-            result: Some(server_reset_result(&state, uuid::Uuid::new_v4(), new_cycle_id)),
+            result: Some(server_reset_result(
+                &state,
+                uuid::Uuid::new_v4(),
+                new_cycle_id,
+            )),
             timeline: server_reset_timeline(user_id, &old_cycle_id, new_cycle_id),
             pre_reset_timeline: Some(server_timeline(user_id, &old_cycle_id)),
             remote_state: Some(server_planet_state(&old_cycle_id)),
@@ -1015,7 +1024,10 @@ mod tests {
             &api,
             false,
         ));
-        assert!(first_result.is_err(), "the lost response leaves a retryable intent");
+        assert!(
+            first_result.is_err(),
+            "the lost response leaves a retryable intent"
+        );
         let first_calls = api.calls.lock().unwrap().clone();
         assert_eq!(first_calls.len(), 4);
         assert_eq!(&first_calls[..3], &["planet_state", "timeline", "upload"]);
@@ -1029,7 +1041,10 @@ mod tests {
         assert_eq!(first_calls[3], format!("reset:{request_id}:{old_cycle_id}"));
         {
             let ledger = state.ledger.lock().unwrap();
-            let intent = ledger.pending_signed_reset_intent(user_id).unwrap().unwrap();
+            let intent = ledger
+                .pending_signed_reset_intent(user_id)
+                .unwrap()
+                .unwrap();
             assert_eq!(intent.request_id, request_id);
             assert_eq!(intent.expected_old_cycle_id, old_cycle_id);
             assert_eq!(ledger.planet_cycle_id().unwrap(), old_cycle_id);
@@ -1055,7 +1070,10 @@ mod tests {
             true,
         ));
 
-        assert!(retry_result.is_ok(), "the persisted reset receipt should apply after restart: {retry_result:?}");
+        assert!(
+            retry_result.is_ok(),
+            "the persisted reset receipt should apply after restart: {retry_result:?}"
+        );
         assert_eq!(
             *api.calls.lock().unwrap(),
             vec![
@@ -1070,7 +1088,10 @@ mod tests {
         );
         let ledger = reopened.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), new_cycle_id);
-        assert!(ledger.pending_signed_reset_intent(user_id).unwrap().is_none());
+        assert!(ledger
+            .pending_signed_reset_intent(user_id)
+            .unwrap()
+            .is_none());
         assert_eq!(ledger.connection.query_row::<i64, _, _>(
             "SELECT count(*) FROM shop_action_request WHERE account_id=?1 AND request_id=?2 AND result_json IS NOT NULL",
             rusqlite::params![format!("account:{user_id}"), request_id.to_string()],
@@ -1091,8 +1112,15 @@ mod tests {
             &api,
             false,
         ));
-        assert!(fresh_reset.is_err(), "the next fresh reset remains held until guest import completes");
-        assert_eq!(*api.calls.lock().unwrap(), calls_after_recovery, "fresh hold occurs before another state fetch or reset call");
+        assert!(
+            fresh_reset.is_err(),
+            "the next fresh reset remains held until guest import completes"
+        );
+        assert_eq!(
+            *api.calls.lock().unwrap(),
+            calls_after_recovery,
+            "fresh hold occurs before another state fetch or reset call"
+        );
     }
 
     #[test]
@@ -1112,7 +1140,11 @@ mod tests {
         let api = MockResetRecoveryApi {
             ledger: None,
             context_change: None,
-            result: Some(server_reset_result(&state, uuid::Uuid::new_v4(), new_cycle_id)),
+            result: Some(server_reset_result(
+                &state,
+                uuid::Uuid::new_v4(),
+                new_cycle_id,
+            )),
             timeline: server_reset_timeline(user_id, &old_cycle_id, new_cycle_id),
             pre_reset_timeline: Some(server_timeline(user_id, &old_cycle_id)),
             remote_state: Some(server_planet_state(&old_cycle_id)),
@@ -1134,11 +1166,20 @@ mod tests {
             false,
         ));
 
-        assert!(result.is_err(), "unimported guest shop state must hold a fresh signed reset");
-        assert!(api.calls.lock().unwrap().is_empty(), "the hold must precede state, timeline, upload, and reset calls");
+        assert!(
+            result.is_err(),
+            "unimported guest shop state must hold a fresh signed reset"
+        );
+        assert!(
+            api.calls.lock().unwrap().is_empty(),
+            "the hold must precede state, timeline, upload, and reset calls"
+        );
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), old_cycle_id);
-        assert!(ledger.pending_signed_reset_intent(user_id).unwrap().is_none());
+        assert!(ledger
+            .pending_signed_reset_intent(user_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1149,13 +1190,21 @@ mod tests {
         let old_cycle_id;
         {
             let mut ledger = Ledger::open(&path, UTC).unwrap();
-            ledger.connection.execute(
-                "UPDATE setting SET value='2026-10-01T00:00:00Z'
+            ledger
+                .connection
+                .execute(
+                    "UPDATE setting SET value='2026-10-01T00:00:00Z'
                  WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
-                [],
-            ).unwrap();
+                    [],
+                )
+                .unwrap();
             ledger.ensure_planet_account(user_id).unwrap();
-            add_usage(&mut ledger, "reset-http-replay-usage", "2026-10-01T12:00:00Z", 100);
+            add_usage(
+                &mut ledger,
+                "reset-http-replay-usage",
+                "2026-10-01T12:00:00Z",
+                100,
+            );
             old_cycle_id = ledger.planet_cycle_id().unwrap();
         }
         let state = app_state_from_ledger(Ledger::open(&path, UTC).unwrap());
@@ -1163,7 +1212,11 @@ mod tests {
         let api = MockResetRecoveryApi {
             ledger: None,
             context_change: None,
-            result: Some(server_reset_result(&state, uuid::Uuid::new_v4(), new_cycle_id)),
+            result: Some(server_reset_result(
+                &state,
+                uuid::Uuid::new_v4(),
+                new_cycle_id,
+            )),
             timeline: server_reset_timeline(user_id, &old_cycle_id, new_cycle_id),
             pre_reset_timeline: Some(server_timeline(user_id, &old_cycle_id)),
             remote_state: Some(server_planet_state(&old_cycle_id)),
@@ -1195,7 +1248,10 @@ mod tests {
             .next()
             .unwrap();
         let request_id = uuid::Uuid::parse_str(request_id).unwrap();
-        assert_eq!(first_reset_call, format!("reset:{request_id}:{old_cycle_id}"));
+        assert_eq!(
+            first_reset_call,
+            format!("reset:{request_id}:{old_cycle_id}")
+        );
         drop(state);
 
         let reopened = app_state_from_ledger(Ledger::open(&path, UTC).unwrap());
@@ -1207,9 +1263,15 @@ mod tests {
                 &api,
             ));
 
-            assert!(retry.is_err(), "HTTP {status_code} cannot settle an ambiguous reset");
+            assert!(
+                retry.is_err(),
+                "HTTP {status_code} cannot settle an ambiguous reset"
+            );
             let ledger = reopened.ledger.lock().unwrap();
-            let intent = ledger.pending_signed_reset_intent(user_id).unwrap().unwrap();
+            let intent = ledger
+                .pending_signed_reset_intent(user_id)
+                .unwrap()
+                .unwrap();
             assert_eq!(intent.request_id, request_id);
             assert_eq!(intent.expected_old_cycle_id, old_cycle_id);
             assert_eq!(ledger.planet_cycle_id().unwrap(), old_cycle_id);
@@ -1242,7 +1304,10 @@ mod tests {
         );
         let ledger = reopened.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), new_cycle_id);
-        assert!(ledger.pending_signed_reset_intent(user_id).unwrap().is_none());
+        assert!(ledger
+            .pending_signed_reset_intent(user_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1274,7 +1339,10 @@ mod tests {
             true,
         ));
 
-        assert!(result.is_err(), "server sharing pause holds the required preupload");
+        assert!(
+            result.is_err(),
+            "server sharing pause holds the required preupload"
+        );
         assert_eq!(
             *api.calls.lock().unwrap(),
             vec![String::from("planet_state"), String::from("timeline")],
@@ -1282,12 +1350,22 @@ mod tests {
         );
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), cycle_id);
-        assert!(ledger.pending_signed_reset_intent(user_id).unwrap().is_none());
-        assert_eq!(ledger.connection.query_row::<i64, _, _>(
-            "SELECT count(*) FROM shop_action_request WHERE account_id=?1",
-            [format!("account:{user_id}")],
-            |row| row.get(0),
-        ).unwrap(), 0, "a held preupload leaves no durable reset intent");
+        assert!(ledger
+            .pending_signed_reset_intent(user_id)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM shop_action_request WHERE account_id=?1",
+                    [format!("account:{user_id}")],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            0,
+            "a held preupload leaves no durable reset intent"
+        );
     }
 
     #[test]
@@ -1333,7 +1411,10 @@ mod tests {
         );
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), cycle_id);
-        assert!(ledger.pending_signed_reset_intent(user_id).unwrap().is_none());
+        assert!(ledger
+            .pending_signed_reset_intent(user_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1342,14 +1423,17 @@ mod tests {
         let (state, cycle_id) = app_state_with_account(user_id);
         let mut canonical_state = server_planet_state(&cycle_id);
         canonical_state.can_reset = false;
-        canonical_state.reset_available_at_utc = Some(
-            (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339(),
-        );
+        canonical_state.reset_available_at_utc =
+            Some((chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339());
         let api = MockResetRecoveryApi {
             ledger: None,
             context_change: None,
             result: None,
-            timeline: server_reset_timeline(user_id, &cycle_id, "80000000-0000-0000-0000-000000000050"),
+            timeline: server_reset_timeline(
+                user_id,
+                &cycle_id,
+                "80000000-0000-0000-0000-000000000050",
+            ),
             pre_reset_timeline: Some(server_timeline(user_id, &cycle_id)),
             remote_state: Some(server_planet_state(&cycle_id)),
             canonical_state: Some(canonical_state),
@@ -1370,7 +1454,10 @@ mod tests {
             false,
         ));
 
-        assert!(result.is_err(), "the canonical server cooldown holds a new reset");
+        assert!(
+            result.is_err(),
+            "the canonical server cooldown holds a new reset"
+        );
         assert_eq!(
             *api.calls.lock().unwrap(),
             vec!["planet_state", "timeline", "upload"],
@@ -1378,12 +1465,21 @@ mod tests {
         );
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), cycle_id);
-        assert!(ledger.pending_signed_reset_intent(user_id).unwrap().is_none());
-        assert_eq!(ledger.connection.query_row::<i64, _, _>(
-            "SELECT count(*) FROM shop_action_request WHERE account_id=?1",
-            [format!("account:{user_id}")],
-            |row| row.get(0),
-        ).unwrap(), 0);
+        assert!(ledger
+            .pending_signed_reset_intent(user_id)
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM shop_action_request WHERE account_id=?1",
+                    [format!("account:{user_id}")],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -1440,7 +1536,11 @@ mod tests {
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), old_cycle_id);
         assert_eq!(
-            ledger.pending_signed_reset_intent(user_id).unwrap().unwrap().request_id,
+            ledger
+                .pending_signed_reset_intent(user_id)
+                .unwrap()
+                .unwrap()
+                .request_id,
             request_id,
         );
         assert_eq!(ledger.connection.query_row::<i64, _, _>(
@@ -1481,12 +1581,15 @@ mod tests {
         let account_scope = format!("account:{user_id}");
         {
             let ledger = state.ledger.lock().unwrap();
-            ledger.connection.execute_batch(&format!(
-                "CREATE TRIGGER fail_signed_reset_receipt
+            ledger
+                .connection
+                .execute_batch(&format!(
+                    "CREATE TRIGGER fail_signed_reset_receipt
                  BEFORE UPDATE OF result_json ON shop_action_request
                  WHEN OLD.account_id='{account_scope}' AND OLD.request_id='{request_id}'
                  BEGIN SELECT RAISE(ABORT, 'forced receipt write failure'); END;"
-            )).unwrap();
+                ))
+                .unwrap();
         }
 
         let failed_apply = tauri::async_runtime::block_on(recover_pending_signed_reset(
@@ -1501,23 +1604,38 @@ mod tests {
             let ledger = state.ledger.lock().unwrap();
             assert_eq!(ledger.planet_cycle_id().unwrap(), old_cycle_id);
             assert_eq!(
-                ledger.pending_signed_reset_intent(user_id).unwrap().unwrap().request_id,
+                ledger
+                    .pending_signed_reset_intent(user_id)
+                    .unwrap()
+                    .unwrap()
+                    .request_id,
                 request_id,
             );
-            assert_eq!(ledger.connection.query_row::<i64, _, _>(
-                "SELECT count(*) FROM shop_effect_timeline_state WHERE account_id=?1",
-                [&account_scope],
-                |row| row.get(0),
-            ).unwrap(), 0, "timeline cache changes roll back with a failed intent completion");
+            assert_eq!(
+                ledger
+                    .connection
+                    .query_row::<i64, _, _>(
+                        "SELECT count(*) FROM shop_effect_timeline_state WHERE account_id=?1",
+                        [&account_scope],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                0,
+                "timeline cache changes roll back with a failed intent completion"
+            );
             assert_eq!(ledger.connection.query_row::<i64, _, _>(
                 "SELECT count(*) FROM shop_action_request WHERE account_id=?1 AND request_id=?2 AND result_json IS NULL",
                 rusqlite::params![account_scope, request_id.to_string()],
                 |row| row.get(0),
             ).unwrap(), 1);
         }
-        state.ledger.lock().unwrap().connection.execute_batch(
-            "DROP TRIGGER fail_signed_reset_receipt;",
-        ).unwrap();
+        state
+            .ledger
+            .lock()
+            .unwrap()
+            .connection
+            .execute_batch("DROP TRIGGER fail_signed_reset_receipt;")
+            .unwrap();
 
         let retried = tauri::async_runtime::block_on(recover_pending_signed_reset(
             &state,
@@ -1526,7 +1644,10 @@ mod tests {
             &api,
         ));
 
-        assert!(retried.is_ok(), "same persisted request should succeed after cache transaction can commit: {retried:?}");
+        assert!(
+            retried.is_ok(),
+            "same persisted request should succeed after cache transaction can commit: {retried:?}"
+        );
         assert_eq!(
             *api.calls.lock().unwrap(),
             vec![
@@ -1538,7 +1659,10 @@ mod tests {
         );
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), new_cycle_id);
-        assert!(ledger.pending_signed_reset_intent(user_id).unwrap().is_none());
+        assert!(ledger
+            .pending_signed_reset_intent(user_id)
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -1580,7 +1704,10 @@ mod tests {
         {
             let ledger = state.ledger.lock().unwrap();
             assert_eq!(ledger.planet_cycle_id().unwrap(), new_cycle_id);
-            assert!(ledger.pending_signed_reset_intent(user_id).unwrap().is_none());
+            assert!(ledger
+                .pending_signed_reset_intent(user_id)
+                .unwrap()
+                .is_none());
             assert_eq!(
                 ledger.connection.query_row::<i64, _, _>(
                     "SELECT count(*) FROM shop_action_request WHERE account_id=?1 AND request_id=?2 AND result_json IS NOT NULL",
@@ -1629,8 +1756,14 @@ mod tests {
     #[test]
     fn account_or_cycle_change_after_reset_rpc_keeps_intent_and_never_applies_result() {
         for (user_id, context_change) in [
-            ("00000000-0000-0000-0000-000000000047", ResetContextChange::Account),
-            ("00000000-0000-0000-0000-000000000048", ResetContextChange::Cycle),
+            (
+                "00000000-0000-0000-0000-000000000047",
+                ResetContextChange::Account,
+            ),
+            (
+                "00000000-0000-0000-0000-000000000048",
+                ResetContextChange::Cycle,
+            ),
         ] {
             let (state, old_cycle_id) = app_state_with_account(user_id);
             let request_id = uuid::Uuid::new_v4();
@@ -1673,7 +1806,11 @@ mod tests {
             );
             let ledger = state.ledger.lock().unwrap();
             assert_eq!(
-                ledger.pending_signed_reset_intent(user_id).unwrap().unwrap().request_id,
+                ledger
+                    .pending_signed_reset_intent(user_id)
+                    .unwrap()
+                    .unwrap()
+                    .request_id,
                 request_id,
             );
             assert_ne!(ledger.planet_cycle_id().unwrap(), new_cycle_id);
@@ -1801,7 +1938,8 @@ mod tests {
 
     impl MockPrivateSyncApi<'_> {
         fn change_context(&self, at: ContextChangeAt) {
-            let (Some(ledger), Some((change_at, change))) = (self.ledger, self.context_change) else {
+            let (Some(ledger), Some((change_at, change))) = (self.ledger, self.context_change)
+            else {
                 return;
             };
             if change_at != at {
@@ -1810,7 +1948,9 @@ mod tests {
             let mut ledger = ledger.lock().unwrap();
             match change {
                 ContextChange::Account => {
-                    ledger.ensure_planet_account("00000000-0000-0000-0000-000000000099").unwrap();
+                    ledger
+                        .ensure_planet_account("00000000-0000-0000-0000-000000000099")
+                        .unwrap();
                 }
                 ContextChange::Cycle => {
                     ledger.connection.execute(
@@ -1826,7 +1966,8 @@ mod tests {
         fn my_planet_state<'a>(
             &'a self,
             _access_token: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<PlanetState>, SyncError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<Option<PlanetState>, SyncError>> + Send + 'a>>
+        {
             self.calls.lock().unwrap().push("planet_state");
             self.change_context(ContextChangeAt::PlanetState);
             let result = if self.fail_state {
@@ -1840,7 +1981,8 @@ mod tests {
         fn get_my_shop_effect_timeline<'a>(
             &'a self,
             _access_token: &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<ShopEffectTimeline, SyncError>> + Send + 'a>> {
+        ) -> Pin<Box<dyn Future<Output = Result<ShopEffectTimeline, SyncError>> + Send + 'a>>
+        {
             self.calls.lock().unwrap().push("timeline");
             self.change_context(ContextChangeAt::Timeline);
             let result = if self.fail_timeline {
@@ -1907,12 +2049,17 @@ mod tests {
              VALUES (?1,'guest-only-instance','land_tree',0,'seed',1,'2026-10-01T00:00:00Z')",
             [&guest_account],
         ).unwrap();
-        ledger.ensure_planet_account("00000000-0000-0000-0000-000000000064").unwrap();
+        ledger
+            .ensure_planet_account("00000000-0000-0000-0000-000000000064")
+            .unwrap();
         assert!(ledger.pending_guest_cosmetic_import().unwrap().is_none());
 
         let result = require_guest_shop_import_complete(&ledger);
 
-        assert!(result.is_err(), "guest ownership requires a complete import first");
+        assert!(
+            result.is_err(),
+            "guest ownership requires a complete import first"
+        );
         assert_eq!(ledger.planet_cycle_id().unwrap(), cycle_id);
         assert_eq!(ledger.connection.query_row::<i64, _, _>(
             "SELECT count(*) FROM shop_landscape_instance WHERE account_id=?1 AND instance_id='guest-only-instance'",
@@ -2012,7 +2159,11 @@ mod tests {
             "pending local guest state must block first login before any RPC",
         );
         let ledger = state.ledger.lock().unwrap();
-        assert_eq!(ledger.cosmetic_account_id().unwrap(), "local", "first login must not move the active account");
+        assert_eq!(
+            ledger.cosmetic_account_id().unwrap(),
+            "local",
+            "first login must not move the active account"
+        );
         assert_eq!(ledger.planet_cycle_id().unwrap(), original_cycle);
         assert_eq!(ledger.connection.query_row::<i64, _, _>(
             "SELECT count(*) FROM shop_landscape_instance WHERE account_id=?1 AND instance_id='pending-guest-instance'",
@@ -2041,10 +2192,17 @@ mod tests {
         assert!(api.uploads.lock().unwrap().is_empty());
         let ledger = state.ledger.lock().unwrap();
         assert_eq!(ledger.planet_cycle_id().unwrap(), cycle_id);
-        assert_eq!(ledger.connection.query_row::<i64, _, _>(
-            "SELECT count(*) FROM shop_effect_timeline_state WHERE account_id=?1",
-            [format!("account:{user_id}")], |row| row.get(0),
-        ).unwrap(), 0);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM shop_effect_timeline_state WHERE account_id=?1",
+                    [format!("account:{user_id}")],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            0
+        );
     }
 
     #[test]
@@ -2097,8 +2255,14 @@ mod tests {
             assert!(!api.uploads.lock().unwrap().is_empty() || at != ContextChangeAt::Upload);
             let ledger = state.ledger.lock().unwrap();
             if at == ContextChangeAt::Upload {
-                assert_eq!(ledger.cosmetic_account_id().unwrap(), "account:00000000-0000-0000-0000-000000000099");
-                assert!(ledger.planet_profile().unwrap().is_none(), "stale canonical response must not be cached for the newly selected account");
+                assert_eq!(
+                    ledger.cosmetic_account_id().unwrap(),
+                    "account:00000000-0000-0000-0000-000000000099"
+                );
+                assert!(
+                    ledger.planet_profile().unwrap().is_none(),
+                    "stale canonical response must not be cached for the newly selected account"
+                );
             } else {
                 assert!(api.uploads.lock().unwrap().is_empty());
             }
@@ -2110,7 +2274,8 @@ mod tests {
         let user_id = "00000000-0000-0000-0000-000000000064";
         let (state, cycle_id) = app_state_with_account(user_id);
         let api = mock_private_api(Some(&state.ledger), user_id, &cycle_id);
-        let expected_server_state = serde_json::to_value(api.remote_state.as_ref().unwrap()).unwrap();
+        let expected_server_state =
+            serde_json::to_value(api.remote_state.as_ref().unwrap()).unwrap();
 
         let outcome = tauri::async_runtime::block_on(sync_private_effect_contribution(
             &state,
@@ -2118,24 +2283,49 @@ mod tests {
             "account-token",
             &api,
             false,
-        )).unwrap();
+        ))
+        .unwrap();
 
-        assert_eq!(outcome, PrivateEffectSyncOutcome::Uploaded { can_reset: true });
+        assert_eq!(
+            outcome,
+            PrivateEffectSyncOutcome::Uploaded { can_reset: true }
+        );
         assert!(outcome.require_uploaded().unwrap());
-        assert_eq!(*api.calls.lock().unwrap(), vec!["planet_state", "timeline", "upload"]);
+        assert_eq!(
+            *api.calls.lock().unwrap(),
+            vec!["planet_state", "timeline", "upload"]
+        );
         let uploads = api.uploads.lock().unwrap();
         assert_eq!(uploads.len(), 1);
         assert_eq!(uploads[0].0, expected_server_state, "upload p_state must reuse the server response without local profile/timezone/object claims");
         let contribution = &uploads[0].1;
-        let keys = contribution.as_object().unwrap().keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
-        assert_eq!(keys, std::collections::BTreeSet::from([
-            "activity_days", "canonical_version", "current_cycle_id", "current_planet_tokens",
-            "daily_segments", "daily_tokens", "device_id", "incomplete", "lifetime_tokens",
-        ]));
+        let keys = contribution
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(
+            keys,
+            std::collections::BTreeSet::from([
+                "activity_days",
+                "canonical_version",
+                "current_cycle_id",
+                "current_planet_tokens",
+                "daily_segments",
+                "daily_tokens",
+                "device_id",
+                "incomplete",
+                "lifetime_tokens",
+            ])
+        );
         assert_eq!(contribution["current_cycle_id"], cycle_id);
         assert_eq!(contribution["current_planet_tokens"], 100);
         assert_eq!(contribution["daily_segments"][0]["effect_revision"], 0);
-        assert_eq!(contribution["activity_days"][0]["first_occurred_at_utc"], "2026-10-01T12:00:00+00:00");
+        assert_eq!(
+            contribution["activity_days"][0]["first_occurred_at_utc"],
+            "2026-10-01T12:00:00+00:00"
+        );
     }
 
     #[test]
@@ -2144,7 +2334,12 @@ mod tests {
         for (local_pause, world_policy_paused) in [(true, false), (false, true)] {
             let (state, cycle_id) = app_state_with_account(user_id);
             if local_pause {
-                state.ledger.lock().unwrap().set_sharing_paused(true).unwrap();
+                state
+                    .ledger
+                    .lock()
+                    .unwrap()
+                    .set_sharing_paused(true)
+                    .unwrap();
             }
             let api = mock_private_api(Some(&state.ledger), user_id, &cycle_id);
 
@@ -2200,10 +2395,7 @@ mod tests {
             current_cycle_id: "cycle-1".into(),
             lifetime_tokens: 90,
             current_planet_tokens: 30,
-            daily_tokens: BTreeMap::from([
-                ("2026-10-01".into(), 10),
-                ("2026-10-02".into(), 20),
-            ]),
+            daily_tokens: BTreeMap::from([("2026-10-01".into(), 10), ("2026-10-02".into(), 20)]),
             incomplete: false,
         };
 
@@ -2212,12 +2404,16 @@ mod tests {
         assert_eq!(snapshot.raw, raw);
         assert_eq!(snapshot.canonical_version, 0);
         assert_eq!(
-            snapshot.daily_segments.iter().map(|segment| (
-                segment.cycle_id.as_str(),
-                segment.date.as_str(),
-                segment.effect_revision,
-                segment.tokens,
-            )).collect::<Vec<_>>(),
+            snapshot
+                .daily_segments
+                .iter()
+                .map(|segment| (
+                    segment.cycle_id.as_str(),
+                    segment.date.as_str(),
+                    segment.effect_revision,
+                    segment.tokens,
+                ))
+                .collect::<Vec<_>>(),
             vec![
                 ("cycle-1", "2026-10-01", 0, 10),
                 ("cycle-1", "2026-10-02", 0, 20),
@@ -2309,11 +2505,31 @@ mod tests {
                 [],
             )
             .unwrap();
-        add_usage(&mut ledger, "unknown-before-bounds", "2026-09-25T12:00:00Z", 100);
+        add_usage(
+            &mut ledger,
+            "unknown-before-bounds",
+            "2026-09-25T12:00:00Z",
+            100,
+        );
         add_usage(&mut ledger, "known-old-cycle", "2026-09-27T12:00:00Z", 100);
-        add_usage(&mut ledger, "current-bound-start", "2026-09-29T00:00:00Z", 50);
-        add_usage(&mut ledger, "known-current-baseline", "2026-09-30T12:00:00Z", 200);
-        add_usage(&mut ledger, "known-current-effect", "2026-10-01T12:00:00Z", 300);
+        add_usage(
+            &mut ledger,
+            "current-bound-start",
+            "2026-09-29T00:00:00Z",
+            50,
+        );
+        add_usage(
+            &mut ledger,
+            "known-current-baseline",
+            "2026-09-30T12:00:00Z",
+            200,
+        );
+        add_usage(
+            &mut ledger,
+            "known-current-effect",
+            "2026-10-01T12:00:00Z",
+            300,
+        );
 
         let timeline = ShopEffectTimeline {
             account_id: account_id.into(),
@@ -2376,9 +2592,7 @@ mod tests {
         let at_cycle_start = contribution
             .daily_segments
             .iter()
-            .find(|segment| {
-                segment.cycle_id == cycle_id && segment.date == "2026-09-29"
-            })
+            .find(|segment| segment.cycle_id == cycle_id && segment.date == "2026-09-29")
             .unwrap();
         assert_eq!(
             (at_cycle_start.effect_revision, at_cycle_start.tokens),

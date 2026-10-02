@@ -40,7 +40,11 @@ struct UploadBody<'a> {
     p_snapshot: &'a DailyUsageSnapshot,
 }
 
-fn purchase_cosmetic_rpc_body(purchase_id: &str, sku: &str, catalog_revision: u32) -> serde_json::Value {
+fn purchase_cosmetic_rpc_body(
+    purchase_id: &str,
+    sku: &str,
+    catalog_revision: u32,
+) -> serde_json::Value {
     serde_json::json!({
         "p_purchase_id": purchase_id,
         "p_sku": sku,
@@ -254,8 +258,12 @@ impl SupabaseSyncClient {
         &self,
         access_token: &str,
     ) -> Result<CosmeticShopState, SyncError> {
-        self.post_rpc(access_token, "get_my_cosmetic_state", &serde_json::json!({}))
-            .await
+        self.post_rpc(
+            access_token,
+            "get_my_cosmetic_state",
+            &serde_json::json!({}),
+        )
+        .await
     }
 
     pub async fn purchase_cosmetic(
@@ -406,12 +414,8 @@ impl SupabaseSyncClient {
     }
 
     pub async fn my_member_code(&self, access_token: &str) -> Result<String, SyncError> {
-        self.post_rpc(
-            access_token,
-            "get_my_member_code",
-            &serde_json::json!({}),
-        )
-        .await
+        self.post_rpc(access_token, "get_my_member_code", &serde_json::json!({}))
+            .await
     }
 
     pub async fn rotate_my_member_code(&self, access_token: &str) -> Result<String, SyncError> {
@@ -629,7 +633,9 @@ mod tests {
         (url, thread)
     }
 
-    fn spawn_rpc_sequence(responses: Vec<MockResponse>) -> (String, JoinHandle<Vec<CapturedRequest>>) {
+    fn spawn_rpc_sequence(
+        responses: Vec<MockResponse>,
+    ) -> (String, JoinHandle<Vec<CapturedRequest>>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let thread = thread::spawn(move || {
@@ -667,10 +673,7 @@ mod tests {
             let count = stream.read(&mut buffer).unwrap();
             assert_ne!(count, 0, "client closed before sending its request");
             bytes.extend_from_slice(&buffer[..count]);
-            if let Some(header_end) = bytes
-                .windows(4)
-                .position(|window| window == b"\r\n\r\n")
-            {
+            if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
                 let header_text = std::str::from_utf8(&bytes[..header_end]).unwrap();
                 let content_length = header_text
                     .lines()
@@ -834,12 +837,19 @@ mod tests {
         let wire = serde_json::to_value(&result).unwrap();
         let decoded: ResetShopResult = serde_json::from_value(wire.clone()).unwrap();
         assert_eq!(decoded.action.request_id, request_id);
-        assert_eq!(decoded.action.state.current_cycle_id, decoded.planet_state.current_cycle_id);
+        assert_eq!(
+            decoded.action.state.current_cycle_id,
+            decoded.planet_state.current_cycle_id
+        );
         assert!(validate_reset_shop_result(decoded, request_id, "expected-old-cycle").is_ok());
 
-        assert!(serde_json::from_value::<ResetShopResult>(
-            serde_json::to_value(empty_planet_state("legacy-cycle")).unwrap()
-        ).is_err(), "a legacy planet-only response must not decode as a reset result");
+        assert!(
+            serde_json::from_value::<ResetShopResult>(
+                serde_json::to_value(empty_planet_state("legacy-cycle")).unwrap()
+            )
+            .is_err(),
+            "a legacy planet-only response must not decode as a reset result"
+        );
 
         let mut extra_field = wire;
         extra_field["ignored"] = serde_json::json!(true);
@@ -847,7 +857,10 @@ mod tests {
 
         assert!(matches!(
             validate_reset_shop_result(
-                reset_shop_result("70000000-0000-0000-0000-000000000002", "server-generated-cycle"),
+                reset_shop_result(
+                    "70000000-0000-0000-0000-000000000002",
+                    "server-generated-cycle"
+                ),
                 request_id,
                 "expected-old-cycle",
             ),
@@ -861,14 +874,17 @@ mod tests {
             Err(SyncError::InvalidResponse),
         ));
 
-        assert!(matches!(
-            validate_reset_shop_result(
-                reset_shop_result(request_id, "expected-old-cycle"),
-                request_id,
-                "expected-old-cycle",
+        assert!(
+            matches!(
+                validate_reset_shop_result(
+                    reset_shop_result(request_id, "expected-old-cycle"),
+                    request_id,
+                    "expected-old-cycle",
+                ),
+                Err(SyncError::InvalidResponse),
             ),
-            Err(SyncError::InvalidResponse),
-        ), "a reset success must return the server-generated next cycle");
+            "a reset success must return the server-generated next cycle"
+        );
     }
 
     #[test]
@@ -891,12 +907,14 @@ mod tests {
             serde_json::to_string(&quote).unwrap(),
         ));
         let client = SupabaseSyncClient::new(&url, "publishable-key");
-        let decoded = run_async(client.quote_shop_action("account-token", &quote.target))
-            .unwrap();
+        let decoded = run_async(client.quote_shop_action("account-token", &quote.target)).unwrap();
         assert_eq!(decoded, quote);
         let request = server.join().unwrap();
         assert_account_request(&request, "/rest/v1/rpc/quote_shop_action");
-        assert_eq!(request.body, serde_json::json!({ "p_target": quote.target }));
+        assert_eq!(
+            request.body,
+            serde_json::json!({ "p_target": quote.target })
+        );
 
         let shop_request = ShopRequest::Purchase {
             request_id: "stable-request-id".into(),
@@ -913,12 +931,14 @@ mod tests {
             serde_json::to_string(&result).unwrap(),
         ));
         let client = SupabaseSyncClient::new(&url, "publishable-key");
-        let decoded = run_async(client.apply_shop_action("account-token", &shop_request))
-            .unwrap();
+        let decoded = run_async(client.apply_shop_action("account-token", &shop_request)).unwrap();
         assert_eq!(decoded, result);
         let request = server.join().unwrap();
         assert_account_request(&request, "/rest/v1/rpc/apply_shop_action");
-        assert_eq!(request.body, serde_json::json!({ "p_request": shop_request }));
+        assert_eq!(
+            request.body,
+            serde_json::json!({ "p_request": shop_request })
+        );
         assert_eq!(request.body["p_request"]["request_id"], "stable-request-id");
     }
 
@@ -982,7 +1002,10 @@ mod tests {
         assert!(requests[0].body.is_null());
         assert_eq!(requests[1].method, "POST");
         assert_eq!(requests[1].path, "/rest/v1/rpc/get_world_planets");
-        assert_eq!(requests[1].body, serde_json::json!({"p_world_id":"shared-world"}));
+        assert_eq!(
+            requests[1].body,
+            serde_json::json!({"p_world_id":"shared-world"})
+        );
         assert!(!requests.iter().any(|request| {
             request.path.contains("guest") || request.body.get("p_request").is_some()
         }));
@@ -1058,7 +1081,10 @@ mod tests {
         let timeline: ShopEffectTimeline = serde_json::from_value(response.clone()).unwrap();
 
         assert_eq!(serde_json::to_value(timeline).unwrap(), response);
-        assert_eq!(get_my_shop_effect_timeline_rpc_body(), serde_json::json!({}));
+        assert_eq!(
+            get_my_shop_effect_timeline_rpc_body(),
+            serde_json::json!({})
+        );
         let _method = SupabaseSyncClient::get_my_shop_effect_timeline;
     }
 
@@ -1099,27 +1125,30 @@ mod tests {
 
         assert_eq!(body["p_state"]["wallet_balance"], 0);
         assert_eq!(body["p_state"]["wallet_credits"], serde_json::json!([]));
-        assert_eq!(body["p_device_contribution"], serde_json::json!({
-            "device_id": "00000000-0000-0000-0000-000000000022",
-            "current_cycle_id": "cycle-1",
-            "lifetime_tokens": 150,
-            "current_planet_tokens": 100,
-            "daily_tokens": {"2026-10-01": 100},
-            "incomplete": false,
-            "canonical_version": 8,
-            "daily_segments": [{
-                "cycle_id": "cycle-1",
-                "date": "2026-10-01",
-                "effect_revision": 7,
-                "tokens": 100
-            }],
-            "activity_days": [{
-                "reward_date": "2026-10-01",
-                "cycle_id": "cycle-1",
-                "first_occurred_at_utc": "2026-10-01T00:00:00Z",
-                "tokens": 100
-            }]
-        }));
+        assert_eq!(
+            body["p_device_contribution"],
+            serde_json::json!({
+                "device_id": "00000000-0000-0000-0000-000000000022",
+                "current_cycle_id": "cycle-1",
+                "lifetime_tokens": 150,
+                "current_planet_tokens": 100,
+                "daily_tokens": {"2026-10-01": 100},
+                "incomplete": false,
+                "canonical_version": 8,
+                "daily_segments": [{
+                    "cycle_id": "cycle-1",
+                    "date": "2026-10-01",
+                    "effect_revision": 7,
+                    "tokens": 100
+                }],
+                "activity_days": [{
+                    "reward_date": "2026-10-01",
+                    "cycle_id": "cycle-1",
+                    "first_occurred_at_utc": "2026-10-01T00:00:00Z",
+                    "tokens": 100
+                }]
+            })
+        );
         let _method = SupabaseSyncClient::upload_planet_state_with_effects;
     }
 
@@ -1139,17 +1168,18 @@ mod tests {
         let success = serde_json::to_string(&result).unwrap();
 
         for (failure, expected_error) in [
-            (MockResponse::Json(401, "{}".into()), SyncError::Rejected(401)),
+            (
+                MockResponse::Json(401, "{}".into()),
+                SyncError::Rejected(401),
+            ),
             (
                 MockResponse::Json(200, "not json".into()),
                 SyncError::InvalidResponse,
             ),
             (MockResponse::Disconnect, SyncError::Transport),
         ] {
-            let (url, server) = spawn_rpc_sequence(vec![
-                failure,
-                MockResponse::Json(200, success.clone()),
-            ]);
+            let (url, server) =
+                spawn_rpc_sequence(vec![failure, MockResponse::Json(200, success.clone())]);
             let client = SupabaseSyncClient::new(&url, "publishable-key");
 
             assert_eq!(
@@ -1165,7 +1195,10 @@ mod tests {
             assert_eq!(requests.len(), 2);
             for captured in &requests {
                 assert_account_request(captured, "/rest/v1/rpc/apply_shop_action");
-                assert_eq!(captured.body["p_request"]["request_id"], "retry-stable-request-id");
+                assert_eq!(
+                    captured.body["p_request"]["request_id"],
+                    "retry-stable-request-id"
+                );
             }
             assert_eq!(requests[0].body, requests[1].body);
         }
@@ -1244,14 +1277,17 @@ mod tests {
             "objects": [], "equipped_cosmetics": [{"slot_id":"sky", "sku":"star_cluster"}],
             "token_rank": 1, "civilization_rank": 1
         });
-        let planet: crate::domain::planet::WorldPlanet = serde_json::from_value(value.clone()).unwrap();
+        let planet: crate::domain::planet::WorldPlanet =
+            serde_json::from_value(value.clone()).unwrap();
         assert_eq!(planet.equipped_cosmetics[0].slot_id, "sky");
         assert_eq!(planet.equipped_cosmetics[0].sku, "star_cluster");
         assert!(value.get("wallet_balance").is_none());
 
         let mut contaminated = value;
         contaminated["wallet_balance"] = serde_json::json!(100000);
-        assert!(serde_json::from_value::<crate::domain::planet::WorldPlanet>(contaminated).is_err());
+        assert!(
+            serde_json::from_value::<crate::domain::planet::WorldPlanet>(contaminated).is_err()
+        );
     }
 
     #[test]
@@ -1285,8 +1321,14 @@ mod tests {
         let body = guest_import_rpc_body(&import);
         assert_eq!(body.as_object().unwrap().len(), 3);
         assert_eq!(body["p_import_id"], import.import_id);
-        assert_eq!(body["p_wallet_credits"][0]["previous_cycle_id"], "guest-cycle");
-        assert_eq!(body["p_purchases"][0]["purchase_id"], import.purchases[0].purchase_id);
+        assert_eq!(
+            body["p_wallet_credits"][0]["previous_cycle_id"],
+            "guest-cycle"
+        );
+        assert_eq!(
+            body["p_purchases"][0]["purchase_id"],
+            import.purchases[0].purchase_id
+        );
         assert!(body.get("user_id").is_none());
     }
 }
