@@ -6,7 +6,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::collectors::{ParsedRecord, RecordKind};
 use crate::domain::cosmetic_shop::{
-    ResetShopResult, ShopActionStatus, ShopEffectTimeline,
+    ResetShopResult, ShopActionStatus, ShopEffectTimeline, ShopRequest,
 };
 use crate::domain::planet::{
     PlanetAvatar, PlanetDeviceContribution, PlanetObject, PlanetProfile, PlanetState,
@@ -63,6 +63,13 @@ pub struct Ledger {
     pub(crate) connection: Connection,
     pub timezone: Tz,
     pub(super) growth_journal_signature: Option<(u64, u64)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedResetIntent {
+    pub account_id: String,
+    pub request_id: uuid::Uuid,
+    pub expected_old_cycle_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -772,6 +779,18 @@ impl Ledger {
             ] {
                 set_setting_value(&self.connection, key, &value)?;
             }
+            if let Some(reset_available_at) = &remote.reset_available_at_utc {
+                set_setting_value(
+                    &self.connection,
+                    "planet_reset_available_at_utc",
+                    reset_available_at,
+                )?;
+            } else {
+                self.connection.execute(
+                    "DELETE FROM setting WHERE key='planet_reset_available_at_utc'",
+                    [],
+                )?;
+            }
             for object in &remote.objects {
                 self.ensure_planet_object(
                     object.stage,
@@ -800,6 +819,175 @@ impl Ledger {
         timeline: &ShopEffectTimeline,
         expected_account_id: &str,
         expected_old_cycle_id: &str,
+    ) -> Result<(), ScanError> {
+        self.apply_confirmed_reset_result_inner(
+            result,
+            timeline,
+            expected_account_id,
+            expected_old_cycle_id,
+            None,
+        )
+    }
+
+    pub fn prepare_signed_reset_intent(
+        &mut self,
+        request_id: uuid::Uuid,
+        expected_old_cycle_id: &str,
+    ) -> Result<SignedResetIntent, ScanError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active_account: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_account_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let active_cycle: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_current_cycle_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let (account_id, account_scope) = signed_account_scope(&active_account)?;
+        if active_account != account_scope
+            || active_cycle != expected_old_cycle_id
+            || expected_old_cycle_id.trim().is_empty()
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+
+        let intent = SignedResetIntent {
+            account_id,
+            request_id,
+            expected_old_cycle_id: expected_old_cycle_id.to_owned(),
+        };
+        if let Some(pending) = pending_signed_reset_intent_in(&transaction, &account_scope)? {
+            if pending == intent {
+                return Ok(intent);
+            }
+            return Err(ScanError::InvalidShopState);
+        }
+        let request_id_text = request_id.to_string();
+        let existing: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM shop_action_request WHERE account_id=?1 AND request_id=?2",
+                rusqlite::params![account_scope, request_id_text],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Err(ScanError::InvalidShopState);
+        }
+        let payload_json = serde_json::to_string(&ShopRequest::ResetPlanet {
+            request_id: request_id_text.clone(),
+            cycle_id: expected_old_cycle_id.to_owned(),
+        })
+        .map_err(|_| ScanError::InvalidShopState)?;
+        transaction.execute(
+            "INSERT INTO shop_action_request(account_id,request_id,payload_json,result_json,created_at_utc)
+             VALUES (?1,?2,?3,NULL,?4)",
+            rusqlite::params![
+                account_scope,
+                request_id_text,
+                payload_json,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(intent)
+    }
+
+    pub fn pending_signed_reset_intent(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<SignedResetIntent>, ScanError> {
+        let (_, account_scope) = signed_account_scope(account_id)?;
+        pending_signed_reset_intent_in(&self.connection, &account_scope)
+    }
+
+    pub fn apply_confirmed_signed_reset_result(
+        &mut self,
+        result: &ResetShopResult,
+        timeline: &ShopEffectTimeline,
+        intent: &SignedResetIntent,
+    ) -> Result<(), ScanError> {
+        self.apply_confirmed_reset_result_inner(
+            result,
+            timeline,
+            &intent.account_id,
+            &intent.expected_old_cycle_id,
+            Some(intent),
+        )
+    }
+
+    pub fn record_rejected_signed_reset_result(
+        &mut self,
+        result: &ResetShopResult,
+        intent: &SignedResetIntent,
+    ) -> Result<(), ScanError> {
+        if result.action.status == ShopActionStatus::Reset
+            || result.action.request_id != intent.request_id.to_string()
+            || result.action.state.account_id != format!("account:{}", intent.account_id)
+            || result.action.state.current_cycle_id != result.planet_state.current_cycle_id
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        let receipt = serde_json::to_string(result).map_err(|_| ScanError::InvalidShopState)?;
+        self.finish_signed_reset_intent_without_cache_change(intent, &receipt)
+    }
+
+    fn finish_signed_reset_intent_without_cache_change(
+        &mut self,
+        intent: &SignedResetIntent,
+        receipt_json: &str,
+    ) -> Result<(), ScanError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let account_id: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_account_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let cycle_id: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_current_cycle_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if account_id != format!("account:{}", intent.account_id)
+            || cycle_id != intent.expected_old_cycle_id
+            || pending_signed_reset_intent_in(&transaction, &account_id)?.as_ref() != Some(intent)
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        let payload_json = serde_json::to_string(&ShopRequest::ResetPlanet {
+            request_id: intent.request_id.to_string(),
+            cycle_id: intent.expected_old_cycle_id.clone(),
+        })
+        .map_err(|_| ScanError::InvalidShopState)?;
+        let completed = transaction.execute(
+            "UPDATE shop_action_request SET result_json=?4
+             WHERE account_id=?1 AND request_id=?2 AND payload_json=?3 AND result_json IS NULL",
+            rusqlite::params![
+                account_id,
+                intent.request_id.to_string(),
+                payload_json,
+                receipt_json,
+            ],
+        )?;
+        if completed != 1 {
+            return Err(ScanError::InvalidShopState);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn apply_confirmed_reset_result_inner(
+        &mut self,
+        result: &ResetShopResult,
+        timeline: &ShopEffectTimeline,
+        expected_account_id: &str,
+        expected_old_cycle_id: &str,
+        intent: Option<&SignedResetIntent>,
     ) -> Result<(), ScanError> {
         let transaction = self
             .connection
@@ -838,6 +1026,17 @@ impl Ledger {
         {
             return Err(ScanError::InvalidShopState);
         }
+        if let Some(intent) = intent {
+            let expected_scope = format!("account:{}", intent.account_id);
+            if account_id != expected_scope
+                || result.action.request_id != intent.request_id.to_string()
+                || intent.expected_old_cycle_id != expected_old_cycle_id
+                || pending_signed_reset_intent_in(&transaction, &account_id)?.as_ref()
+                    != Some(intent)
+            {
+                return Err(ScanError::InvalidShopState);
+            }
+        }
 
         let cycle_started_at = DateTime::parse_from_rfc3339(&reset_state.cycle_started_at_utc)
             .map_err(|_| ScanError::InvalidShopState)?
@@ -871,6 +1070,28 @@ impl Ledger {
             &expected_account_uuid.to_string(),
             new_cycle_id,
         )?;
+        if let Some(intent) = intent {
+            let payload_json = serde_json::to_string(&ShopRequest::ResetPlanet {
+                request_id: intent.request_id.to_string(),
+                cycle_id: intent.expected_old_cycle_id.clone(),
+            })
+            .map_err(|_| ScanError::InvalidShopState)?;
+            let result_json =
+                serde_json::to_string(result).map_err(|_| ScanError::InvalidShopState)?;
+            let completed = transaction.execute(
+                "UPDATE shop_action_request SET result_json=?4
+                 WHERE account_id=?1 AND request_id=?2 AND payload_json=?3 AND result_json IS NULL",
+                rusqlite::params![
+                    account_id,
+                    intent.request_id.to_string(),
+                    payload_json,
+                    result_json,
+                ],
+            )?;
+            if completed != 1 {
+                return Err(ScanError::InvalidShopState);
+            }
+        }
         transaction.commit()?;
         Ok(())
     }
@@ -918,6 +1139,54 @@ impl Ledger {
             coverage,
         })
     }
+}
+
+fn signed_account_scope(account_id: &str) -> Result<(String, String), ScanError> {
+    let user_id = account_id.strip_prefix("account:").unwrap_or(account_id);
+    let user_id = uuid::Uuid::parse_str(user_id)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .to_string();
+    Ok((user_id.clone(), format!("account:{user_id}")))
+}
+
+fn pending_signed_reset_intent_in(
+    connection: &Connection,
+    account_scope: &str,
+) -> Result<Option<SignedResetIntent>, ScanError> {
+    let (_, account_scope) = signed_account_scope(account_scope)?;
+    let mut statement = connection.prepare(
+        "SELECT request_id,payload_json FROM shop_action_request
+         WHERE account_id=?1 AND result_json IS NULL ORDER BY created_at_utc,request_id",
+    )?;
+    let mut rows = statement.query([account_scope.as_str()])?;
+    let mut pending = None;
+    while let Some(row) = rows.next()? {
+        let request_id: String = row.get(0)?;
+        let payload_json: String = row.get(1)?;
+        let request: ShopRequest =
+            serde_json::from_str(&payload_json).map_err(|_| ScanError::InvalidShopState)?;
+        let ShopRequest::ResetPlanet {
+            request_id: payload_request_id,
+            cycle_id,
+        } = request
+        else {
+            return Err(ScanError::InvalidShopState);
+        };
+        let parsed_request_id = uuid::Uuid::parse_str(&payload_request_id)
+            .map_err(|_| ScanError::InvalidShopState)?;
+        if parsed_request_id.to_string() != request_id || cycle_id.trim().is_empty() {
+            return Err(ScanError::InvalidShopState);
+        }
+        let intent = SignedResetIntent {
+            account_id: signed_account_scope(&account_scope)?.0,
+            request_id: parsed_request_id,
+            expected_old_cycle_id: cycle_id,
+        };
+        if pending.replace(intent).is_some() {
+            return Err(ScanError::InvalidShopState);
+        }
+    }
+    Ok(pending)
 }
 
 fn setting_value(connection: &Connection, key: &str) -> Result<Option<String>, ScanError> {
@@ -1252,6 +1521,170 @@ mod tests {
                 coverage: crate::domain::usage::UsageCoverage::Complete,
             },
         }
+    }
+
+    fn remote_planet_state(
+        cycle_id: &str,
+        cycle_started_at_utc: &str,
+        last_reset_at_utc: &str,
+        reset_available_at_utc: Option<&str>,
+    ) -> crate::domain::planet::PlanetState {
+        crate::domain::planet::PlanetState {
+            version: 1,
+            profile: None,
+            timezone: "UTC".into(),
+            current_cycle_id: cycle_id.into(),
+            cycle_started_at_utc: cycle_started_at_utc.into(),
+            last_reset_at_utc: Some(last_reset_at_utc.into()),
+            wallet_balance: 0,
+            wallet_credits: vec![],
+            current_planet_tokens: 0,
+            lifetime_tokens: 0,
+            growth_credit: 0.0,
+            stage: 0,
+            progress_to_next: 0.0,
+            incomplete: false,
+            can_reset: false,
+            reset_available_at_utc: reset_available_at_utc.map(str::to_owned),
+            objects: vec![],
+            removed_natural_keys: vec![],
+        }
+    }
+
+    fn reset_deadline_snapshot(ledger: &Ledger) -> Option<chrono::DateTime<chrono::Utc>> {
+        let unavailable_usage = crate::domain::usage::TokenUsage {
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            coverage: crate::domain::usage::UsageCoverage::Unavailable,
+        };
+        let summary = crate::collectors::discovery::ScanSummary {
+            codex: unavailable_usage.clone(),
+            claude_code: unavailable_usage,
+            codex_source: crate::collectors::discovery::SourceHealth::UsageUnavailable,
+            claude_code_source: crate::collectors::discovery::SourceHealth::UsageUnavailable,
+            confirmed_subtotal: None,
+            complete_total: None,
+            scanned_at_utc: chrono::Utc::now(),
+        };
+        let value = crate::growth::world_snapshot(ledger, summary)
+            .unwrap()
+            .planet
+            .reset_available_at_utc;
+        value.map(|value| {
+            chrono::DateTime::parse_from_rfc3339(&value)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        })
+    }
+
+    #[test]
+    fn remote_reset_deadline_tracks_only_the_accepted_current_cycle() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger.ensure_planet_account("reset-deadline-user").unwrap();
+        ledger.connection.execute_batch(
+            "INSERT INTO setting(key,value) VALUES
+               ('planet_cycle_started_at_utc','2026-10-02T00:00:00Z'),
+               ('planet_last_reset_at_utc','2026-10-02T00:00:00Z'),
+               ('planet_current_cycle_id','cycle-current'),
+               ('planet_remote_cycle_id','cycle-current'),
+               ('planet_reset_available_at_utc','2026-10-03T00:00:00Z')
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+        ).unwrap();
+
+        ledger.merge_remote_planet_state(&remote_planet_state(
+            "cycle-current",
+            "2026-10-02T00:00:00Z",
+            "2026-10-02T00:00:00Z",
+            Some("2026-10-02T18:00:00Z"),
+        )).unwrap();
+        assert_eq!(
+            reset_deadline_snapshot(&ledger),
+            Some(chrono::DateTime::parse_from_rfc3339("2026-10-02T18:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)),
+            "the canonical server deadline should replace the old 24-hour fallback",
+        );
+
+        ledger.merge_remote_planet_state(&remote_planet_state(
+            "cycle-current",
+            "2026-10-02T00:00:00Z",
+            "2026-10-02T00:00:00Z",
+            None,
+        )).unwrap();
+        assert_eq!(
+            reset_deadline_snapshot(&ledger),
+            Some(chrono::DateTime::parse_from_rfc3339("2026-10-03T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)),
+            "a canonical None removes the override and returns to the legacy fallback",
+        );
+
+        ledger.merge_remote_planet_state(&remote_planet_state(
+            "cycle-next",
+            "2026-10-03T00:00:00Z",
+            "2026-10-03T00:00:00Z",
+            Some("2026-10-03T18:00:00Z"),
+        )).unwrap();
+        assert_eq!(
+            reset_deadline_snapshot(&ledger),
+            Some(chrono::DateTime::parse_from_rfc3339("2026-10-03T18:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)),
+            "an accepted new cycle uses its own canonical deadline",
+        );
+
+        ledger.connection.execute(
+            "UPDATE setting SET value='2026-10-04T00:00:00Z' WHERE key='planet_reset_available_at_utc'",
+            [],
+        ).unwrap();
+        ledger.merge_remote_planet_state(&remote_planet_state(
+            "cycle-stale",
+            "2026-10-02T00:00:00Z",
+            "2026-10-02T00:00:00Z",
+            Some("2026-10-02T18:00:00Z"),
+        )).unwrap();
+        assert_eq!(
+            reset_deadline_snapshot(&ledger),
+            Some(chrono::DateTime::parse_from_rfc3339("2026-10-04T00:00:00Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc)),
+            "a rejected stale cycle must not overwrite the active deadline",
+        );
+    }
+
+    #[test]
+    fn signed_reset_intent_survives_reopen_and_cannot_change_request_or_old_cycle() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let account_id = "00000000-0000-0000-0000-000000000041";
+        let request_id = uuid::Uuid::parse_str("90000000-0000-0000-0000-000000000041").unwrap();
+        let original_cycle;
+        {
+            let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+            ledger.ensure_planet_account(account_id).unwrap();
+            original_cycle = ledger.planet_cycle_id().unwrap();
+            let intent = ledger
+                .prepare_signed_reset_intent(request_id, &original_cycle)
+                .unwrap();
+            assert_eq!(intent.request_id, request_id);
+            assert_eq!(intent.expected_old_cycle_id, original_cycle);
+        }
+
+        let mut reopened = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let intent = reopened
+            .pending_signed_reset_intent(account_id)
+            .unwrap()
+            .expect("uncertain reset intent remains available after restart");
+        assert_eq!(intent.request_id, request_id);
+        assert_eq!(intent.expected_old_cycle_id, original_cycle);
+        assert!(reopened
+            .prepare_signed_reset_intent(uuid::Uuid::new_v4(), &original_cycle)
+            .is_err(), "a pending reset cannot be replaced by a new request id");
+        assert!(reopened
+            .prepare_signed_reset_intent(request_id, "different-old-cycle")
+            .is_err(), "the persisted request id cannot be rebound to another cycle");
     }
 
     #[test]

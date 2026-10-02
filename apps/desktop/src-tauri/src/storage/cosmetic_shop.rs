@@ -271,6 +271,13 @@ impl Ledger {
                 account_id TEXT PRIMARY KEY,
                 state_json TEXT NOT NULL,
                 updated_at_utc TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS guest_shop_import_capture (
+                target_account_id TEXT PRIMARY KEY,
+                import_id TEXT NOT NULL UNIQUE,
+                source_fingerprint TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL,
+                captured_at_utc TEXT NOT NULL
              );",
         )?;
 
@@ -1850,6 +1857,16 @@ mod tests {
     use crate::storage::ledger::Ledger;
     use rusqlite::params;
 
+    fn insert_natural_objects(ledger: &Ledger, cycle_id: &str, count: usize) {
+        for ordinal in 0..count {
+            ledger.connection.execute(
+                "INSERT INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed)
+                 VALUES (?1,0,?2,'tree',25,50,?3)",
+                params![cycle_id, ordinal as i64, ordinal.to_string()],
+            ).unwrap();
+        }
+    }
+
     fn signed_sync_is_held_for_local_shop_row(statement: &str) -> bool {
         let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
         ledger.connection.execute_batch(statement).unwrap();
@@ -3088,6 +3105,744 @@ mod tests {
         let restored = ledger.pending_guest_cosmetic_import().unwrap().unwrap();
         assert_eq!(restored.import_id, pending.import_id);
         assert_eq!(restored.purchases, pending.purchases);
+    }
+
+    #[test]
+    fn guest_shop_import_capture_is_durable_immutable_and_source_scoped() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ledger.sqlite3");
+        let target_account_id = "account:00000000-0000-0000-0000-000000000071";
+        let original_snapshot;
+        {
+            let mut ledger = Ledger::open(&path, chrono_tz::UTC).unwrap();
+            let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+            let profile = crate::domain::planet::PlanetProfile {
+                nickname: "Guest planet".into(),
+                avatar: crate::domain::planet::PlanetAvatar::Feminine,
+            };
+            ledger.set_planet_profile(&profile.nickname, profile.avatar).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+                 VALUES ('local','guest-tree','land_tree',1,'stable-seed',2,'2026-10-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+                 VALUES ('local','guest-tree',?1,0.25,0.75,3)",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_avatar_owned(account_id,sku,purchase_id,price,acquired_at_utc)
+                 VALUES ('local','avatar_explorer_hat','avatar-purchase',100,'2026-10-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_avatar_equipment(account_id,slot,sku,version)
+                 VALUES ('local','head','avatar_explorer_hat',2)",
+                [],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_purchase(account_id,purchase_id,sku,price,purchased_at_utc)
+                 VALUES ('local','land-purchase','land_tree',100,'2026-10-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,active_instance_ids_json,effects_json)
+                 VALUES ('local',?1,1,'2026-10-01T00:00:00Z','[\"guest-tree\"]',
+                   '{\"token_earning_bps\":100,\"civilization_growth_bps\":0,\"shop_discount_bps\":0,\"reset_cooldown_bps\":0,\"natural_removal_discount_bps\":0,\"era_reward_tokens\":0,\"streak_reward_tokens\":0}')",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_effect_cycle_bound(account_id,cycle_id,started_at_utc)
+                 VALUES ('local',?1,'2026-10-01T00:00:00Z')",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_effect_contribution(account_id,device_id,cycle_id,date,effect_revision,canonical_version,tokens,growth_bps,wallet_bps)
+                 VALUES ('local','device-local',?1,'2026-10-01',1,2,42,100,200)",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_activity_day(account_id,reward_date,cycle_id,first_occurred_at_utc,canonical_version,tokens)
+                 VALUES ('local','2026-10-01',?1,'2026-10-01T00:00:00Z',2,42)",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_wallet_credit(account_id,credit_id,trigger_key,cycle_id,amount,created_at_utc)
+                 VALUES ('local','reward-credit','reward-trigger',?1,12,'2026-10-01T00:00:00Z')",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_cycle_settlement(account_id,cycle_id,amount,settled_at_utc)
+                 VALUES ('local',?1,42,'2026-10-01T00:00:00Z')",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_game_reward(account_id,reward_id,trigger_key,kind,cycle_id,amount,effect_snapshot_json,awarded_at_utc)
+                 VALUES ('local','era-reward','era:local:1','era',?1,7,
+                   '{\"token_earning_bps\":0,\"civilization_growth_bps\":0,\"shop_discount_bps\":0,\"reset_cooldown_bps\":0,\"natural_removal_discount_bps\":0,\"era_reward_tokens\":0,\"streak_reward_tokens\":0}',
+                   '2026-10-01T00:00:00Z')",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_era_progress(account_id,cycle_id,stage,trigger_key,effect_snapshot_json,awarded_at_utc)
+                 VALUES ('local',?1,1,'era:local:1',
+                   '{\"token_earning_bps\":0,\"civilization_growth_bps\":0,\"shop_discount_bps\":0,\"reset_cooldown_bps\":0,\"natural_removal_discount_bps\":0,\"era_reward_tokens\":0,\"streak_reward_tokens\":0}',
+                   '2026-10-01T00:00:00Z')",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_natural_removal(account_id,cycle_id,stage,ordinal,version,removed_at_utc)
+                 VALUES ('local',?1,0,2,4,'2026-10-01T00:00:00Z')",
+                [&cycle_id],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_natural_removal_debit(account_id,request_id,amount,created_at_utc)
+                 VALUES ('local','remove-request',9,'2026-10-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO growth_journal_cycle(account_id,cycle_id,started_at_utc,ended_at_utc,wallet_credit,wallet_credit_at_utc)
+                 VALUES ('local','guest-historical-cycle','2026-09-01T00:00:00Z','2026-10-01T00:00:00Z',21,'2026-10-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO shop_effect_cycle_bound(account_id,cycle_id,started_at_utc,ended_at_utc)
+                 VALUES ('local','guest-historical-cycle','2026-09-01T00:00:00Z','2026-10-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+                 VALUES ('legacy-wallet-claim',500,'2026-10-01T00:00:00Z')",
+                [],
+            ).unwrap();
+            ledger.insert(&crate::collectors::ParsedRecord {
+                agent: crate::domain::usage::Agent::Codex,
+                kind: crate::collectors::RecordKind::Response,
+                event_key: "raw-private-log-sentinel".into(),
+                occurred_at_utc: chrono::DateTime::parse_from_rfc3339("2026-10-01T00:00:01Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc),
+                usage: crate::domain::usage::TokenUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_tokens: Some(42),
+                    coverage: crate::domain::usage::UsageCoverage::Complete,
+                },
+            }).unwrap();
+            let signed_account_id = "account:00000000-0000-0000-0000-000000000099";
+            ledger.connection.execute(
+                "INSERT INTO usage_record(event_key,source_id,agent,kind,bucket_date,occurred_at_utc,total_tokens,coverage,parser_version)
+                 VALUES ('signed-private-log-sentinel','other-private-source','codex','response',
+                   '2026-10-01','2026-10-01T00:00:02Z',999,'complete',1)",
+                [],
+            ).unwrap();
+            ledger.connection.execute(
+                "INSERT INTO planet_usage_owner(event_key,account_id) VALUES ('signed-private-log-sentinel',?1)",
+                [signed_account_id],
+            ).unwrap();
+
+            let changes_before_capture = ledger.connection.total_changes();
+            let first = ledger.capture_guest_shop_import(target_account_id).unwrap();
+            assert_eq!(ledger.connection.total_changes(), changes_before_capture + 1,
+                "capture may persist its own immutable row but must not rebuild or settle source state");
+            assert_eq!(first.snapshot.target_account_id, target_account_id);
+            assert_eq!(first.snapshot.source_account_id, "local");
+            assert_eq!(first.snapshot.disposition, crate::domain::cosmetic_shop::GuestShopImportDisposition::SourceUnverifiable);
+            assert!(first.source_matches_current);
+            let encoded = serde_json::to_string(&first.snapshot).unwrap();
+            for field in [
+                "historical_cycles", "landscape_instances", "placements", "avatar_owned",
+                "avatar_equipment", "purchases", "removals", "effect_history",
+                "effect_cycle_bounds", "contributions", "activity_days", "rewards",
+                "wallet_credits", "settlements", "era_progress", "usage_aggregates",
+            ] {
+                assert!(encoded.contains(field), "snapshot is missing typed section {field}");
+            }
+            assert!(!encoded.contains("raw-private-log-sentinel"), "capture must not include raw log identities");
+            assert!(!encoded.contains("signed-private-log-sentinel"), "capture must not include another account's raw usage identity");
+            assert_eq!(first.snapshot.data.landscape_instances.len(), 1);
+            assert_eq!(first.snapshot.data.landscape_instances[0].instance_id, "guest-tree");
+            assert_eq!(first.snapshot.data.landscape_instances[0].seed, "stable-seed");
+            assert_eq!(first.snapshot.data.landscape_instances[0].variation_version, 2);
+            assert_eq!(first.snapshot.data.profile.as_ref().unwrap().nickname, "Guest planet");
+            assert_eq!(first.snapshot.data.placements.len(), 1);
+            assert_eq!(first.snapshot.data.placements[0].cycle_id, cycle_id);
+            assert_eq!(first.snapshot.data.placements[0].x, 0.25);
+            assert_eq!(first.snapshot.data.placements[0].version, 3);
+            assert_eq!(first.snapshot.data.avatar_owned[0].sku, "avatar_explorer_hat");
+            assert_eq!(first.snapshot.data.avatar_equipment[0].slot, "head");
+            assert_eq!(first.snapshot.data.effect_history[0].effects.token_earning_bps, 100);
+            assert_eq!(first.snapshot.data.effect_contributions[0].tokens, 42);
+            assert_eq!(first.snapshot.data.effect_contributions[0].canonical_version, 2);
+            assert_eq!(first.snapshot.data.activity_days[0].tokens, 42);
+            assert_eq!(first.snapshot.data.game_rewards[0].amount, 7);
+            assert_eq!(first.snapshot.data.era_progress[0].stage, 1);
+            assert_eq!(first.snapshot.data.wallet_credits[0].amount, 12);
+            assert_eq!(first.snapshot.data.cycle_settlements[0].amount, 42);
+            assert_eq!(first.snapshot.data.unverified_planet_wallet_claims[0].claimed_amount, 500,
+                "legacy planet wallet amounts are preserved as claims, never grantable credits");
+            assert_eq!(first.snapshot.data.natural_removals[0].ordinal, 2);
+            assert_eq!(first.snapshot.data.removal_debits[0].amount, 9);
+            assert!(first.snapshot.data.historical_cycles.iter().any(|cycle|
+                cycle.cycle_id == "guest-historical-cycle" && cycle.ended_at_utc.as_deref() == Some("2026-10-01T00:00:00Z")
+            ));
+            assert!(first.snapshot.data.usage_aggregates.iter().any(|aggregate|
+                aggregate.bucket_date == "2026-10-01" && aggregate.total_tokens == Some(42)
+            ));
+            assert!(!first.snapshot.data.usage_aggregates.iter().any(|aggregate|
+                aggregate.total_tokens == Some(999)
+            ), "usage owned by another account must not enter guest aggregates");
+            assert_eq!(first.snapshot.data.lifetime_usage_tokens, Some(42));
+            assert_eq!(first.snapshot.data.current_cycle_usage_tokens, None,
+                "unassigned raw aggregates do not acquire an invented cycle boundary");
+            original_snapshot = first.snapshot;
+
+            ledger.connection.execute(
+                "DELETE FROM usage_record WHERE event_key='signed-private-log-sentinel'",
+                [],
+            ).unwrap();
+            let after_foreign_usage_removed = ledger
+                .pending_guest_shop_import(target_account_id)
+                .unwrap()
+                .unwrap();
+            assert!(after_foreign_usage_removed.source_matches_current,
+                "foreign-account usage must not affect the local source fingerprint");
+            assert_eq!(after_foreign_usage_removed.snapshot, original_snapshot);
+
+            let changes_before_same_source_retry = ledger.connection.total_changes();
+            let same_source_retry = ledger.capture_guest_shop_import(target_account_id).unwrap();
+            assert_eq!(same_source_retry.snapshot, original_snapshot);
+            assert!(same_source_retry.source_matches_current);
+            assert_eq!(ledger.connection.total_changes(), changes_before_same_source_retry,
+                "same-source retry reuses the captured UUID without writing another row");
+
+            ledger.connection.execute(
+                "UPDATE shop_landscape_placement SET x=0.5 WHERE account_id='local' AND instance_id='guest-tree'",
+                [],
+            ).unwrap();
+            let changes_before_retry = ledger.connection.total_changes();
+            let retry = ledger.capture_guest_shop_import(target_account_id).unwrap();
+            assert_eq!(ledger.connection.total_changes(), changes_before_retry,
+                "retry must not replace the immutable snapshot or mutate source rows");
+            assert_eq!(retry.snapshot, original_snapshot, "a retry must retain the captured payload and import ID");
+            assert!(!retry.source_matches_current, "changed source must be marked stale");
+            assert_eq!(ledger.cosmetic_account_id().unwrap(), "local", "capture must not switch ownership");
+            assert_eq!(ledger.connection.query_row::<i64, _, _>(
+                "SELECT count(*) FROM shop_landscape_instance WHERE account_id='local'",
+                [], |row| row.get(0),
+            ).unwrap(), 1, "capture must leave source rows in place");
+        }
+
+        let reopened = Ledger::open(&path, chrono_tz::UTC).unwrap();
+        let changes_before_pending_read = reopened.connection.total_changes();
+        let pending = reopened.pending_guest_shop_import(target_account_id).unwrap().unwrap();
+        assert_eq!(reopened.connection.total_changes(), changes_before_pending_read,
+            "reading the durable capture must be pure");
+        assert_eq!(pending.snapshot, original_snapshot);
+        assert!(!pending.source_matches_current);
+        assert_eq!(reopened.cosmetic_account_id().unwrap(), "local");
+    }
+
+    #[test]
+    fn guest_shop_import_integrity_covers_geometry_timestamps_and_timezones() {
+        use crate::domain::cosmetic_shop::GuestShopImportDisposition;
+
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+        ledger.connection.execute(
+            "UPDATE setting SET value='not-a-timestamp' WHERE key='planet_activation_at_utc'",
+            [],
+        ).unwrap();
+        ledger.connection.execute(
+            "UPDATE setting SET value='Mars/Phobos' WHERE key='planet_timezone'",
+            [],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+             VALUES ('local','bad-placement','land_tree',0,'seed',1,'2026-10-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+             VALUES ('local','bad-placement',?1,1390,500,1)",
+            [&cycle_id],
+        ).unwrap();
+
+        let captured = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000074",
+        ).unwrap();
+
+        assert_eq!(captured.snapshot.disposition, GuestShopImportDisposition::SourceUnverifiable);
+        let issues = serde_json::to_value(&captured.snapshot.data.integrity_issues).unwrap();
+        let issues = issues.as_array().unwrap();
+        assert!(issues.iter().any(|issue|
+            issue["kind"] == "invalid_placement_geometry" && issue["instance_id"] == "bad-placement"
+        ));
+        assert!(issues.iter().any(|issue|
+            issue["kind"] == "invalid_timestamp" && issue["field"] == "activation_at_utc"
+        ));
+        assert!(issues.iter().any(|issue|
+            issue["kind"] == "invalid_timezone" && issue["field"] == "planet_timezone"
+        ));
+    }
+
+    #[test]
+    fn guest_shop_import_marks_overcapacity_natural_layout_unverifiable_without_geometry_work() {
+        use crate::domain::cosmetic_shop::GuestShopImportDisposition;
+
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+        insert_natural_objects(&ledger, &cycle_id, 155);
+
+        let captured = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000078",
+        ).unwrap();
+
+        assert_eq!(captured.snapshot.disposition, GuestShopImportDisposition::SourceUnverifiable);
+        let issues = serde_json::to_value(&captured.snapshot.data.integrity_issues).unwrap();
+        assert!(issues.as_array().unwrap().iter().any(|issue|
+            issue["kind"] == "too_many_natural_objects" && issue["count"] == 155
+        ));
+    }
+
+    #[test]
+    fn guest_shop_import_parses_planet_object_seed_text() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+        insert_natural_objects(&ledger, &cycle_id, 1);
+
+        let captured = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000081",
+        ).unwrap();
+
+        assert_eq!(captured.snapshot.data.natural_objects.len(), 1);
+        assert_eq!(captured.snapshot.data.natural_objects[0].seed, 0);
+    }
+
+    #[test]
+    fn guest_shop_import_bounds_geometry_work_for_overcapacity_valid_sku_placement() {
+        use crate::domain::cosmetic_shop::GuestShopImportDisposition;
+
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+        insert_natural_objects(&ledger, &cycle_id, 155);
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+             VALUES ('local','tree-instance','land_tree',0,'seed',1,'2026-10-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+             VALUES ('local','tree-instance',?1,100,200,1)",
+            [&cycle_id],
+        ).unwrap();
+
+        let captured = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000079",
+        ).unwrap();
+
+        assert_eq!(captured.snapshot.disposition, GuestShopImportDisposition::SourceUnverifiable);
+        let issues = serde_json::to_value(&captured.snapshot.data.integrity_issues).unwrap();
+        assert!(issues.as_array().unwrap().iter().any(|issue|
+            issue["kind"] == "too_many_natural_objects" && issue["count"] == 155
+        ));
+    }
+
+    #[test]
+    fn guest_shop_import_pending_rejects_oversized_mutated_snapshot_before_geometry_validation() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+        let target_account_id = "account:00000000-0000-0000-0000-000000000080";
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+             VALUES ('local','tree-instance','land_tree',0,'seed',1,'2026-10-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+             VALUES ('local','tree-instance',?1,100,200,1)",
+            [&cycle_id],
+        ).unwrap();
+        ledger.capture_guest_shop_import(target_account_id).unwrap();
+        let mut snapshot: serde_json::Value = ledger.connection.query_row(
+            "SELECT snapshot_json FROM guest_shop_import_capture WHERE target_account_id=?1",
+            [target_account_id],
+            |row| row.get::<_, String>(0),
+        ).unwrap().parse().unwrap();
+        snapshot["data"]["natural_objects"] = serde_json::Value::Array(
+            (0..155).map(|ordinal| serde_json::json!({
+                "cycle_id": cycle_id,
+                "stage": 0,
+                "ordinal": ordinal,
+                "kind": "tree",
+                "x": 25,
+                "y": 50,
+                "seed": ordinal,
+            })).collect(),
+        );
+        ledger.connection.execute(
+            "UPDATE guest_shop_import_capture SET snapshot_json=?2 WHERE target_account_id=?1",
+            params![target_account_id, snapshot.to_string()],
+        ).unwrap();
+
+        assert!(ledger.pending_guest_shop_import(target_account_id).is_err());
+    }
+
+    #[test]
+    fn guest_shop_import_rejects_nonfinite_placement_coordinates_before_freezing_json() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_instance(account_id,instance_id,sku,variation_index,seed,variation_version,acquired_at_utc)
+             VALUES ('local','nonfinite-placement','land_tree',0,'seed',1,'2026-10-01T00:00:00Z')",
+            [],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_landscape_placement(account_id,instance_id,cycle_id,x,y,version)
+             VALUES ('local','nonfinite-placement',?1,?2,100,1)",
+            params![cycle_id, f64::INFINITY],
+        ).unwrap();
+
+        let captured = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000077",
+        );
+
+        assert!(captured.is_err(), "nonfinite coordinates cannot be represented faithfully in the JSON snapshot");
+        let frozen_rows: i64 = ledger.connection.query_row(
+            "SELECT count(*) FROM guest_shop_import_capture",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(frozen_rows, 0);
+    }
+
+    #[test]
+    fn guest_shop_import_integrity_covers_effect_bounds_and_activity_cycle_references() {
+        use crate::domain::cosmetic_shop::GuestShopImportDisposition;
+
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let cycle_id = super::active_cycle_id(&ledger.connection).unwrap();
+        let started_at: String = ledger.connection.query_row(
+            "SELECT value FROM setting WHERE key='planet_cycle_started_at_utc'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_effect_cycle_bounds_state(account_id) VALUES ('local')",
+            [],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_effect_cycle_bound(account_id,cycle_id,started_at_utc,ended_at_utc)
+             VALUES ('local',?1,?2,'2020-01-01T00:00:00Z')",
+            params![cycle_id, started_at],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,ended_at_utc,active_instance_ids_json,effects_json)
+             VALUES ('local',?1,1,?2,'2019-01-01T00:00:00Z','[]',
+               '{\"token_earning_bps\":0,\"civilization_growth_bps\":0,\"shop_discount_bps\":0,\"reset_cooldown_bps\":0,\"natural_removal_discount_bps\":0,\"era_reward_tokens\":0,\"streak_reward_tokens\":0}')",
+            params![cycle_id, started_at],
+        ).unwrap();
+        ledger.connection.execute(
+            "INSERT INTO shop_activity_day(account_id,reward_date,cycle_id,first_occurred_at_utc,canonical_version,tokens)
+             VALUES ('local','2026-10-01','orphan-cycle','2026-10-01T00:00:00Z',1,1)",
+            [],
+        ).unwrap();
+
+        let captured = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000075",
+        ).unwrap();
+
+        assert_eq!(captured.snapshot.disposition, GuestShopImportDisposition::SourceUnverifiable);
+        let issues = serde_json::to_value(&captured.snapshot.data.integrity_issues).unwrap();
+        let issues = issues.as_array().unwrap();
+        assert!(issues.iter().any(|issue| issue["kind"] == "invalid_effect_timeline"));
+        assert!(issues.iter().any(|issue|
+            issue["kind"] == "activity_cycle_unknown" && issue["cycle_id"] == "orphan-cycle"
+        ));
+    }
+
+    #[test]
+    fn guest_shop_import_reads_reject_mutated_payload_and_inconsistent_disposition() {
+        use crate::domain::cosmetic_shop::GuestShopImportDisposition;
+
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let target_account_id = "account:00000000-0000-0000-0000-000000000076";
+        let captured = ledger.capture_guest_shop_import(target_account_id).unwrap();
+        assert_eq!(captured.snapshot.disposition, GuestShopImportDisposition::LocalIntegrityValidated);
+
+        let mut persisted: serde_json::Value = ledger.connection.query_row(
+            "SELECT snapshot_json FROM guest_shop_import_capture WHERE target_account_id=?1",
+            [target_account_id],
+            |row| row.get::<_, String>(0),
+        ).unwrap().parse().unwrap();
+        persisted["data"]["reward_timezone"] = serde_json::Value::String("Pacific/Apia".into());
+        ledger.connection.execute(
+            "UPDATE guest_shop_import_capture SET snapshot_json=?2 WHERE target_account_id=?1",
+            params![target_account_id, persisted.to_string()],
+        ).unwrap();
+        assert!(ledger.pending_guest_shop_import(target_account_id).is_err());
+
+        persisted["data"]["reward_timezone"] = serde_json::Value::String(
+            captured.snapshot.data.reward_timezone.clone(),
+        );
+        persisted["disposition"] = serde_json::Value::String("source_unverifiable".into());
+        ledger.connection.execute(
+            "UPDATE guest_shop_import_capture SET snapshot_json=?2 WHERE target_account_id=?1",
+            params![target_account_id, persisted.to_string()],
+        ).unwrap();
+        assert!(ledger.pending_guest_shop_import(target_account_id).is_err());
+        assert!(ledger.capture_guest_shop_import(target_account_id).is_err());
+    }
+
+    #[test]
+    fn guest_shop_import_marks_missing_successful_purchase_receipt_unverifiable() {
+        use crate::domain::cosmetic_shop::GuestShopImportDisposition;
+
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        ledger.connection.execute(
+            "UPDATE setting SET value='2026-09-29T00:00:00Z'
+             WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
+            [],
+        ).unwrap();
+        ledger.insert(&crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: "proof-purchase-funding-event".into(),
+            occurred_at_utc: chrono::DateTime::parse_from_rfc3339("2026-09-30T10:00:00Z")
+                .unwrap().with_timezone(&chrono::Utc),
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(6_000_000),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }).unwrap();
+        let reset_at = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+        let reset = ledger.reset_guest_planet("proof-funding-reset", &old_cycle, reset_at).unwrap();
+        assert_eq!(reset.status, ShopActionStatus::Reset);
+        let quote = ledger.quote_shop(&QuoteTarget::Purchase { sku: "land_pond".into() }).unwrap();
+        let purchase = ledger.apply_guest_shop_request(&ShopRequest::Purchase {
+            request_id: "proof-missing-purchase-receipt".into(),
+            quote,
+        }, reset_at + chrono::Duration::seconds(1)).unwrap();
+        assert_eq!(purchase.status, ShopActionStatus::Purchased);
+        assert_eq!(purchase.state.landscape_instances.len(), 1);
+        let verified = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000084",
+        ).unwrap();
+        let verified_proofs = serde_json::to_value(&verified.snapshot.data).unwrap();
+        let verified_proofs = verified_proofs["purchase_proofs"].as_array().unwrap();
+        assert_eq!(verified_proofs.len(), 1);
+        assert_eq!(verified_proofs[0]["request_id"], "proof-missing-purchase-receipt");
+        assert_eq!(verified_proofs[0]["status"], "purchased");
+        assert_eq!(verified_proofs[0]["quote"]["target"]["sku"], "land_pond");
+        assert_eq!(verified_proofs[0]["ownership"]["kind"], "landscape");
+        assert_eq!(
+            verified_proofs[0]["ownership"]["instance_id"],
+            purchase.state.landscape_instances[0].instance_id,
+        );
+        ledger.connection.execute(
+            "DELETE FROM shop_action_request WHERE account_id='local' AND request_id=?1",
+            ["proof-missing-purchase-receipt"],
+        ).unwrap();
+
+        let captured = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000085",
+        ).unwrap();
+
+        assert_eq!(captured.snapshot.disposition, GuestShopImportDisposition::SourceUnverifiable);
+        assert_eq!(captured.snapshot.data.purchases.len(), 1);
+        let issues = serde_json::to_value(&captured.snapshot.data.integrity_issues).unwrap();
+        assert!(issues.as_array().unwrap().iter().any(|issue|
+            issue["kind"] == "purchase_proof_unverifiable"
+                && issue["purchase_id"] == "proof-missing-purchase-receipt"
+        ), "a missing successful receipt needs its own typed integrity issue");
+    }
+
+    #[test]
+    fn guest_shop_import_binds_removed_tombstone_to_successful_receipt() {
+        use crate::domain::cosmetic_shop::GuestShopImportDisposition;
+
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        ledger.connection.execute(
+            "UPDATE setting SET value='2026-09-29T00:00:00Z'
+             WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
+            [],
+        ).unwrap();
+        ledger.insert(&crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: "proof-removal-funding-event".into(),
+            occurred_at_utc: chrono::DateTime::parse_from_rfc3339("2026-09-30T10:00:00Z")
+                .unwrap().with_timezone(&chrono::Utc),
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(100_000),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }).unwrap();
+        let reset_at = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+        let reset = ledger.reset_guest_planet("proof-removal-funding-reset", &old_cycle, reset_at).unwrap();
+        assert_eq!(reset.status, ShopActionStatus::Reset);
+        let cycle_id = reset.state.current_cycle_id;
+        ledger.ensure_planet_object(0, 0, "tree", 25, 50, 17).unwrap();
+        let target = crate::domain::cosmetic_shop::NaturalObjectKey {
+            cycle_id: cycle_id.clone(),
+            stage: 0,
+            ordinal: 0,
+        };
+        let quote = ledger.quote_shop(&QuoteTarget::RemoveNatural { key: target.clone() }).unwrap();
+        let removed = ledger.apply_guest_shop_request(&ShopRequest::RemoveNatural {
+            request_id: "proof-removed-tree".into(),
+            key: target.clone(),
+            expected_version: 0,
+            quote,
+        }, reset_at + chrono::Duration::seconds(1)).unwrap();
+        assert_eq!(removed.status, ShopActionStatus::Removed);
+        assert_eq!(removed.state.removed_natural_keys, vec![target.clone()]);
+
+        let verified = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000086",
+        ).unwrap();
+        let verified_wire = serde_json::to_value(&verified.snapshot.data).unwrap();
+        let proof = &verified_wire["removal_proofs"].as_array().unwrap()[0];
+        assert_eq!(proof["request_id"], "proof-removed-tree");
+        assert_eq!(proof["status"], "removed");
+        assert_eq!(proof["target"]["cycle_id"], cycle_id);
+        assert_eq!(proof["target"]["stage"], 0);
+        assert_eq!(proof["target"]["ordinal"], 0);
+        assert_eq!(proof["quote"]["target"]["key"]["cycle_id"], cycle_id);
+        assert_eq!(proof["quote"]["price"], verified_wire["removal_debits"][0]["amount"]);
+
+        ledger.connection.execute(
+            "DELETE FROM shop_action_request WHERE account_id='local' AND request_id=?1",
+            ["proof-removed-tree"],
+        ).unwrap();
+        let captured = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000087",
+        ).unwrap();
+        assert_eq!(captured.snapshot.disposition, GuestShopImportDisposition::SourceUnverifiable);
+        let issues = serde_json::to_value(&captured.snapshot.data.integrity_issues).unwrap();
+        assert!(issues.as_array().unwrap().iter().any(|issue|
+            issue["kind"] == "removal_proof_unverifiable"
+                && issue["request_id"] == "proof-removed-tree"
+        ), "a missing removal receipt needs its own typed integrity issue");
+    }
+
+    #[test]
+    fn guest_shop_import_rejects_reset_receipt_from_another_account() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let previous_cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger.connection.execute(
+            "UPDATE setting SET value='2026-09-29T00:00:00Z'
+             WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
+            [],
+        ).unwrap();
+        ledger.insert(&crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: "proof-reset-account-event".into(),
+            occurred_at_utc: chrono::DateTime::parse_from_rfc3339("2026-09-30T10:00:00Z")
+                .unwrap().with_timezone(&chrono::Utc),
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(6_000_000),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }).unwrap();
+        let reset_at = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
+            .unwrap().with_timezone(&chrono::Utc);
+        let reset = ledger.reset_guest_planet("proof-reset-account-bound", &previous_cycle_id, reset_at).unwrap();
+        assert_eq!(reset.status, ShopActionStatus::Reset);
+
+        let valid_capture = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000088",
+        ).unwrap();
+        assert!(valid_capture.snapshot.data.reset_settlement_proofs.iter().any(|proof|
+            proof.request_id == "proof-reset-account-bound"
+        ), "the real local reset receipt should produce a typed proof");
+
+        let mut result: serde_json::Value = ledger.connection.query_row(
+            "SELECT result_json FROM shop_action_request WHERE account_id='local' AND request_id=?1",
+            ["proof-reset-account-bound"],
+            |row| row.get::<_, String>(0),
+        ).unwrap().parse().unwrap();
+        result["state"]["account_id"] = serde_json::Value::String("account:foreign".into());
+        ledger.connection.execute(
+            "UPDATE shop_action_request SET result_json=?2 WHERE account_id='local' AND request_id=?1",
+            params!["proof-reset-account-bound", result.to_string()],
+        ).unwrap();
+
+        let tampered_capture = ledger.capture_guest_shop_import(
+            "account:00000000-0000-0000-0000-000000000089",
+        ).unwrap();
+        assert!(!tampered_capture.snapshot.data.reset_settlement_proofs.iter().any(|proof|
+            proof.request_id == "proof-reset-account-bound"
+        ), "a reset receipt whose result names another account cannot prove the local reset");
+        let issues = serde_json::to_value(&tampered_capture.snapshot.data.integrity_issues).unwrap();
+        assert!(issues.as_array().unwrap().iter().any(|issue|
+            issue["kind"] == "reset_proof_unverifiable"
+                && issue["previous_cycle_id"] == previous_cycle_id
+        ), "an unproven reset settlement needs a specific typed integrity issue");
+        assert!(tampered_capture.snapshot.data.reset_receipts_unverifiable);
+    }
+
+    #[test]
+    fn signed_account_cannot_capture_guest_shop_import() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let account_id = "00000000-0000-0000-0000-000000000072";
+        ledger.ensure_planet_account(account_id).unwrap();
+        let before_account = ledger.cosmetic_account_id().unwrap();
+        let before_cycle = ledger.planet_cycle_id().unwrap();
+
+        let result = ledger.capture_guest_shop_import(&format!("account:{account_id}"));
+
+        assert!(result.is_err(), "capture is allowed only while local guest state remains the source");
+        assert_eq!(ledger.cosmetic_account_id().unwrap(), before_account);
+        assert_eq!(ledger.planet_cycle_id().unwrap(), before_cycle);
+        assert!(ledger.pending_guest_shop_import(&format!("account:{account_id}")).unwrap().is_none());
+    }
+
+    #[test]
+    fn empty_local_guest_capture_is_only_local_integrity_validated() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let target_account_id = "account:00000000-0000-0000-0000-000000000073";
+
+        let captured = ledger.capture_guest_shop_import(target_account_id).unwrap();
+
+        assert_eq!(captured.snapshot.disposition, crate::domain::cosmetic_shop::GuestShopImportDisposition::LocalIntegrityValidated);
+        assert!(captured.source_matches_current);
+        assert!(captured.snapshot.data.landscape_instances.is_empty());
+        assert!(captured.snapshot.data.unverified_planet_wallet_claims.is_empty());
+        assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+    }
+
+    #[test]
+    fn guest_shop_import_requires_a_canonical_signed_target_id() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let before = ledger.connection.total_changes();
+
+        let invalid = ledger.capture_guest_shop_import("account:NOT-A-CANONICAL-UUID");
+
+        assert!(invalid.is_err());
+        assert!(ledger.pending_guest_shop_import("account:NOT-A-CANONICAL-UUID").is_err());
+        assert_eq!(ledger.connection.total_changes(), before);
+        assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
     }
 
     #[test]

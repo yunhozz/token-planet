@@ -4,3 +4,4 @@ pub mod ledger;
 pub mod outbox;
 mod planet_accounts;
 pub mod shop_effects;
+mod shop_import;

@@ -1200,20 +1200,238 @@ it("keeps the three token totals tied to their original fields", async () => {
   expect(screen.getByRole("region", { name: "전체 사용량 (과거 포함)" })).toHaveTextContent("19");
 });
 
-it("does not expose local reset to an authenticated account", async () => {
+it("allows reset for a signed account with a matching canonical shop state", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  const resetSnapshot = structuredClone(localSnapshot);
+  resetSnapshot.planet.current_cycle_id = "cycle-2";
+  resetSnapshot.planet.profile = { nickname: "다시 시작", avatar: "masculine" };
   invokeMock.mockImplementation(async (command: string) => {
     if (command === "get_sharing_state") return { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return canonicalShopState();
+    if (command === "reset_planet") return structuredClone(resetSnapshot);
     return null;
   });
   render(<App />);
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  expect(screen.getByRole("button", { name: "행성 초기화" })).toBeDisabled();
-  expect(screen.getByText("로그인 계정의 초기화는 서버 상점 연결 후 사용할 수 있습니다.")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
   fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+  await screen.findByText("다시 시작의 행성");
+  confirm.mockRestore();
+});
+
+it("reports a confirmed signed reset as complete and offers refresh without another reset", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  let currentSnapshot = structuredClone(localSnapshot);
+  const refreshedSnapshot = structuredClone(localSnapshot);
+  refreshedSnapshot.planet.current_cycle_id = "cycle-2";
+  refreshedSnapshot.planet.profile = { nickname: "새 행성", avatar: "masculine" };
+  const resetResult = {
+    kind: "confirmed_reset_view_unavailable",
+    account_id: "owner",
+    request_id: "90000000-0000-4000-8000-000000000052",
+    expected_old_cycle_id: "cycle-1",
+    new_cycle_id: "cycle-2",
+  };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
+    if (command === "current_usage") return structuredClone(currentSnapshot);
+    if (command === "refresh_usage") {
+      currentSnapshot = structuredClone(refreshedSnapshot);
+      return structuredClone(currentSnapshot);
+    }
+    if (command === "get_shop_state") return { ...canonicalShopState(), current_cycle_id: currentSnapshot.planet.current_cycle_id };
+    if (command === "reset_planet") throw resetResult;
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+
+  const confirmedNotice = await screen.findByText("서버에서 초기화가 완료됐습니다. 화면 갱신만 필요합니다.");
+  expect(confirmedNotice.closest('[role="status"]')).toHaveTextContent("서버에서 초기화가 완료됐습니다");
+  expect(screen.getByRole("button", { name: "초기화 완료" })).toBeDisabled();
+  expect(screen.queryByText("행성을 초기화하지 못했습니다.")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "초기화 완료" }));
+  expect(invokeMock.mock.calls.filter(([command]) => command === "reset_planet")).toHaveLength(1);
+
+  fireEvent.click(screen.getByRole("button", { name: "완료된 초기화 상태 새로고침" }));
+  await screen.findByText("새 행성의 행성");
+  expect(invokeMock).toHaveBeenCalledWith("refresh_usage");
+  expect(invokeMock.mock.calls.filter(([command]) => command === "reset_planet")).toHaveLength(1);
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  confirm.mockRestore();
+});
+
+it.each(["account", "cycle", "request"] as const)("treats mismatched confirmed-reset %s metadata as an ordinary retryable error", async (field) => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  const resetResult = {
+    kind: "confirmed_reset_view_unavailable",
+    account_id: field === "account" ? "another-user" : "owner",
+    request_id: field === "request" ? "bad-id" : "90000000-0000-4000-8000-000000000053",
+    expected_old_cycle_id: field === "cycle" ? "another-cycle" : "cycle-1",
+    new_cycle_id: "cycle-2",
+  };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return canonicalShopState();
+    if (command === "reset_planet") throw resetResult;
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+
+  expect(await screen.findByText("행성을 초기화하지 못했습니다.")).toBeInTheDocument();
+  expect(screen.queryByText("서버에서 초기화가 완료됐습니다. 화면 갱신만 필요합니다.")).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  expect(invokeMock.mock.calls.filter(([command]) => command === "reset_planet")).toHaveLength(1);
+  confirm.mockRestore();
+});
+
+it.each(["cooldown", "account", "cycle", "paused", "guest-import"] as const)("blocks signed reset when canonical eligibility has a %s mismatch", async (mismatch) => {
+  const signedSnapshot = structuredClone(localSnapshot);
+  if (mismatch === "cooldown") {
+    signedSnapshot.planet.can_reset = false;
+    signedSnapshot.planet.reset_available_at_utc = "2026-09-26T00:00:00Z";
+  }
+  const canonical = canonicalShopState();
+  if (mismatch === "account") canonical.account_id = "account:other";
+  if (mismatch === "cycle") canonical.current_cycle_id = "cycle-other";
+  if (mismatch === "guest-import") canonical.guest_import_pending = true;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_in", world: null, sync_status: mismatch === "paused" ? "paused" : "synced" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(signedSnapshot);
+    if (command === "get_shop_state") return structuredClone(canonical);
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  if (mismatch !== "paused") await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_shop_state"));
+  const resetButton = screen.getByRole("button", { name: "행성 초기화" });
+  expect(resetButton).toBeDisabled();
+  fireEvent.click(resetButton);
   expect(invokeMock).not.toHaveBeenCalledWith("reset_planet");
+});
+
+it("allows a signed retry after an ordinary held or uncertain reset response", async () => {
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+  let resetCalls = 0;
+  const resetSnapshot = structuredClone(localSnapshot);
+  resetSnapshot.planet.current_cycle_id = "cycle-2";
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
+    if (command === "get_shop_state") return canonicalShopState();
+    if (command === "reset_planet") {
+      resetCalls += 1;
+      if (resetCalls === 1) throw "초기화 결과를 확인할 수 없습니다. 같은 요청으로 재시도합니다.";
+      return structuredClone(resetSnapshot);
+    }
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  expect(await screen.findByText("초기화 결과를 확인할 수 없습니다. 같은 요청으로 재시도합니다.")).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await screen.findByText("Orbit의 행성");
+  await waitFor(() => expect(resetCalls).toBe(2));
+  expect(invokeMock.mock.calls.filter(([command]) => command === "reset_planet")).toEqual([
+    ["reset_planet"], ["reset_planet"],
+  ]);
+  confirm.mockRestore();
+});
+
+it("ignores a late signed reset success after the account changes", async () => {
+  const pendingReset = deferred<WorldSnapshot>();
+  let currentAccount: SharingState = { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
+  let currentSnapshot = structuredClone(localSnapshot);
+  const nextSnapshot = structuredClone(localSnapshot);
+  nextSnapshot.planet.profile = { nickname: "새 계정", avatar: "masculine" };
+  const staleSnapshot = structuredClone(localSnapshot);
+  staleSnapshot.planet.profile = { nickname: "이전 초기화", avatar: "masculine" };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(currentSnapshot);
+    if (command === "get_shop_state") return {
+      ...canonicalShopState(),
+      account_id: `account:${currentAccount.user_id}`,
+      current_cycle_id: currentSnapshot.planet.current_cycle_id,
+    };
+    if (command === "reset_planet") return pendingReset.promise;
+    return null;
+  });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+
+  currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null, sync_status: "synced" };
+  currentSnapshot = nextSnapshot;
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await screen.findByText("새 계정의 행성");
+  await act(async () => { pendingReset.resolve(staleSnapshot); });
+
+  expect(screen.getByText("새 계정의 행성")).toBeInTheDocument();
+  expect(screen.queryByText("이전 초기화의 행성")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("ignores a late signed reset rejection after the cycle changes", async () => {
+  const pendingReset = deferred<WorldSnapshot>();
+  const currentAccount: SharingState = { ...ownerState, phase: "signed_in", world: null, sync_status: "synced" };
+  let currentSnapshot = structuredClone(localSnapshot);
+  const nextSnapshot = structuredClone(localSnapshot);
+  nextSnapshot.planet.current_cycle_id = "cycle-2";
+  nextSnapshot.planet.profile = { nickname: "새 주기", avatar: "masculine" };
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(currentAccount);
+    if (command === "current_usage" || command === "refresh_usage") return structuredClone(currentSnapshot);
+    if (command === "get_shop_state") return {
+      ...canonicalShopState(),
+      current_cycle_id: currentSnapshot.planet.current_cycle_id,
+    };
+    if (command === "reset_planet") return pendingReset.promise;
+    return null;
+  });
+  vi.spyOn(window, "confirm").mockReturnValue(true);
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+
+  currentSnapshot = nextSnapshot;
+  await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
+  await screen.findByText("새 주기의 행성");
+  await act(async () => { pendingReset.reject(new Error("오래된 초기화 실패")); });
+
+  expect(screen.getByText("새 주기의 행성")).toBeInTheDocument();
+  expect(screen.queryByText("이전 초기화 실패")).not.toBeInTheDocument();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
 it("keeps the local reset action for an eligible guest", async () => {

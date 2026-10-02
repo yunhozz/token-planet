@@ -121,6 +121,8 @@ psql_test shop-race-fixture \
   -v credit_cycle_id="$race_credit_cycle_id" \
   >/dev/null <<'SQL'
 insert into auth.users(id) values (:'user_id'::uuid);
+insert into private.planet_wallet_credits(user_id, previous_cycle_id, amount, created_at)
+values (:'user_id'::uuid, :'credit_cycle_id', 100000000, '2026-09-30T00:00:00Z');
 select set_config('request.jwt.claim.sub', :'user_id', false) as claim \gset
 select public.upsert_my_planet_state(
   jsonb_build_object(
@@ -131,11 +133,7 @@ select public.upsert_my_planet_state(
     'cycle_started_at_utc', '2026-09-30T00:00:00Z',
     'last_reset_at_utc', null,
     'wallet_balance', 0,
-    'wallet_credits', jsonb_build_array(jsonb_build_object(
-      'previous_cycle_id', :'credit_cycle_id',
-      'amount', 100000000,
-      'created_at_utc', '2026-09-30T00:00:00Z'
-    )),
+    'wallet_credits', '[]'::jsonb,
     'current_planet_tokens', 0,
     'lifetime_tokens', 0,
     'growth_credit', 0,
@@ -152,7 +150,10 @@ select public.upsert_my_planet_state(
     'current_planet_tokens', 0,
     'lifetime_tokens', 0,
     'daily_tokens', '{}'::jsonb,
-    'incomplete', false
+    'incomplete', false,
+    'canonical_version', 0,
+    'daily_segments', '[]'::jsonb,
+    'activity_days', '[]'::jsonb
   )
 );
 SQL

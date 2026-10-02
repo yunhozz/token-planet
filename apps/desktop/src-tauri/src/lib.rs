@@ -27,7 +27,8 @@ use storage::ledger::Ledger;
 use tauri_plugin_dialog::DialogExt;
 
 use platform::popover::{physical_icon_bounds, popup_bounds, Bounds};
-use sync::auth::{AuthConfig, SessionStore};
+use sync::auth::{AuthConfig, SessionStore, SupabaseAuthClient};
+use sync::client::SupabaseSyncClient;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum WindowMode {
@@ -404,6 +405,36 @@ mod window_mode_tests {
 
         assert!(tray_press_pending);
         assert_eq!(tray_target(WindowMode::Popup, visible), None);
+    }
+}
+
+#[cfg(test)]
+mod reset_planet_response_tests {
+    use super::ResetPlanetCommandError;
+
+    #[test]
+    fn normal_errors_remain_strings_and_confirmed_view_failure_is_discriminated() {
+        assert_eq!(
+            serde_json::to_value(ResetPlanetCommandError::Message("retry later".into())).unwrap(),
+            serde_json::json!("retry later"),
+        );
+        assert_eq!(
+            serde_json::to_value(ResetPlanetCommandError::ConfirmedViewUnavailable {
+                kind: "confirmed_reset_view_unavailable",
+                account_id: "00000000-0000-0000-0000-000000000052".into(),
+                request_id: "90000000-0000-0000-0000-000000000052".into(),
+                expected_old_cycle_id: "old-cycle".into(),
+                new_cycle_id: "new-cycle".into(),
+            })
+            .unwrap(),
+            serde_json::json!({
+                "kind": "confirmed_reset_view_unavailable",
+                "account_id": "00000000-0000-0000-0000-000000000052",
+                "request_id": "90000000-0000-0000-0000-000000000052",
+                "expected_old_cycle_id": "old-cycle",
+                "new_cycle_id": "new-cycle",
+            }),
+        );
     }
 }
 
@@ -789,8 +820,73 @@ fn with_guest_planet_reset_authority<T>(
     action()
 }
 
+fn require_signed_reset_context(
+    state: &AppState,
+    user_id: &str,
+    expected_cycle_id: &str,
+) -> Result<(), String> {
+    let ledger = state.ledger.lock().map_err(|_| "행성 상태 오류")?;
+    if ledger.cosmetic_account_id().map_err(|_| "행성 계정을 확인할 수 없습니다")?
+        != format!("account:{user_id}")
+        || ledger.planet_cycle_id().map_err(|_| "행성 주기를 확인할 수 없습니다")?
+            != expected_cycle_id
+    {
+        return Err("계정 또는 행성 주기가 변경되어 초기화를 중단했습니다".into());
+    }
+    Ok(())
+}
+
+#[derive(serde::Serialize)]
+#[serde(untagged)]
+enum ResetPlanetCommandError {
+    Message(String),
+    ConfirmedViewUnavailable {
+        kind: &'static str,
+        account_id: String,
+        request_id: String,
+        expected_old_cycle_id: String,
+        new_cycle_id: String,
+    },
+}
+
+impl From<String> for ResetPlanetCommandError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for ResetPlanetCommandError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
+fn signed_reset_snapshot(
+    completion: sync::worker::SignedResetCompletion,
+) -> Result<WorldSnapshot, ResetPlanetCommandError> {
+    match completion {
+        sync::worker::SignedResetCompletion::Confirmed(snapshot) => Ok(snapshot),
+        sync::worker::SignedResetCompletion::ConfirmedViewUnavailable {
+            account_id,
+            request_id,
+            expected_old_cycle_id,
+            new_cycle_id,
+        } => Err(ResetPlanetCommandError::ConfirmedViewUnavailable {
+            kind: "confirmed_reset_view_unavailable",
+            account_id,
+            request_id: request_id.to_string(),
+            expected_old_cycle_id,
+            new_cycle_id,
+        }),
+    }
+}
+
 #[tauri::command]
-fn reset_planet(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnapshot, String> {
+async fn reset_planet(
+    state: State<'_, AppState>,
+    app: AppHandle,
+) -> Result<WorldSnapshot, ResetPlanetCommandError> {
+    let _gate = state.sync_gate.lock().await;
     restore_saved_planet_account(&state)?;
     let account_id = {
         let ledger = state
@@ -801,6 +897,79 @@ fn reset_planet(state: State<'_, AppState>, app: AppHandle) -> Result<WorldSnaps
             .cosmetic_account_id()
             .map_err(|_| "local ledger unavailable".to_string())?
     };
+    if account_id.starts_with("account:") {
+        let user_id = account_id
+            .strip_prefix("account:")
+            .filter(|user_id| !user_id.is_empty())
+            .ok_or_else(|| "로그인 행성 계정을 확인할 수 없습니다".to_string())?;
+        let expected_cycle_id = state
+            .ledger
+            .lock()
+            .map_err(|_| "행성 상태 오류")?
+            .planet_cycle_id()
+            .map_err(|_| "행성 주기를 확인할 수 없습니다")?;
+        require_signed_reset_context(&state, user_id, &expected_cycle_id)?;
+
+        let config = AuthConfig::from_env()
+            .ok_or_else(|| "로그인 초기화 설정을 확인할 수 없습니다".to_string())?;
+        let store = SessionStore::new(&config).map_err(|_| "로그인 정보를 확인할 수 없습니다")?;
+        let saved = store
+            .load()
+            .map_err(|_| "로그인 정보를 확인할 수 없습니다")?
+            .ok_or_else(|| "로그인 세션을 확인할 수 없습니다".to_string())?;
+        if saved.user.id != user_id {
+            return Err("로그인 계정이 행성 계정과 일치하지 않습니다".into());
+        }
+        let session = SupabaseAuthClient::new(config.clone())
+            .session(&store)
+            .await
+            .map_err(|_| "로그인 세션을 확인할 수 없습니다")?;
+        if session.user.id != user_id {
+            return Err("로그인 계정이 행성 계정과 일치하지 않습니다".into());
+        }
+        require_signed_reset_context(&state, user_id, &expected_cycle_id)?;
+
+        let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
+        if let Some(completion) = sync::worker::recover_pending_signed_reset(
+            &state,
+            user_id,
+            &session.access_token,
+            &client,
+        )
+        .await?
+        {
+            let snapshot = signed_reset_snapshot(completion)?;
+            let _ = platform::tray::refresh_status(&app, &snapshot);
+            return Ok(snapshot);
+        }
+
+        let world = client
+            .current_world(&session.access_token)
+            .await
+            .map_err(|_| "행성 초기화 동기화 정책을 확인할 수 없습니다")?;
+        require_signed_reset_context(&state, user_id, &expected_cycle_id)?;
+        let world_policy_paused = if let Some(world) = world {
+            let policy = client
+                .my_sync_policy(&session.access_token, &world.id)
+                .await
+                .map_err(|_| "행성 초기화 동기화 정책을 확인할 수 없습니다")?;
+            require_signed_reset_context(&state, user_id, &expected_cycle_id)?;
+            policy.paused
+        } else {
+            false
+        };
+        let completion = sync::worker::reset_signed_planet(
+            &state,
+            user_id,
+            &session.access_token,
+            &client,
+            world_policy_paused,
+        )
+        .await?;
+        let snapshot = signed_reset_snapshot(completion)?;
+        let _ = platform::tray::refresh_status(&app, &snapshot);
+        return Ok(snapshot);
+    }
     let _ = with_guest_planet_reset_authority(&account_id, || state.scan())?;
     state
         .ledger

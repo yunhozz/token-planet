@@ -30,6 +30,16 @@ type ActiveNaturalRemoval = {
   generation: number;
 };
 
+type ConfirmedResetViewUnavailable = {
+  kind: "confirmed_reset_view_unavailable";
+  account_id: string;
+  request_id: string;
+  expected_old_cycle_id: string;
+  new_cycle_id: string;
+};
+
+type ResetViewRefreshRequired = ConfirmedResetViewUnavailable & { context: string };
+
 function FeatureToolMenu({
   active,
   disabled,
@@ -80,6 +90,20 @@ function worldContext(shared: SharingState | null, snapshot: WorldSnapshot | nul
     snapshot?.planet.current_cycle_id ?? null]);
 }
 
+function confirmedResetViewUnavailable(error: unknown): ConfirmedResetViewUnavailable | null {
+  if (!error || typeof error !== "object") return null;
+  const value = error as Record<string, unknown>;
+  if (value.kind !== "confirmed_reset_view_unavailable"
+    || typeof value.account_id !== "string"
+    || typeof value.request_id !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.request_id)
+    || typeof value.expected_old_cycle_id !== "string"
+    || typeof value.new_cycle_id !== "string"
+    || !value.new_cycle_id
+    || value.new_cycle_id === value.expected_old_cycle_id) return null;
+  return value as ConfirmedResetViewUnavailable;
+}
+
 function App() {
   const requestedWindow = new URLSearchParams(window.location.search).get("window");
   const initialFeatureScreen: FeatureScreen = requestedWindow === "cosmetic-shop" || requestedWindow === "growth-journal"
@@ -126,6 +150,7 @@ function App() {
   const [sharingError, setSharingError] = useState("");
   const [planetBusy, setPlanetBusy] = useState(false);
   const resetPendingOwnerRef = useRef<{ context: string; epoch: number } | null>(null);
+  const [resetViewRefreshRequired, setResetViewRefreshRequired] = useState<ResetViewRefreshRequired | null>(null);
   const [planetError, setPlanetError] = useState("");
   const [sourceBusy, setSourceBusy] = useState<Agent | null>(null);
   const sourceBusyRef = useRef<Agent | null>(null);
@@ -441,21 +466,39 @@ function App() {
   }
 
   async function resetPlanet() {
+    const resetAccountId = shopAccount?.account_id ?? null;
+    const resetUserId = shopAccount && !shopAccount.is_guest ? shared?.user_id ?? null : null;
+    const resetCycleId = snapshot?.planet.current_cycle_id ?? null;
     const resetContext = shopContextRef.current;
     const resetWorldContext = worldContextRef.current;
     const resetEpoch = worldTransitionEpoch.current;
     const resetOwner = { context: resetContext, epoch: resetEpoch };
-    const guestResetContextIsCurrent = () => shopAccount?.is_guest === true
+    const isSignedResetEligible = Boolean(!shopAccount?.is_guest
+      && resetUserId
+      && currentShopState
+      && currentShopState.account_id === resetAccountId
+      && currentShopState.current_cycle_id === resetCycleId
+      && !currentShopState.guest_import_pending
+      && shopActions.canAct
+      && !shopActions.pending
+      && shopActionsAvailable
+      && planet.can_reset);
+    const isGuestResetEligible = shopAccount?.is_guest === true && canReset;
+    const resetContextIsCurrent = () => resetAccountId !== null
+      && resetCycleId !== null
       && shopActionsAvailable
       && !sharedContextLockedRef.current
       && shopContextRef.current === resetContext
       && worldContextRef.current === resetWorldContext
       && worldTransitionEpoch.current === resetEpoch;
-    const thisResetIsCurrent = () => resetPendingOwnerRef.current === resetOwner && guestResetContextIsCurrent();
-    if (!guestResetContextIsCurrent() || resetPendingOwnerRef.current !== null
+    const thisResetIsCurrent = () => resetPendingOwnerRef.current === resetOwner && resetContextIsCurrent();
+    if ((!isGuestResetEligible && !isSignedResetEligible)
+      || !resetContextIsCurrent()
+      || resetViewRefreshRequired?.context === resetContext
+      || resetPendingOwnerRef.current !== null
       || sourceBusyRef.current !== null || refreshing || planetBusy) return;
     if (!window.confirm("현재 행성을 초기화할까요? 확인된 이번 행성 토큰은 지갑에 적립되고, 자연 생태계부터 다시 시작합니다.")) return;
-    if (!guestResetContextIsCurrent()) return;
+    if ((!isGuestResetEligible && !isSignedResetEligible) || !resetContextIsCurrent()) return;
     resetPendingOwnerRef.current = resetOwner;
     setPlanetBusy(true);
     setPlanetError("");
@@ -467,7 +510,13 @@ function App() {
     }
     catch (cause) {
       if (!thisResetIsCurrent()) return;
-      setPlanetError(typeof cause === "string" ? cause : "행성을 초기화하지 못했습니다.");
+      const confirmed = confirmedResetViewUnavailable(cause);
+      if (confirmed && resetUserId === confirmed.account_id && resetCycleId === confirmed.expected_old_cycle_id) {
+        setResetViewRefreshRequired({ ...confirmed, context: resetContext });
+        setPlanetError("");
+      } else {
+        setPlanetError(typeof cause === "string" ? cause : "행성을 초기화하지 못했습니다.");
+      }
     }
     finally {
       if (resetPendingOwnerRef.current === resetOwner) {
@@ -637,17 +686,38 @@ function App() {
       || capturedExplorationContext !== worldContextRef.current) return;
     setPlanetExplorationEntry({ context: capturedExplorationContext, value });
   };
-  const canReset = planet.can_reset || Boolean(planet.reset_available_at_utc && resetCheckAt >= Date.parse(planet.reset_available_at_utc));
-  const resetAccessMessage = !shopAccount
-    ? "계정 상태 확인 중이므로 초기화할 수 없습니다."
-    : !shopAccount.is_guest
-      ? "로그인 계정의 초기화는 서버 상점 연결 후 사용할 수 있습니다."
-      : null;
-  const nextObjectProgress = objectProgress(planet.growth_credit, planet.stage);
   const currentShopState: ShopState | null = shopAccount && shopActions.state?.account_id === shopAccount.account_id
     && shopActions.state.current_cycle_id === planet.current_cycle_id
     ? shopActions.state
     : null;
+  const canReset = planet.can_reset || Boolean(planet.reset_available_at_utc && resetCheckAt >= Date.parse(planet.reset_available_at_utc));
+  const activeResetViewRefresh = resetViewRefreshRequired?.context === shopIdentity ? resetViewRefreshRequired : null;
+  const signedResetAvailable = Boolean(shopAccount && !shopAccount.is_guest
+    && currentShopState
+    && currentShopState.account_id === shopAccount.account_id
+    && currentShopState.current_cycle_id === planet.current_cycle_id
+    && !currentShopState.guest_import_pending
+    && shopActions.canAct
+    && !shopActions.pending
+    && shopActionsAvailable
+    && planet.can_reset);
+  const resetAvailable = shopAccount?.is_guest ? canReset : signedResetAvailable;
+  const resetAccessMessage = !shopAccount
+    ? "계정 상태 확인 중이므로 초기화할 수 없습니다."
+    : activeResetViewRefresh
+      ? "서버에서 행성 초기화가 완료되었습니다. 새 행성 상태를 불러와 주세요."
+      : shopAccount.is_guest
+        ? null
+        : !shopActionsAvailable
+          ? shopActions.unavailableReason ?? "로그인 행성 상점 작업을 사용할 수 없습니다."
+        : !currentShopState
+          ? "로그인 행성 상점 상태를 확인하고 있습니다."
+          : !shopActions.canAct
+            ? shopActions.unavailableReason ?? "로그인 행성 상점 작업을 사용할 수 없습니다."
+            : !planet.can_reset
+              ? "서버에서 초기화 대기 시간이 끝나지 않은 것으로 확인했습니다."
+              : null;
+  const nextObjectProgress = objectProgress(planet.growth_credit, planet.stage);
   const availableWalletBalance = currentShopState?.available_balance ?? planet.wallet_balance;
   const removedNaturalIds = new Set([
     ...(planet.removed_natural_keys ?? []),
@@ -1067,8 +1137,12 @@ function App() {
               </div>
               <div className="reset-row">
                 <span className="reset-note">{resetAccessMessage ?? "확인된 이번 행성 토큰은 지갑에 적립되며, 행성을 자연 생태계부터 다시 시작합니다."}{shopAccount?.is_guest && !canReset && planet.reset_available_at_utc && <><br />다음 초기화 가능: {new Date(planet.reset_available_at_utc).toLocaleString("ko-KR")}</>}</span>
-                <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={shopAccount?.is_guest !== true || featureActionsBlocked || !canReset || planetBusy || sourceBusy !== null || refreshing}>{planetBusy ? "처리 중" : "행성 초기화"}</button>
+                <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!resetAvailable || featureActionsBlocked || activeResetViewRefresh !== null || planetBusy || sourceBusy !== null || refreshing}>{planetBusy ? "처리 중" : activeResetViewRefresh ? "초기화 완료" : "행성 초기화"}</button>
               </div>
+              {activeResetViewRefresh && <p className="reset-completed-note" role="status">
+                서버에서 초기화가 완료됐습니다. 화면 갱신만 필요합니다.
+                {" "}<button className="error-retry" type="button" onClick={() => void refresh()} disabled={planetBusy || sourceBusy !== null || refreshing}>완료된 초기화 상태 새로고침</button>
+              </p>}
             </div>
           </section> : <section id="panel-group" className="detail-panel group-panel" role="tabpanel" aria-labelledby="tab-group" tabIndex={0}>
             <div className="sharing-stack">

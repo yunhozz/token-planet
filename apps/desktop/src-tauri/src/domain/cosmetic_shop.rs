@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
-use super::planet::{PlanetState, PlanetWalletCredit};
+use super::planet::{PlanetAvatar, PlanetState, PlanetWalletCredit};
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -375,6 +375,422 @@ pub struct GuestCosmeticImport {
     pub import_id: String,
     pub wallet_credits: Vec<PlanetWalletCredit>,
     pub purchases: Vec<GuestCosmeticPurchase>,
+}
+
+/// This describes only a durable local capture. It does not prove server freshness,
+/// source provenance, or eligibility to grant imported credits.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuestShopImportDisposition {
+    LocalIntegrityValidated,
+    SourceUnverifiable,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestShopImportStatus {
+    pub snapshot: GuestShopImportSnapshot,
+    /// False means the immutable captured payload no longer matches the local source.
+    pub source_matches_current: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestShopImportSnapshot {
+    pub import_id: String,
+    pub target_account_id: String,
+    pub source_account_id: String,
+    pub source_fingerprint: String,
+    pub disposition: GuestShopImportDisposition,
+    pub data: GuestShopImportData,
+}
+
+/// Explicitly typed guest state. Raw usage records, source paths, prompts, and log contents
+/// are excluded; only aggregates and growth-journal proof metadata are captured.
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestShopImportData {
+    pub world_timezone: String,
+    pub planet_timezone: String,
+    pub reward_timezone: String,
+    pub planet_device_id: String,
+    pub shop_state_revision: u64,
+    pub profile: Option<GuestPlanetProfile>,
+    pub activation_at_utc: String,
+    pub current_cycle: GuestShopCycle,
+    pub historical_cycles: Vec<GuestShopCycle>,
+    pub last_reset_at_utc: Option<String>,
+    pub reset_available_at_utc: Option<String>,
+    pub effect_timeline_state: Option<GuestEffectTimelineState>,
+    pub effect_cycle_bounds_authoritative: bool,
+    pub contribution_canonical_version: Option<u64>,
+    pub natural_objects: Vec<GuestNaturalObject>,
+    pub landscape_instances: Vec<GuestLandscapeInstance>,
+    pub placements: Vec<GuestLandscapePlacement>,
+    pub landscape_edit_versions: Vec<GuestLandscapeEditVersion>,
+    pub avatar_owned: Vec<GuestAvatarOwned>,
+    pub avatar_equipment: Vec<GuestAvatarEquipment>,
+    pub cosmetic_equipment: Vec<GuestCosmeticEquipment>,
+    pub pending_purchases: Vec<GuestPendingPurchase>,
+    pub cosmetic_purchases: Vec<GuestShopPurchase>,
+    pub purchases: Vec<GuestShopPurchase>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub purchase_proofs: Vec<GuestPurchaseProof>,
+    pub natural_removals: Vec<GuestNaturalRemoval>,
+    pub removal_debits: Vec<GuestRemovalDebit>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub removal_proofs: Vec<GuestRemovalProof>,
+    pub effect_history: Vec<ShopEffectInterval>,
+    pub effect_cycle_bounds: Vec<ShopCycleBound>,
+    pub effect_contributions: Vec<GuestEffectContribution>,
+    pub activity_days: Vec<GuestActivityDay>,
+    pub game_rewards: Vec<GuestGameReward>,
+    pub wallet_credits: Vec<GuestShopWalletCredit>,
+    /// Local wallet claims are preserved as evidence only; they are not grantable credits.
+    pub unverified_planet_wallet_claims: Vec<GuestUnverifiedWalletClaim>,
+    pub cycle_settlements: Vec<GuestCycleSettlement>,
+    pub era_progress: Vec<GuestEraProgress>,
+    pub daily_agent_totals: Vec<GuestDailyAgentTotal>,
+    pub usage_aggregates: Vec<GuestUsageAggregate>,
+    pub lifetime_usage_tokens: Option<u64>,
+    pub current_cycle_usage_tokens: Option<u64>,
+    pub cycle_usage_totals: Vec<GuestCycleUsageTotal>,
+    pub growth_journal_state: Option<GuestGrowthJournalState>,
+    pub growth_journal_cycles: Vec<GuestGrowthJournalCycle>,
+    pub growth_journal_entries: Vec<GuestGrowthJournalEntry>,
+    pub reset_settlement_proofs: Vec<GuestResetSettlementProof>,
+    pub integrity_issues: Vec<GuestShopImportIntegrityIssue>,
+    /// True when a reset, wallet, or settlement record cannot be tied to a complete typed proof.
+    pub reset_receipts_unverifiable: bool,
+    pub legacy_partial_import_pending: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum GuestShopImportIntegrityIssue {
+    UnknownLandscapeSku { sku: String },
+    UnknownAvatarSku { sku: String },
+    UnknownPurchaseSku { sku: String },
+    UnknownLegacyCosmeticSku { sku: String },
+    TooManyLandscapeInstances { sku: String, count: u64 },
+    PlacementMissingInstance { instance_id: String },
+    PlacementCycleMismatch { instance_id: String, cycle_id: String },
+    InvalidPlacementGeometry { instance_id: String },
+    InvalidTimestamp { field: String },
+    InvalidTimezone { field: String },
+    InvalidEffectTimeline { reason: String },
+    ActivityCycleUnknown { cycle_id: String },
+    TooManyNaturalObjects { count: usize },
+    PurchaseProofUnverifiable { purchase_id: String },
+    RemovalProofUnverifiable { request_id: String },
+    ResetProofUnverifiable { previous_cycle_id: String },
+    NaturalTombstoneUnverifiable { cycle_id: String, stage: u8, ordinal: u32 },
+    LandscapeOwnershipUnverifiable { instance_id: String },
+    AvatarOwnershipUnverifiable { purchase_id: String },
+    AvatarEquipmentNotOwned { slot: String, sku: String },
+    AvatarEquipmentSlotMismatch { slot: String, sku: String },
+    EffectReferencesUnknownInstance { instance_id: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestPlanetProfile {
+    pub nickname: String,
+    pub avatar: PlanetAvatar,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestShopCycle {
+    pub cycle_id: String,
+    pub started_at_utc: Option<String>,
+    pub ended_at_utc: Option<String>,
+    pub is_current: bool,
+    pub settled_bonus_tokens: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestEffectTimelineState {
+    pub current_cycle_id: String,
+    pub effect_revision: u64,
+    pub server_time_utc: String,
+    pub reward_timezone: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestPendingPurchase {
+    pub sku: String,
+    pub purchase_id: String,
+    pub catalog_revision: u32,
+    pub created_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestNaturalObject {
+    pub cycle_id: String,
+    pub stage: u8,
+    pub ordinal: u32,
+    pub kind: String,
+    pub x: u8,
+    pub y: u8,
+    pub seed: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestLandscapeInstance {
+    pub instance_id: String,
+    pub sku: String,
+    pub variation_index: u8,
+    pub seed: String,
+    pub variation_version: u32,
+    pub acquired_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestLandscapePlacement {
+    pub instance_id: String,
+    pub cycle_id: String,
+    pub x: f64,
+    pub y: f64,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestLandscapeEditVersion {
+    pub instance_id: String,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestAvatarOwned {
+    pub sku: String,
+    pub purchase_id: String,
+    pub price: u64,
+    pub acquired_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestAvatarEquipment {
+    pub slot: String,
+    pub sku: Option<String>,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestCosmeticEquipment {
+    pub cycle_id: String,
+    pub slot_id: String,
+    pub sku: Option<String>,
+    pub version: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestShopPurchase {
+    pub purchase_id: String,
+    pub sku: String,
+    pub price: u64,
+    pub purchased_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestPurchaseProof {
+    pub request_id: String,
+    pub quote: ShopQuote,
+    pub status: ShopActionStatus,
+    pub ownership: GuestPurchaseOwnershipProof,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum GuestPurchaseOwnershipProof {
+    Landscape { instance_id: String },
+    Avatar { sku: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestNaturalRemoval {
+    pub cycle_id: String,
+    pub stage: u8,
+    pub ordinal: u32,
+    pub version: u64,
+    pub removed_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestRemovalDebit {
+    pub request_id: String,
+    pub amount: u64,
+    pub created_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestRemovalProof {
+    pub request_id: String,
+    pub target: NaturalObjectKey,
+    pub quote: ShopQuote,
+    pub status: ShopActionStatus,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestEffectContribution {
+    pub device_id: String,
+    pub cycle_id: String,
+    pub date: String,
+    pub effect_revision: u64,
+    pub canonical_version: u64,
+    pub tokens: u64,
+    pub growth_bps: u16,
+    pub wallet_bps: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestActivityDay {
+    pub reward_date: String,
+    pub cycle_id: String,
+    pub first_occurred_at_utc: String,
+    pub canonical_version: u64,
+    pub tokens: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestGameReward {
+    pub reward_id: String,
+    pub trigger_key: String,
+    pub kind: String,
+    pub cycle_id: String,
+    pub amount: u64,
+    pub effects: ActiveEffects,
+    pub awarded_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestShopWalletCredit {
+    pub credit_id: String,
+    pub trigger_key: String,
+    pub cycle_id: String,
+    pub amount: u64,
+    pub created_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestUnverifiedWalletClaim {
+    pub previous_cycle_id: String,
+    pub claimed_amount: u64,
+    pub created_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestCycleSettlement {
+    pub cycle_id: String,
+    pub amount: u64,
+    pub settled_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestEraProgress {
+    pub cycle_id: String,
+    pub stage: u8,
+    pub trigger_key: String,
+    pub effects: ActiveEffects,
+    pub awarded_at_utc: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestUsageAggregate {
+    pub cycle_id: Option<String>,
+    pub bucket_date: String,
+    pub agent: String,
+    pub event_count: u64,
+    pub total_tokens: Option<u64>,
+    pub coverage: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestDailyAgentTotal {
+    pub bucket_date: String,
+    pub agent: String,
+    pub total_tokens: Option<u64>,
+    pub coverage: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestCycleUsageTotal {
+    pub cycle_id: String,
+    pub total_tokens: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestGrowthJournalState {
+    pub generation: u64,
+    pub deleted_at_utc: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestGrowthJournalCycle {
+    pub cycle_id: String,
+    pub started_at_utc: Option<String>,
+    pub ended_at_utc: Option<String>,
+    pub wallet_credit: Option<u64>,
+    pub wallet_credit_at_utc: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestGrowthJournalEntry {
+    pub device_id: String,
+    pub cycle_id: String,
+    pub bucket_date: String,
+    pub agent: String,
+    pub revision: u64,
+    pub acknowledged_revision: u64,
+    pub generation: u64,
+    pub present: bool,
+    pub confirmed_tokens: Option<u64>,
+    pub coverage: String,
+    pub payload_hash: String,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct GuestResetSettlementProof {
+    pub request_id: String,
+    pub previous_cycle_id: String,
+    pub new_cycle_id: String,
+    pub reset_at_utc: String,
+    pub raw_wallet_claim: Option<GuestUnverifiedWalletClaim>,
+    pub settled_bonus_tokens: Option<u64>,
+    pub final_effect_revision: Option<u64>,
+    pub final_effects: Option<ActiveEffects>,
+    pub final_active_instance_ids: Vec<String>,
+    pub old_cycle_started_at_utc: Option<String>,
+    pub new_cycle_started_at_utc: Option<String>,
+    pub reset_available_at_utc: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
