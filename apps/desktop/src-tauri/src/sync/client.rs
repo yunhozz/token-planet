@@ -693,10 +693,12 @@ mod tests {
                         })
                         .collect();
                     let body_start = header_end + 4;
-                    let body = serde_json::from_slice(
-                        &bytes[body_start..body_start + content_length],
-                    )
-                    .unwrap();
+                    let body_bytes = &bytes[body_start..body_start + content_length];
+                    let body = if body_bytes.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::from_slice(body_bytes).unwrap()
+                    };
                     return CapturedRequest {
                         method,
                         path,
@@ -945,6 +947,76 @@ mod tests {
             Err(SyncError::Transport),
         );
         assert_account_request(&server.join().unwrap(), "/rest/v1/rpc/get_my_shop_state");
+    }
+
+    #[test]
+    fn sharing_reads_public_world_projection_without_guest_import_transport() {
+        let (url, server) = spawn_rpc_sequence(vec![
+            MockResponse::Json(
+                200,
+                r#"[{"id":"shared-world","name":"Research","timezone":"UTC","owner_id":"owner-id"}]"#.into(),
+            ),
+            MockResponse::Json(
+                200,
+                r#"[{"nickname":"Nova","avatar":"feminine","stage":0,"current_planet_tokens":0,"lifetime_tokens":1000,"growth_credit":1.0,"progress_to_next":0.2,"incomplete":false,"objects":[],"equipped_cosmetics":[{"slot_id":"head","sku":"avatar_hat"}],"token_rank":1,"civilization_rank":1}]"#.into(),
+            ),
+        ]);
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+
+        let world = run_async(client.current_world("account-token"))
+            .unwrap()
+            .unwrap();
+        let planets = run_async(client.world_planets("account-token", &world.id)).unwrap();
+
+        assert_eq!(world.id, "shared-world");
+        assert_eq!(planets.len(), 1);
+        assert_eq!(planets[0].nickname, "Nova");
+        assert_eq!(planets[0].equipped_cosmetics[0].sku, "avatar_hat");
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].method, "GET");
+        assert_eq!(
+            requests[0].path,
+            "/rest/v1/worlds?select=id,name,timezone,owner_id"
+        );
+        assert!(requests[0].body.is_null());
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].path, "/rest/v1/rpc/get_world_planets");
+        assert_eq!(requests[1].body, serde_json::json!({"p_world_id":"shared-world"}));
+        assert!(!requests.iter().any(|request| {
+            request.path.contains("guest") || request.body.get("p_request").is_some()
+        }));
+    }
+
+    #[test]
+    fn guest_import_mock_transport_preserves_a_source_unverifiable_hold() {
+        let import = GuestCosmeticImport {
+            import_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa".into(),
+            wallet_credits: vec![PlanetWalletCredit {
+                previous_cycle_id: "guest-cycle".into(),
+                amount: 1_000_000,
+                created_at_utc: "2026-10-02T00:00:00Z".into(),
+            }],
+            purchases: vec![],
+        };
+        let response = serde_json::json!({
+            "import_id": import.import_id,
+            "status": "source_unverifiable",
+            "available_balance": 0
+        });
+        let (url, server) = spawn_rpc_server(MockResponse::Json(200, response.to_string()));
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+
+        let result = run_async(client.import_guest_cosmetics("account-token", &import)).unwrap();
+
+        assert_eq!(result.import_id, import.import_id);
+        assert_eq!(result.status, "source_unverifiable");
+        assert_eq!(result.available_balance, 0);
+        let request = server.join().unwrap();
+        assert_account_request(&request, "/rest/v1/rpc/import_my_guest_cosmetics");
+        assert_eq!(request.body["p_import_id"], import.import_id);
+        assert_eq!(request.body["p_wallet_credits"][0]["amount"], 1_000_000);
+        assert_eq!(request.body["p_purchases"], serde_json::json!([]));
     }
 
     #[test]

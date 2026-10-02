@@ -728,16 +728,16 @@ pub async fn import_pending_guest_cosmetics(
 mod tests {
     use super::{
         bootstrap_contribution_snapshot, require_guest_shop_import_complete,
-        recover_pending_signed_reset, sync_private_effect_contribution, PrivateEffectSyncApi,
-        PrivateEffectSyncOutcome, RetryDelay, SignedResetSyncApi,
+        recover_pending_signed_reset, sync_once, sync_private_effect_contribution,
+        PrivateEffectSyncApi, PrivateEffectSyncOutcome, RetryDelay, SignedResetSyncApi,
     };
     use crate::collectors::{ParsedRecord, RecordKind};
     use crate::domain::cosmetic_shop::{
-        ActiveEffects, ResetShopResult, ShopActionResult, ShopActionStatus, ShopCycleBound,
-        ShopEffectInterval, ShopEffectTimeline,
+        ActiveEffects, GuestShopImportDisposition, ResetShopResult, ShopActionResult,
+        ShopActionStatus, ShopCycleBound, ShopEffectInterval, ShopEffectTimeline,
     };
     use crate::domain::planet::{
-        PlanetDeviceContribution, PlanetDeviceContributionSnapshot, PlanetState,
+        PlanetAvatar, PlanetDeviceContribution, PlanetDeviceContributionSnapshot, PlanetState,
     };
     use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
     use crate::storage::ledger::Ledger;
@@ -1918,6 +1918,47 @@ mod tests {
             "SELECT count(*) FROM shop_landscape_instance WHERE account_id=?1 AND instance_id='guest-only-instance'",
             [&guest_account], |row| row.get(0),
         ).unwrap(), 1, "the pending guest source row must remain untouched");
+    }
+
+    #[test]
+    fn native_ordinary_first_reset_capture_stops_sync_before_remote_work() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        ledger
+            .set_planet_profile("Synthetic First Reset", PlanetAvatar::Masculine)
+            .unwrap();
+        let reset_at = Utc::now() + chrono::Duration::minutes(1);
+        let occurred_at = reset_at - chrono::Duration::seconds(30);
+        add_usage(
+            &mut ledger,
+            "native-first-reset-sync-guard",
+            &occurred_at.to_rfc3339(),
+            1_000_000,
+        );
+        let target = "account:00000000-0000-4000-a000-000000000001";
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        ledger.prepare_growth_journal().unwrap();
+        let captured = ledger.capture_guest_shop_import(target).unwrap();
+        assert_eq!(
+            captured.snapshot.disposition,
+            GuestShopImportDisposition::SourceUnverifiable
+        );
+        let current_cycle_id = ledger.planet_cycle_id().unwrap();
+        let state = app_state_from_ledger(ledger);
+
+        let result = tauri::async_runtime::block_on(sync_once(&state));
+
+        assert_eq!(
+            result,
+            Err("게스트 상점 가져오기를 완료한 뒤 동기화할 수 있습니다".into())
+        );
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.planet_cycle_id().unwrap(), current_cycle_id);
+        let pending = ledger.pending_guest_shop_import(target).unwrap().unwrap();
+        assert_eq!(pending.snapshot.import_id, captured.snapshot.import_id);
+        assert_eq!(
+            pending.snapshot.disposition,
+            GuestShopImportDisposition::SourceUnverifiable
+        );
     }
 
     #[test]

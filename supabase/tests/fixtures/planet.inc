@@ -16,13 +16,22 @@ create function pg_temp.planet_state(
 $$;
 create function pg_temp.planet_device(
   p_device uuid, p_cycle text, p_tokens bigint, p_incomplete boolean default false,
-  p_lifetime bigint default null
+  p_lifetime bigint default null, p_version bigint default 1
 ) returns jsonb language sql as $$
   select jsonb_build_object(
     'device_id', p_device, 'current_cycle_id', p_cycle,
     'current_planet_tokens', p_tokens, 'lifetime_tokens', coalesce(p_lifetime, p_tokens),
     'daily_tokens', case when p_tokens = 0 then '{}'::jsonb
       else jsonb_build_object('2026-09-26', p_tokens) end,
-    'incomplete', p_incomplete
+    'incomplete', p_incomplete,
+    'canonical_version', p_version,
+    'daily_segments', case when p_tokens = 0 then '[]'::jsonb else jsonb_build_array(
+      jsonb_build_object('cycle_id', p_cycle, 'date', '2026-09-26',
+        'effect_revision', 0, 'tokens', p_tokens)
+    ) end,
+    'activity_days', case when p_tokens = 0 then '[]'::jsonb else jsonb_build_array(
+      jsonb_build_object('cycle_id', p_cycle, 'reward_date', '2026-09-26',
+        'first_occurred_at_utc', '2026-09-26T00:00:00Z', 'tokens', p_tokens)
+    ) end
   );
 $$;

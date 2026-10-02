@@ -2080,7 +2080,9 @@ fn reset_proofs(
 #[cfg(test)]
 mod native_empty_bootstrap_capture_tests {
     use super::*;
+    use crate::collectors::{ParsedRecord, RecordKind};
     use crate::domain::planet::PlanetAvatar;
+    use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
 
     #[test]
     fn serializes_native_empty_capture_from_local_storage() {
@@ -2107,5 +2109,81 @@ mod native_empty_bootstrap_capture_tests {
 
         let wire = serde_json::json!({ "schema_version": 1, "snapshot": status.snapshot });
         println!("NATIVE_EMPTY_CAPTURE={}", serde_json::to_string(&wire).unwrap());
+    }
+
+    #[test]
+    fn serializes_native_ordinary_first_reset_capture_without_manufactured_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let database = directory.path().join("native-first-reset-shop.sqlite3");
+        let mut ledger = Ledger::open(&database, chrono_tz::UTC).unwrap();
+        ledger
+            .set_planet_profile("Synthetic First Reset", PlanetAvatar::Masculine)
+            .unwrap();
+
+        let reset_at = Utc::now() + chrono::Duration::minutes(1);
+        let occurred_at = reset_at - chrono::Duration::seconds(30);
+        ledger
+            .insert(&ParsedRecord {
+                agent: Agent::Codex,
+                kind: RecordKind::Response,
+                event_key: "native-first-reset-raw-usage".into(),
+                occurred_at_utc: occurred_at,
+                usage: TokenUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_tokens: Some(1_000_000),
+                    coverage: UsageCoverage::Complete,
+                },
+            })
+            .unwrap();
+        let previous_cycle_id = ledger.planet_cycle_id().unwrap();
+
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        let current_cycle_id = ledger.planet_cycle_id().unwrap();
+        assert_ne!(current_cycle_id, previous_cycle_id);
+        ledger.prepare_growth_journal().unwrap();
+
+        let status = ledger
+            .capture_guest_shop_import("account:00000000-0000-4000-a000-000000000001")
+            .unwrap();
+        let data = &status.snapshot.data;
+        assert_eq!(
+            status.snapshot.disposition,
+            GuestShopImportDisposition::SourceUnverifiable
+        );
+        assert_eq!(data.lifetime_usage_tokens, Some(1_000_000));
+        assert_eq!(data.current_cycle_usage_tokens, Some(0));
+        assert_eq!(data.current_cycle.cycle_id, current_cycle_id);
+        assert_eq!(data.current_cycle.settled_bonus_tokens, None);
+        assert!(data.cycle_settlements.iter().any(|settlement| {
+            settlement.cycle_id == previous_cycle_id && settlement.amount == 0
+        }));
+        assert!(data.unverified_planet_wallet_claims.iter().any(|claim| {
+            claim.previous_cycle_id == previous_cycle_id && claim.claimed_amount == 1_000_000
+        }));
+        assert!(data
+            .effect_history
+            .iter()
+            .all(|interval| interval.cycle_id == current_cycle_id));
+        assert!(data.effect_cycle_bounds.is_empty());
+        assert!(!data.effect_cycle_bounds_authoritative);
+        assert!(data.effect_timeline_state.is_none());
+        assert_eq!(data.contribution_canonical_version, Some(1));
+        assert!(data.reset_receipts_unverifiable);
+        assert_eq!(data.reset_settlement_proofs.len(), 1);
+        assert_eq!(
+            data.reset_settlement_proofs[0].previous_cycle_id,
+            previous_cycle_id
+        );
+        assert_eq!(data.reset_settlement_proofs[0].final_effect_revision, None);
+        assert_eq!(data.reset_settlement_proofs[0].final_effects, None);
+
+        let wire = serde_json::json!({ "schema_version": 1, "snapshot": status.snapshot });
+        println!(
+            "NATIVE_FIRST_RESET_CAPTURE={}",
+            serde_json::to_string(&wire).unwrap()
+        );
     }
 }
