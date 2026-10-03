@@ -189,3 +189,4 @@ select is((select count(*)::integer from private.growth_journal_cycles
 
 select * from finish();
 rollback;
+\echo SHOP_GUEST_IMPORT_V2_ROLLBACK_COMPLETED

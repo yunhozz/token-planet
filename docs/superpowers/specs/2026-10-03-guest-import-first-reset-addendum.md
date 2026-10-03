@@ -1,6 +1,6 @@
 # 일반 게스트 첫 reset 가져오기 명세 추가안
 
-상태: written spec 및 실행 계획 승인 완료. Tasks1–4의 로컬 구현·독립 QA·Reviewer gate 완료. 후속 사용자 지시로 Tasks5–10을 순차 재개한다. 기존 disposable 환경이 없어 새 동일 프로젝트 환경 구축을 사용자가 승인했으며, 새 baseline에서 Task5 private writer의 QA/Reviewer gate를 통과했다. Tasks6–10 public/native/API/통합 gate는 아직 완료하지 않았다.
+상태: written spec 및 실행 계획 승인 완료. Tasks1–4의 로컬 구현·독립 QA·Reviewer gate 완료. 후속 사용자 지시로 Tasks5–10을 순차 재개한다. 기존 disposable 환경이 없어 새 동일 프로젝트 환경 구축을 사용자가 승인했으며, 새 baseline에서 Tasks5–6 private writer/public dispatch·race의 QA/Reviewer gate를 통과했다. Tasks7–10 native/API/통합 gate는 아직 완료하지 않았다.
 기준: PR #6, `feat/shop-system-revamp`, `f233b612773b8afda88528040bdd67886f9b0b06`.
 상위 명세: [상점 개편 명세](2026-10-01-shop-system-revamp.md) §8.2–8.4.
 관련 계획: [상점 개편 계획](../plans/2026-10-01-shop-system-revamp.md) Task8B–D.
@@ -459,3 +459,14 @@ Writer는 기존 receipt에 nullable object-checked `normalized_proof`를 추가
 RED: `/private/tmp/shop-import-v2-task5-writer-red-final-proof.log`에서 47개 중 validator/control 10 PASS, writer 부재 37개 의도한 실패, 명시적 ROLLBACK 및 digest 동일. GREEN 및 독립 QA: writer 47/47, validator 53/53, 각 exit0/ROLLBACK/cleanup 및 보호 데이터 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 전후 동일/auth 사용자 0. replay/conflict/new-ID active·held/private-empty/orphan success·최종 canonical proof 보류/game DML0·journal/settlement/final receipt 주입 실패의 game/success receipt/new lock 전체 rollback을 확인했다. 기존 journal/device/wallet 테이블은 baseline RLS 미설정이나 anon/authenticated 접근 권한은 차단되어 있으며 이 단계에서 권한을 확대하지 않았다.
 
 명령: `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_writer.sql`, `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_validation.sql`, `git diff --check`. 증거: `/private/tmp/shop-import-v2-task5-writer-{apply,green}.log`, `/private/tmp/shop-import-v2-task5-qa-{writer,validator}.log`. Migration SHA256 `d71501c699ff2c09e74843aca3a75bf94efdd546bb88b8de28878268265f1142`. Public dispatch/race/native completion/worker/API/public scene 및 Tasks6–10은 아직 완료하지 않았다.
+
+
+## Task 6 execution evidence (2026-10-03)
+
+Task6 PASS: public schema2 dispatch·schema1 held 호환·공통 lock 보완·경쟁의 독립 QA 및 Reviewer CLEAR. CLI 생성 `supabase/migrations/20261003134201_guest_import_first_reset_public.sql`만 고정 새 disposable DB에 단일 transaction으로 적용했다. 기존 usage contribution writer는 account→planet lock을 이미 사용하며, 누락을 확인한 private journal get/upsert/delete 세 함수만 새 migration에서 account lock 우선으로 보완했다. 적용 전후 owner/security/search_path/ACL이 정확히 같다. 기존 public RPC service_role EXECUTE와 journal RPC 권한 패턴을 유지하고 private writer 접근을 확대하지 않았다.
+
+Expanded RED: public 27개 중 17 PASS/dispatch·common-lock·journal→active 미구현 10개 의도한 실패, explicit rollback/digest 동일. Final GREEN 및 독립 QA: public 27/27, 기존 schema1 native hold 15/15, 실제 public RPC 경쟁 4/4, 모두 exit0. Hold suite의 완료 marker만 추가해 이전 runner 연결 문제를 해결했다. Journal read/upsert/invalid rollback/delete/tombstone의 기존 DTO 동작을 검사했다.
+
+경쟁은 same-ID equal imported replay·다른 유효 payload conflict·다른 ID에서 imported 하나/active 하나·실제 `public.upsert_my_planet_state` 초기 usage가 먼저 성공한 경우 import active를 검증했다. winner receipt/payload 불변, usage profile·1-token current/lifetime 및 행수 보존, bootstrap 한 번만 저장을 확인했다. 실행별 synthetic UUID/application name·fixture SHA·정확한 local context/config/container/volume/port/identity를 확인하고 owned auth/receipt/game/session만 정리했다. SQL rollback 및 race cleanup 뒤 보호 데이터 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 동일/auth 0.
+
+명령: `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_public.sql`, `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_native_first_reset_hold.sql`, `bash supabase/tests/shop_guest_import_v2_race.sh`, `bash -n supabase/tests/shop_guest_import_v2_race.sh`, `git diff --check`. 증거: `/private/tmp/shop-import-v2-task6-public-{red-final,apply,green}.log`, `/private/tmp/shop-import-v2-task6-race-green.log`, `/private/tmp/shop-import-v2-task6-legacy-hold-green.log`, `/private/tmp/shop-import-v2-task6-qa-{public,hold,race}.log`. M_PUBLIC SHA256 `6bbece7deb9455ead9ebd25b329a5f6a0a89665e4d11c69f1b4ef39aa4810269`. 새 baseline history 28행은 유지하며 direct writer/public staging의 history repair는 하지 않았다. Task5 checkpoint `41dc8c0b1d942cc1778f1ddcf1dcdf2888eb2d3b`은 non-force push 완료다. Tasks7–10 native completion/worker/실제 API·공개 scene/통합 gate는 아직 완료하지 않았다.
