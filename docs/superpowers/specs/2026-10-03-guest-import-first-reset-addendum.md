@@ -1,6 +1,6 @@
 # 일반 게스트 첫 reset 가져오기 명세 추가안
 
-상태: written spec 및 실행 계획 승인 완료. Tasks1–4의 로컬 구현·독립 QA·Reviewer gate 완료. 후속 사용자 지시로 Tasks5–10을 순차 재개한다. 기존 disposable 환경이 없어 새 동일 프로젝트 환경 구축을 사용자가 승인했으며, 새 baseline에서 Tasks5–6 private writer/public dispatch·race의 QA/Reviewer gate를 통과했다. Tasks7–10 native/API/통합 gate는 아직 완료하지 않았다.
+상태: written spec 및 실행 계획 승인 완료. Tasks1–4의 로컬 구현·독립 QA·Reviewer gate 완료. 후속 사용자 지시로 Tasks5–10을 순차 재개한다. 기존 disposable 환경이 없어 새 동일 프로젝트 환경 구축을 사용자가 승인했으며, 새 baseline에서 Tasks5–6 private writer/public dispatch·race의 QA/Reviewer gate를 통과했다. Task7 native RPC/atomic completion의 QA/Reviewer gate도 통과했다. Tasks8–10 worker/API/통합 gate는 아직 완료하지 않았다.
 기준: PR #6, `feat/shop-system-revamp`, `f233b612773b8afda88528040bdd67886f9b0b06`.
 상위 명세: [상점 개편 명세](2026-10-01-shop-system-revamp.md) §8.2–8.4.
 관련 계획: [상점 개편 계획](../plans/2026-10-01-shop-system-revamp.md) Task8B–D.
@@ -470,3 +470,16 @@ Expanded RED: public 27개 중 17 PASS/dispatch·common-lock·journal→active �
 경쟁은 same-ID equal imported replay·다른 유효 payload conflict·다른 ID에서 imported 하나/active 하나·실제 `public.upsert_my_planet_state` 초기 usage가 먼저 성공한 경우 import active를 검증했다. winner receipt/payload 불변, usage profile·1-token current/lifetime 및 행수 보존, bootstrap 한 번만 저장을 확인했다. 실행별 synthetic UUID/application name·fixture SHA·정확한 local context/config/container/volume/port/identity를 확인하고 owned auth/receipt/game/session만 정리했다. SQL rollback 및 race cleanup 뒤 보호 데이터 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 동일/auth 0.
 
 명령: `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_public.sql`, `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_native_first_reset_hold.sql`, `bash supabase/tests/shop_guest_import_v2_race.sh`, `bash -n supabase/tests/shop_guest_import_v2_race.sh`, `git diff --check`. 증거: `/private/tmp/shop-import-v2-task6-public-{red-final,apply,green}.log`, `/private/tmp/shop-import-v2-task6-race-green.log`, `/private/tmp/shop-import-v2-task6-legacy-hold-green.log`, `/private/tmp/shop-import-v2-task6-qa-{public,hold,race}.log`. M_PUBLIC SHA256 `6bbece7deb9455ead9ebd25b329a5f6a0a89665e4d11c69f1b4ef39aa4810269`. 새 baseline history 28행은 유지하며 direct writer/public staging의 history repair는 하지 않았다. Task5 checkpoint `41dc8c0b1d942cc1778f1ddcf1dcdf2888eb2d3b`은 non-force push 완료다. Tasks7–10 native completion/worker/실제 API·공개 scene/통합 gate는 아직 완료하지 않았다.
+
+
+## Task 7 execution evidence (2026-10-04)
+
+Task7 PASS: typed native RPC와 atomic SQLite completion의 독립 QA 및 Reviewer CLEAR. 변경은 `sync/client.rs`, `storage/guest_shop_import_v2.rs`, `storage/planet_accounts.rs`, `storage/shop_effects.rs`다. Immutable request/same ID, strict raw JSON parser, account/import/source/cycle/version/prefix 및 정확한 journal ACK 집합을 검증한다. Journal generation/deletion/old-new cycle metadata는 captured state와 대조하며 timestamp는 UTC instant 동등성을 사용한다.
+
+Immediate transaction 안에서 selected auth account 재확인, cache/ownership/captured revision ACK/confirmed canonical baseline/phase/result를 저장하고 마지막 marker 뒤 단일 commit한다. Exact capture version을 유지하고 content-changing append는 그 이후 version으로 rebuild한다. Append raw/new revision은 보존하고 prefix만 ACK한다. Correction은 imported-with-hold로 저장하며 held response는 business state/ownership을 바꾸지 않는다. 실제 session selection routing과 worker는 Task8 범위다.
+
+TDD: timeline bare UUID 대조, append-only hold 분류, newer revision merge의 ACK 보존, captured version3 exact 실패/append version1 회귀, nested duplicate canonical_version 응답 허용, journal generation/deletion/cycle mismatch 허용을 각각 RED로 재현한 뒤 최소 수정했다. 실제 final-marker trigger 실패는 seed 3테이블을 포함한 전체 ordered row/schema snapshot 불변과 trigger만 제거한 동일 ID/result retry로 확인했다. Reopen/duplicate full state equality도 통과했다.
+
+최종 독립 QA: `CARGO_INCREMENTAL=0 cargo test --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib guest_import_v2 -- --nocapture` 102/102, exit0. Snapshot 보강 affected completion 9/9도 독립 QA 통과했다. Stable rustfmt check와 git diff check 통과. 증거: `/private/tmp/shop-import-v2-task7-qa-journal-metadata.log`, `shop-import-v2-task7-qa-expanded-snapshot.log`, `shop-import-v2-task7-canonical-{v2-runtime-red,append-red,baseline-green}.log`, `shop-import-v2-task7-duplicate-canonical-{red,green}.log`, `shop-import-v2-task7-journal-{generation-transport-red,generation-completion-red,metadata-matrix-red,metadata-combined}.log`. Reviewer의 canonical version seed/strict parser/journal metadata findings는 모두 해결됐고 최종 재검토 CLEAR다.
+
+반복 ENOSPC 동안 승인된 이 checkout Cargo generated target/incremental만 정리했고 자동 승인 writer-lock 실패를 우회하지 않았다. 이후 공간 복구 후 offline cached rebuild로 검증했다. DB reset/recreation/migration, hosted/live/deploy/merge, 설치/upgrade는 수행하지 않았다. 사용자 .DS_Store 삭제와 untracked landscape plan은 보존한다. Tasks8–10 worker/실제 API·공개 scene/통합 gate는 아직 완료하지 않았다. Task6 checkpoint `861c5a99474029517780a5d779d4e49e5270e5bb`은 non-force push 완료다.

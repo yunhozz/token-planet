@@ -8,10 +8,14 @@ use crate::domain::cosmetic_shop::{
     ShopEffectTimeline, ShopQuote, ShopRequest, ShopState,
 };
 use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
+use crate::domain::guest_shop_import::{
+    GuestImportStatus, GuestShopImportV2Request, GuestShopImportV2Result,
+};
 use crate::domain::planet::{
     PlanetDeviceContribution, PlanetDeviceContributionSnapshot, PlanetState, WorldPlanet,
 };
 use crate::sync::aggregate::DailyUsageSnapshot;
+use sha2::{Digest, Sha256};
 
 pub(crate) fn shared_http_client() -> Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
@@ -184,6 +188,37 @@ impl SupabaseSyncClient {
             },
         )
         .await
+    }
+
+    pub async fn import_guest_shop(
+        &self,
+        access_token: &str,
+        request: &GuestShopImportV2Request,
+    ) -> Result<GuestShopImportV2Result, SyncError> {
+        let response = self
+            .http
+            .post(format!("{}/rest/v1/rpc/import_guest_shop", self.base_url))
+            .header("apikey", &self.publishable_key)
+            .bearer_auth(access_token)
+            .json(&serde_json::json!({
+                "p_import_id": request.snapshot.import_id,
+                "p_request": request,
+            }))
+            .send()
+            .await
+            .map_err(|_| SyncError::Transport)?;
+        if !response.status().is_success() {
+            return Err(SyncError::Rejected(response.status().as_u16()));
+        }
+        let response_body = response
+            .text()
+            .await
+            .map_err(|_| SyncError::InvalidResponse)?;
+        let result =
+            crate::domain::guest_shop_import::parse_guest_shop_import_v2_result(&response_body)
+                .map_err(|_| SyncError::InvalidResponse)?;
+        validate_guest_shop_import_v2_result(request, &result)?;
+        Ok(result)
     }
 
     pub async fn my_planet_state(
@@ -583,6 +618,173 @@ impl SupabaseSyncClient {
     }
 }
 
+fn same_optional_utc_timestamp(left: Option<&str>, right: Option<&str>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => {
+            let Ok(left) = chrono::DateTime::parse_from_rfc3339(left) else {
+                return false;
+            };
+            let Ok(right) = chrono::DateTime::parse_from_rfc3339(right) else {
+                return false;
+            };
+            left.with_timezone(&chrono::Utc) == right.with_timezone(&chrono::Utc)
+        }
+        _ => false,
+    }
+}
+
+fn journal_metadata_matches_capture(
+    snapshot: &crate::domain::guest_shop_import::GuestShopImportV2Snapshot,
+    journal: &crate::domain::growth_journal::GrowthJournal,
+) -> bool {
+    let captured_state = snapshot.data.growth_journal_state.as_ref();
+    let expected_generation = captured_state.map_or(0, |state| state.generation);
+    let expected_deleted_at = captured_state.and_then(|state| state.deleted_at_utc.as_deref());
+    let state_matches = journal.generation == expected_generation
+        && same_optional_utc_timestamp(journal.deleted_at_utc.as_deref(), expected_deleted_at);
+
+    let cycles_match = journal.cycles.len() == snapshot.data.growth_journal_cycles.len()
+        && snapshot.data.growth_journal_cycles.iter().all(|captured| {
+            journal
+                .cycles
+                .iter()
+                .filter(|returned| {
+                    returned.cycle_id == captured.cycle_id
+                        && same_optional_utc_timestamp(
+                            returned.started_at_utc.as_deref(),
+                            captured.started_at_utc.as_deref(),
+                        )
+                        && same_optional_utc_timestamp(
+                            returned.ended_at_utc.as_deref(),
+                            captured.ended_at_utc.as_deref(),
+                        )
+                        && returned.wallet_credit == captured.wallet_credit
+                        && same_optional_utc_timestamp(
+                            returned.wallet_credit_at_utc.as_deref(),
+                            captured.wallet_credit_at_utc.as_deref(),
+                        )
+                })
+                .count()
+                == 1
+        });
+
+    state_matches && cycles_match
+}
+
+pub(crate) fn validate_guest_shop_import_v2_result(
+    request: &GuestShopImportV2Request,
+    result: &GuestShopImportV2Result,
+) -> Result<(), SyncError> {
+    let snapshot = &request.snapshot;
+    if result.schema_version != 2
+        || result.import_id != snapshot.import_id
+        || result.account_id != snapshot.target_account_id
+        || result.source_fingerprint != snapshot.source_fingerprint
+        || result.validate_wire_shape().is_err()
+    {
+        return Err(SyncError::InvalidResponse);
+    }
+
+    if result.status != GuestImportStatus::Imported {
+        return Ok(());
+    }
+
+    let shop = result
+        .shop_state
+        .as_ref()
+        .ok_or(SyncError::InvalidResponse)?;
+    let planet = result
+        .planet_state
+        .as_ref()
+        .ok_or(SyncError::InvalidResponse)?;
+    let timeline = result
+        .effect_timeline
+        .as_ref()
+        .ok_or(SyncError::InvalidResponse)?;
+    let canonical = result
+        .canonical_contribution
+        .as_ref()
+        .ok_or(SyncError::InvalidResponse)?;
+    let journal = result
+        .journal_confirmation
+        .as_ref()
+        .ok_or(SyncError::InvalidResponse)?;
+    let ack = result.ack.as_ref().ok_or(SyncError::InvalidResponse)?;
+    let expected_cycle = &snapshot.provenance.reset_receipt.result.new_cycle_id;
+
+    let canonical_bytes = crate::domain::guest_shop_import::canonical_json_bytes(canonical)
+        .map_err(|_| SyncError::InvalidResponse)?;
+    let canonical_fingerprint = Sha256::digest(canonical_bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+
+    let ack_matches_captured_journal = ack.journal_entries.len()
+        == snapshot.data.growth_journal_entries.len()
+        && snapshot.data.growth_journal_entries.iter().all(|captured| {
+            let captured_agent = match captured.agent.as_str() {
+                "codex" => crate::domain::usage::Agent::Codex,
+                "claude_code" => crate::domain::usage::Agent::ClaudeCode,
+                _ => return false,
+            };
+            ack.journal_entries
+                .iter()
+                .filter(|ack_entry| {
+                    let key = &ack_entry.logical_key;
+                    key.device_id == captured.device_id
+                        && key.cycle_id == captured.cycle_id
+                        && key.bucket_date == captured.bucket_date
+                        && key.agent == captured_agent
+                        && key.generation == captured.generation
+                        && ack_entry.revision == captured.revision
+                        && ack_entry.payload_hash == captured.payload_hash
+                })
+                .count()
+                == 1
+        });
+    let ack_matches_journal_confirmation = ack.journal_entries.iter().all(|ack_entry| {
+        journal
+            .entries
+            .iter()
+            .filter(|entry| {
+                entry.device_id == ack_entry.logical_key.device_id
+                    && entry.cycle_id == ack_entry.logical_key.cycle_id
+                    && entry.bucket_date == ack_entry.logical_key.bucket_date
+                    && entry.agent == ack_entry.logical_key.agent
+                    && entry.generation == ack_entry.logical_key.generation
+                    && entry.revision == ack_entry.revision
+                    && entry.payload_hash == ack_entry.payload_hash
+            })
+            .count()
+            == 1
+    });
+
+    if shop.account_id != snapshot.target_account_id
+        || shop.current_cycle_id != *expected_cycle
+        || planet.current_cycle_id != *expected_cycle
+        || Some(timeline.account_id.as_str()) != snapshot.target_account_id.strip_prefix("account:")
+        || timeline.current_cycle_id != *expected_cycle
+        || canonical.raw.device_id != snapshot.provenance.device_id
+        || canonical.raw.current_cycle_id != *expected_cycle
+        || canonical != &snapshot.canonical_payload
+        || canonical.canonical_version != ack.canonical_version
+        || ack.lineage_id != snapshot.provenance.lineage_id
+        || ack.device_id != snapshot.provenance.device_id
+        || ack.ingest_watermark != snapshot.provenance.ingest_watermark
+        || ack.occurrence_count != snapshot.provenance.occurrence_count
+        || ack.prefix_fingerprint != snapshot.provenance.prefix_fingerprint
+        || ack.canonical_payload_fingerprint != canonical_fingerprint
+        || !ack_matches_captured_journal
+        || !ack_matches_journal_confirmation
+        || !journal_metadata_matches_capture(snapshot, journal)
+    {
+        return Err(SyncError::InvalidResponse);
+    }
+
+    Ok(())
+}
+
 fn one_row<T>(mut rows: Vec<T>) -> Result<T, SyncError> {
     if rows.len() != 1 {
         return Err(SyncError::InvalidResponse);
@@ -603,6 +805,7 @@ mod tests {
         GuestCosmeticPurchase, QuoteTarget, ResetShopResult, RewardState, ShopActionResult,
         ShopActionStatus, ShopEffectTimeline, ShopQuote, ShopRequest, ShopState,
     };
+    use crate::domain::guest_shop_import::{GuestImportStatus, GuestShopImportV2Request};
     use crate::domain::planet::{
         PlanetActivityDayContribution, PlanetAvatar, PlanetDeviceContribution,
         PlanetDeviceContributionSnapshot, PlanetEffectContributionSegment, PlanetProfile,
@@ -719,6 +922,385 @@ mod tests {
             .build()
             .unwrap()
             .block_on(future)
+    }
+
+    fn guest_import_v2_transport_request() -> GuestShopImportV2Request {
+        serde_json::from_str(include_str!(
+            "../../../../../supabase/tests/fixtures/shop_guest_import_v2_first_reset.json"
+        ))
+        .unwrap()
+    }
+
+    fn guest_import_v2_held_response(
+        request: &GuestShopImportV2Request,
+        status: &str,
+    ) -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 2,
+            "import_id": request.snapshot.import_id,
+            "account_id": request.snapshot.target_account_id,
+            "source_fingerprint": request.snapshot.source_fingerprint,
+            "status": status,
+        })
+    }
+
+    fn run_guest_import_v2_transport(
+        request: &GuestShopImportV2Request,
+        response: MockResponse,
+    ) -> (
+        Result<crate::domain::guest_shop_import::GuestShopImportV2Result, SyncError>,
+        CapturedRequest,
+    ) {
+        let (url, server) = spawn_rpc_server(response);
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+        let result = run_async(client.import_guest_shop("access-token", request));
+        (result, server.join().unwrap())
+    }
+
+    #[test]
+    fn guest_import_v2_transport_posts_exact_immutable_request_with_bearer_auth() {
+        let request = guest_import_v2_transport_request();
+        let original = request.clone();
+        let held = guest_import_v2_held_response(&request, "source_unverifiable").to_string();
+        let (url, server) = spawn_rpc_sequence(vec![
+            MockResponse::Json(200, held.clone()),
+            MockResponse::Json(200, held),
+        ]);
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+
+        for _ in 0..2 {
+            let result = run_async(client.import_guest_shop("access-token", &request)).unwrap();
+            assert_eq!(result.status, GuestImportStatus::SourceUnverifiable);
+        }
+
+        let captured = server.join().unwrap();
+        assert_eq!(captured.len(), 2);
+        for call in captured {
+            assert_eq!(call.method, "POST");
+            assert_eq!(call.path, "/rest/v1/rpc/import_guest_shop");
+            assert_eq!(call.headers.get("apikey").unwrap(), "publishable-key");
+            assert_eq!(
+                call.headers.get("authorization").unwrap(),
+                "Bearer access-token"
+            );
+            assert_eq!(
+                call.body,
+                serde_json::json!({
+                    "p_import_id": original.snapshot.import_id,
+                    "p_request": original,
+                })
+            );
+        }
+        assert_eq!(request, original);
+    }
+
+    #[test]
+    fn guest_import_v2_transport_rejects_old_backend_auth_and_truncated_responses() {
+        let request = guest_import_v2_transport_request();
+        let old_backend = serde_json::json!({
+            "import_id": request.snapshot.import_id,
+            "status": "source_unverifiable",
+        });
+        let (result, _) = run_guest_import_v2_transport(
+            &request,
+            MockResponse::Json(200, old_backend.to_string()),
+        );
+        assert!(matches!(result, Err(SyncError::InvalidResponse)));
+
+        let (result, _) =
+            run_guest_import_v2_transport(&request, MockResponse::Json(401, "unauthorized".into()));
+        assert!(matches!(result, Err(SyncError::Rejected(401))));
+
+        let (result, _) = run_guest_import_v2_transport(
+            &request,
+            MockResponse::Json(200, "{\"schema_version\":".into()),
+        );
+        assert!(matches!(result, Err(SyncError::InvalidResponse)));
+    }
+
+    #[test]
+    fn guest_import_v2_transport_rejects_wrong_typed_correlation_and_result_shape() {
+        let request = guest_import_v2_transport_request();
+        let fields = [
+            ("schema_version", serde_json::json!(1)),
+            (
+                "import_id",
+                serde_json::json!("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"),
+            ),
+            (
+                "account_id",
+                serde_json::json!("account:00000000-0000-4000-a000-000000000099"),
+            ),
+            ("source_fingerprint", serde_json::json!("0".repeat(64))),
+        ];
+        for (field, value) in fields {
+            let mut response = guest_import_v2_held_response(&request, "source_unverifiable");
+            response[field] = value;
+            let (result, _) = run_guest_import_v2_transport(
+                &request,
+                MockResponse::Json(200, response.to_string()),
+            );
+            assert!(
+                matches!(result, Err(SyncError::InvalidResponse)),
+                "field {field}"
+            );
+        }
+
+        let mut missing_ack = guest_import_v2_held_response(&request, "imported");
+        let (result, _) = run_guest_import_v2_transport(
+            &request,
+            MockResponse::Json(200, missing_ack.to_string()),
+        );
+        assert!(matches!(result, Err(SyncError::InvalidResponse)));
+
+        missing_ack = guest_import_v2_held_response(&request, "active_account");
+        missing_ack["shop_state"] = serde_json::to_value(empty_shop_state()).unwrap();
+        let (result, _) = run_guest_import_v2_transport(
+            &request,
+            MockResponse::Json(200, missing_ack.to_string()),
+        );
+        assert!(matches!(result, Err(SyncError::InvalidResponse)));
+    }
+
+    fn valid_imported_v2_transport_response(
+        request: &GuestShopImportV2Request,
+    ) -> serde_json::Value {
+        serde_json::to_value(
+            crate::storage::guest_shop_import_v2::guest_import_v2_capture_tests::
+                imported_result_for(request),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn guest_import_v2_transport_accepts_valid_imported_result() {
+        let request = guest_import_v2_transport_request();
+        let response = valid_imported_v2_transport_response(&request);
+        let (result, captured) =
+            run_guest_import_v2_transport(&request, MockResponse::Json(200, response.to_string()));
+
+        let result = result.expect("a correlated imported result should pass transport validation");
+        assert_eq!(result.status, GuestImportStatus::Imported);
+        assert_eq!(result.import_id, request.snapshot.import_id);
+        assert_eq!(result.account_id, request.snapshot.target_account_id);
+        assert_eq!(captured.method, "POST");
+        assert_eq!(captured.path, "/rest/v1/rpc/import_guest_shop");
+        assert_eq!(captured.body["p_import_id"], request.snapshot.import_id);
+        assert_eq!(
+            captured.body["p_request"],
+            serde_json::to_value(request).unwrap()
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_transport_rejects_duplicate_nested_canonical_version() {
+        let request = guest_import_v2_transport_request();
+        let valid_response = valid_imported_v2_transport_response(&request);
+        let mut raw_response = valid_response.to_string();
+        let canonical_object_start = raw_response
+            .find("\"canonical_contribution\":{")
+            .expect("canonical contribution object is serialized");
+        let canonical_version_start = canonical_object_start
+            + raw_response[canonical_object_start..]
+                .find("\"canonical_version\":")
+                .expect("canonical version is serialized");
+        let value_start = canonical_version_start
+            + raw_response[canonical_version_start..]
+                .find(':')
+                .expect("canonical version has a value")
+            + 1;
+        let value_end = value_start
+            + raw_response[value_start..]
+                .find(|character| character == ',' || character == '}')
+                .expect("canonical version value ends before the next field");
+        let valid_version = raw_response[value_start..value_end].to_owned();
+        assert_ne!(valid_version, "0");
+        raw_response.replace_range(
+            value_start..value_end,
+            &format!("0,\"canonical_version\":{valid_version}"),
+        );
+
+        let (result, _) =
+            run_guest_import_v2_transport(&request, MockResponse::Json(200, raw_response));
+
+        assert!(matches!(result, Err(SyncError::InvalidResponse)));
+    }
+
+    #[test]
+    fn guest_import_v2_transport_rejects_imported_cycle_version_ack_and_correlation_mismatches() {
+        let request = guest_import_v2_transport_request();
+        let valid_response = valid_imported_v2_transport_response(&request);
+        let mut wrong_cycle = valid_response.clone();
+        wrong_cycle["effect_timeline"]["current_cycle_id"] =
+            serde_json::json!("00000000-0000-4000-a000-000000000099");
+        let mut wrong_version = valid_response.clone();
+        wrong_version["schema_version"] = serde_json::json!(1);
+        let mut wrong_correlation = valid_response.clone();
+        wrong_correlation["account_id"] =
+            serde_json::json!("account:00000000-0000-4000-a000-000000000099");
+        let captured_journal_state = request.snapshot.data.growth_journal_state.as_ref();
+        let mut wrong_journal_generation = valid_response.clone();
+        wrong_journal_generation["journal_confirmation"]["generation"] =
+            serde_json::json!(captured_journal_state.map_or(0, |state| state.generation) + 1);
+        let mut unexpected_journal_deletion = valid_response.clone();
+        unexpected_journal_deletion["journal_confirmation"]["deleted_at_utc"] =
+            serde_json::json!("2026-10-03T05:26:26.000000Z");
+        let expected_new_cycle = &request
+            .snapshot
+            .provenance
+            .reset_receipt
+            .result
+            .new_cycle_id;
+        let journal_cycles = valid_response["journal_confirmation"]["cycles"]
+            .as_array()
+            .unwrap();
+        let old_cycle_index = journal_cycles
+            .iter()
+            .position(|cycle| cycle["cycle_id"] != *expected_new_cycle)
+            .expect("first-reset fixture contains a prior cycle");
+        let new_cycle_index = journal_cycles
+            .iter()
+            .position(|cycle| cycle["cycle_id"] == *expected_new_cycle)
+            .expect("first-reset fixture contains a new cycle");
+        let mut missing_old_cycle = valid_response.clone();
+        missing_old_cycle["journal_confirmation"]["cycles"]
+            .as_array_mut()
+            .unwrap()
+            .remove(old_cycle_index);
+        let mut missing_new_cycle = valid_response.clone();
+        missing_new_cycle["journal_confirmation"]["cycles"]
+            .as_array_mut()
+            .unwrap()
+            .remove(new_cycle_index);
+        let mut extra_cycle = valid_response.clone();
+        let mut extra_cycle_metadata = journal_cycles[old_cycle_index].clone();
+        extra_cycle_metadata["cycle_id"] =
+            serde_json::json!("00000000-0000-4000-a000-000000000099");
+        extra_cycle["journal_confirmation"]["cycles"]
+            .as_array_mut()
+            .unwrap()
+            .push(extra_cycle_metadata);
+        let mut changed_old_cycle = valid_response.clone();
+        changed_old_cycle["journal_confirmation"]["cycles"][old_cycle_index]["wallet_credit"] =
+            serde_json::json!(1);
+        let mut changed_new_cycle = valid_response.clone();
+        let current_start = chrono::DateTime::parse_from_rfc3339(
+            journal_cycles[new_cycle_index]["started_at_utc"]
+                .as_str()
+                .expect("new cycle has a start timestamp"),
+        )
+        .unwrap()
+            + chrono::Duration::seconds(1);
+        changed_new_cycle["journal_confirmation"]["cycles"][new_cycle_index]["started_at_utc"] =
+            serde_json::json!(current_start.to_rfc3339_opts(chrono::SecondsFormat::Micros, true));
+        let mut equivalent_utc_journal_timestamps = valid_response.clone();
+        for cycle in equivalent_utc_journal_timestamps["journal_confirmation"]["cycles"]
+            .as_array_mut()
+            .unwrap()
+        {
+            for key in ["started_at_utc", "ended_at_utc", "wallet_credit_at_utc"] {
+                if let Some(timestamp) = cycle[key].as_str() {
+                    let utc = chrono::DateTime::parse_from_rfc3339(timestamp)
+                        .unwrap()
+                        .with_timezone(&chrono::Utc)
+                        .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+                    cycle[key] = serde_json::json!(utc);
+                }
+            }
+        }
+        let captured_ack_entry = valid_response["ack"]["journal_entries"]
+            .as_array()
+            .unwrap()
+            .first()
+            .unwrap()
+            .clone();
+        let mut missing_ack = valid_response.clone();
+        missing_ack.as_object_mut().unwrap().remove("ack");
+        let mut missing_captured_journal_ack = valid_response.clone();
+        missing_captured_journal_ack["ack"]["journal_entries"] = serde_json::json!([]);
+        let mut duplicate_ack = valid_response.clone();
+        duplicate_ack["ack"]["journal_entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(captured_ack_entry.clone());
+        let mut extra_ack = valid_response.clone();
+        let mut extra_entry = captured_ack_entry.clone();
+        extra_entry["logical_key"]["cycle_id"] =
+            serde_json::json!("00000000-0000-4000-a000-000000000099");
+        extra_ack["ack"]["journal_entries"]
+            .as_array_mut()
+            .unwrap()
+            .push(extra_entry);
+        let mut wrong_ack_revision = valid_response.clone();
+        wrong_ack_revision["ack"]["journal_entries"][0]["revision"] = serde_json::json!(2);
+        let mut unmatched_confirmation = valid_response;
+        unmatched_confirmation["journal_confirmation"]["entries"][0]["payload_hash"] =
+            serde_json::json!("0".repeat(64));
+
+        let cases = [
+            ("cycle", wrong_cycle, false),
+            ("schema version", wrong_version, false),
+            ("account correlation", wrong_correlation, false),
+            (
+                "journal confirmation generation",
+                wrong_journal_generation,
+                false,
+            ),
+            (
+                "unexpected journal deletion",
+                unexpected_journal_deletion,
+                false,
+            ),
+            ("missing old journal cycle", missing_old_cycle, false),
+            ("missing new journal cycle", missing_new_cycle, false),
+            ("extra journal cycle", extra_cycle, false),
+            ("changed old journal cycle", changed_old_cycle, false),
+            ("changed new journal cycle", changed_new_cycle, false),
+            (
+                "equivalent UTC journal timestamps",
+                equivalent_utc_journal_timestamps,
+                true,
+            ),
+            ("ACK object", missing_ack, false),
+            (
+                "captured journal ACK entry",
+                missing_captured_journal_ack,
+                false,
+            ),
+            ("duplicate captured journal ACK entry", duplicate_ack, false),
+            ("extra journal ACK entry", extra_ack, false),
+            ("captured journal ACK revision", wrong_ack_revision, false),
+            ("journal confirmation entry", unmatched_confirmation, false),
+        ];
+        let outcomes = cases
+            .iter()
+            .map(|(case, response, should_succeed)| {
+                let (result, _) = run_guest_import_v2_transport(
+                    &request,
+                    MockResponse::Json(200, response.to_string()),
+                );
+                (*case, result.is_ok(), *should_succeed)
+            })
+            .collect::<Vec<_>>();
+        let mismatches = outcomes
+            .iter()
+            .filter(|(_, actual, expected)| actual != expected)
+            .collect::<Vec<_>>();
+        assert!(
+            mismatches.is_empty(),
+            "unexpected imported journal validation outcomes: {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_transport_rejects_held_status_with_imported_success_fields() {
+        let request = guest_import_v2_transport_request();
+        let mut response = valid_imported_v2_transport_response(&request);
+        response["status"] = serde_json::json!("source_unverifiable");
+        let (result, _) =
+            run_guest_import_v2_transport(&request, MockResponse::Json(200, response.to_string()));
+
+        assert!(matches!(result, Err(SyncError::InvalidResponse)));
     }
 
     fn empty_shop_state() -> ShopState {

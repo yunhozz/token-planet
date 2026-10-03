@@ -16,6 +16,24 @@ struct SavedPlanet {
 }
 
 impl Ledger {
+    /// Records the account selected by the authenticated session independently of
+    /// `planet_account_id`, which remains `local` while a guest import is pending.
+    pub fn set_selected_auth_account(&mut self, account_id: &str) -> Result<(), ScanError> {
+        let uuid = account_id
+            .strip_prefix("account:")
+            .ok_or(ScanError::InvalidShopState)?;
+        let canonical = uuid::Uuid::parse_str(uuid).map_err(|_| ScanError::InvalidShopState)?;
+        if format!("account:{canonical}") != account_id {
+            return Err(ScanError::InvalidShopState);
+        }
+        self.connection.execute(
+            "INSERT INTO setting(key,value) VALUES ('selected_auth_account_id',?1)
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            [account_id],
+        )?;
+        Ok(())
+    }
+
     pub(crate) fn initialize_planet_accounts(&mut self) -> Result<(), ScanError> {
         let tx = self.connection.transaction()?;
         tx.execute_batch(

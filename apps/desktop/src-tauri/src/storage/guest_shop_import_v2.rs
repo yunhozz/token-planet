@@ -16,6 +16,13 @@ use crate::domain::{
     usage::Agent,
 };
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GuestImportCompletion {
+    Imported,
+    ImportedWithCorrectionHold,
+    Held,
+}
+
 use super::{
     ledger::{Ledger, ScanError},
     shop_import,
@@ -491,6 +498,559 @@ pub(super) fn capture_guest_shop_import_request(
         phase: parse_capture_phase(initial_phase)?,
         correction_hold: false,
     }))
+}
+
+impl Ledger {
+    /// Persists the attempt boundary before the immutable captured request is dispatched.
+    pub fn mark_guest_shop_import_attempt_started(
+        &mut self,
+        target_account_id: &str,
+        import_id: uuid::Uuid,
+    ) -> Result<(), ScanError> {
+        shop_import::validate_target_account(target_account_id)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let selected_account: Option<String> = transaction
+            .query_row(
+                "SELECT value FROM setting WHERE key='selected_auth_account_id'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if selected_account.as_deref() != Some(target_account_id) {
+            return Err(ScanError::InvalidShopState);
+        }
+        let stored: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT import_id,phase FROM guest_shop_import_v2_capture
+                 WHERE target_account_id=?1",
+                [target_account_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((stored_import_id, phase)) = stored else {
+            return Err(ScanError::InvalidShopState);
+        };
+        if stored_import_id != import_id.to_string() {
+            return Err(ScanError::InvalidShopState);
+        }
+        match parse_capture_phase(&phase)? {
+            GuestImportPhase::Captured => {
+                transaction.execute(
+                    "UPDATE guest_shop_import_v2_capture SET phase='attempt_started'
+                     WHERE target_account_id=?1 AND import_id=?2 AND phase='captured'",
+                    params![target_account_id, import_id.to_string()],
+                )?;
+            }
+            GuestImportPhase::AttemptStarted => {}
+            GuestImportPhase::Held | GuestImportPhase::Imported => {
+                return Err(ScanError::InvalidShopState);
+            }
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn complete_guest_shop_import(
+        &mut self,
+        target_account_id: &str,
+        result: &crate::domain::guest_shop_import::GuestShopImportV2Result,
+    ) -> Result<GuestImportCompletion, ScanError> {
+        shop_import::validate_target_account(target_account_id)?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        ensure_source_manifest_column(&transaction)?;
+        let columns = {
+            let mut statement =
+                transaction.prepare("PRAGMA table_info(guest_shop_import_v2_capture)")?;
+            let rows = statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        if !columns.iter().any(|column| column == "result_json") {
+            transaction.execute(
+                "ALTER TABLE guest_shop_import_v2_capture ADD COLUMN result_json TEXT",
+                [],
+            )?;
+        }
+
+        let selected_account: Option<String> = transaction
+            .query_row(
+                "SELECT value FROM setting WHERE key='selected_auth_account_id'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if selected_account.as_deref() != Some(target_account_id) {
+            transaction.rollback()?;
+            return Ok(GuestImportCompletion::Held);
+        }
+
+        let stored: Option<(
+            String,
+            String,
+            String,
+            String,
+            i64,
+            Option<String>,
+            Option<String>,
+        )> = transaction
+            .query_row(
+                "SELECT import_id,source_fingerprint,request_json,phase,correction_hold,
+                        source_manifest_json,result_json
+                 FROM guest_shop_import_v2_capture WHERE target_account_id=?1",
+                [target_account_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                        row.get(5)?,
+                        row.get(6)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((import_id, fingerprint, request_json, phase, held, manifest, stored_result)) =
+            stored
+        else {
+            return Err(ScanError::InvalidShopState);
+        };
+        let request: GuestShopImportV2Request =
+            serde_json::from_str(&request_json).map_err(|_| ScanError::InvalidShopState)?;
+        validate_stored_request(
+            &request,
+            &import_id,
+            target_account_id,
+            &fingerprint,
+            &request_json,
+        )?;
+        crate::sync::client::validate_guest_shop_import_v2_result(&request, result)
+            .map_err(|_| ScanError::InvalidShopState)?;
+        let phase = parse_capture_phase(&phase)?;
+        let held = match held {
+            0 => false,
+            1 => true,
+            _ => return Err(ScanError::InvalidShopState),
+        };
+        let result_json = String::from_utf8(
+            canonical_json_bytes(result).map_err(|_| ScanError::InvalidShopState)?,
+        )
+        .map_err(|_| ScanError::InvalidShopState)?;
+
+        if phase == GuestImportPhase::Imported {
+            if stored_result.as_deref() != Some(result_json.as_str()) {
+                return Err(ScanError::InvalidShopState);
+            }
+            transaction.rollback()?;
+            return Ok(if held {
+                GuestImportCompletion::ImportedWithCorrectionHold
+            } else {
+                GuestImportCompletion::Imported
+            });
+        }
+        if phase != GuestImportPhase::AttemptStarted {
+            return Err(ScanError::InvalidShopState);
+        }
+
+        if result.status != crate::domain::guest_shop_import::GuestImportStatus::Imported {
+            transaction.execute(
+                "UPDATE guest_shop_import_v2_capture
+                 SET phase='held',correction_hold=1
+                 WHERE target_account_id=?1 AND import_id=?2",
+                params![target_account_id, import_id],
+            )?;
+            transaction.commit()?;
+            return Ok(GuestImportCompletion::Held);
+        }
+        let shop_state = result
+            .shop_state
+            .as_ref()
+            .ok_or(ScanError::InvalidShopState)?;
+        let planet_state = result
+            .planet_state
+            .as_ref()
+            .ok_or(ScanError::InvalidShopState)?;
+        let timeline = result
+            .effect_timeline
+            .as_ref()
+            .ok_or(ScanError::InvalidShopState)?;
+        let canonical = result
+            .canonical_contribution
+            .as_ref()
+            .ok_or(ScanError::InvalidShopState)?;
+        let journal = result
+            .journal_confirmation
+            .as_ref()
+            .ok_or(ScanError::InvalidShopState)?;
+        let ack = result.ack.as_ref().ok_or(ScanError::InvalidShopState)?;
+
+        let active_account: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_account_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if active_account != "local" && active_account != target_account_id {
+            return Err(ScanError::InvalidShopState);
+        }
+        let source_relation =
+            classify_source_relation(&transaction, &request, manifest.as_deref())?;
+        let correction_hold = held
+            || matches!(
+                source_relation,
+                GuestImportSourceRelation::CapturedPrefixChanged
+                    | GuestImportSourceRelation::Unverifiable
+            );
+
+        let current_settings = {
+            let mut statement = transaction.prepare(
+                "SELECT key,value FROM setting WHERE key GLOB 'planet_*'
+                 AND key<>'planet_account_id' ORDER BY key",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })?
+                .collect::<Result<BTreeMap<_, _>, _>>()?;
+            rows
+        };
+        let current_objects = {
+            let mut statement = transaction.prepare(
+                "SELECT stage,ordinal,kind,x,y,seed FROM planet_object ORDER BY stage,ordinal",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "stage": row.get::<_, u8>(0)?,
+                        "ordinal": row.get::<_, u32>(1)?,
+                        "kind": row.get::<_, String>(2)?,
+                        "x": row.get::<_, u8>(3)?,
+                        "y": row.get::<_, u8>(4)?,
+                        "seed": row.get::<_, String>(5)?.parse::<u64>().map_err(|_| rusqlite::Error::InvalidQuery)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let current_wallet_credits = {
+            let mut statement = transaction.prepare(
+                "SELECT previous_cycle_id,amount,created_at_utc FROM planet_wallet_credit
+                 ORDER BY previous_cycle_id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(serde_json::json!({
+                        "previous_cycle_id": row.get::<_, String>(0)?,
+                        "amount": u64::try_from(row.get::<_, i64>(1)?).map_err(|_| rusqlite::Error::InvalidQuery)?,
+                        "created_at_utc": row.get::<_, String>(2)?,
+                    }))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let local_planet_json = serde_json::to_string(&serde_json::json!({
+            "settings": current_settings,
+            "objects": current_objects,
+            "wallet_credits": current_wallet_credits,
+        }))
+        .map_err(|_| ScanError::Database)?;
+        transaction.execute(
+            "INSERT INTO planet_account_state(account_id,state_json) VALUES ('local',?1)
+             ON CONFLICT(account_id) DO UPDATE SET state_json=excluded.state_json",
+            [&local_planet_json],
+        )?;
+
+        let profile = planet_state
+            .profile
+            .as_ref()
+            .ok_or(ScanError::InvalidProfile)?;
+        let avatar = match profile.avatar {
+            crate::domain::planet::PlanetAvatar::Masculine => "masculine",
+            crate::domain::planet::PlanetAvatar::Feminine => "feminine",
+        };
+        let mut target_settings = current_settings;
+        for (key, value) in [
+            ("planet_nickname", profile.nickname.clone()),
+            ("planet_avatar", avatar.to_owned()),
+            ("planet_timezone", planet_state.timezone.clone()),
+            (
+                "planet_current_cycle_id",
+                planet_state.current_cycle_id.clone(),
+            ),
+            (
+                "planet_cycle_started_at_utc",
+                planet_state.cycle_started_at_utc.clone(),
+            ),
+            (
+                "planet_remote_cycle_id",
+                planet_state.current_cycle_id.clone(),
+            ),
+            (
+                "planet_remote_current_tokens",
+                planet_state.current_planet_tokens.to_string(),
+            ),
+            (
+                "planet_remote_lifetime_tokens",
+                planet_state.lifetime_tokens.to_string(),
+            ),
+            (
+                "planet_remote_growth_credit",
+                planet_state.growth_credit.to_string(),
+            ),
+            (
+                "planet_remote_incomplete",
+                planet_state.incomplete.to_string(),
+            ),
+        ] {
+            target_settings.insert(key.to_owned(), value);
+        }
+        if let Some(last_reset) = &planet_state.last_reset_at_utc {
+            target_settings.insert("planet_last_reset_at_utc".into(), last_reset.clone());
+        }
+        if let Some(reset_available) = &planet_state.reset_available_at_utc {
+            target_settings.insert(
+                "planet_reset_available_at_utc".into(),
+                reset_available.clone(),
+            );
+        }
+        let target_planet_json = serde_json::to_string(&serde_json::json!({
+            "settings": target_settings,
+            "objects": planet_state.objects,
+            "wallet_credits": planet_state.wallet_credits,
+        }))
+        .map_err(|_| ScanError::Database)?;
+        transaction.execute(
+            "INSERT INTO planet_account_state(account_id,state_json) VALUES (?1,?2)
+             ON CONFLICT(account_id) DO UPDATE SET state_json=excluded.state_json",
+            params![target_account_id, target_planet_json],
+        )?;
+        transaction.execute(
+            "DELETE FROM setting WHERE key GLOB 'planet_*' AND key<>'planet_account_id'",
+            [],
+        )?;
+        for (key, value) in &target_settings {
+            transaction.execute(
+                "INSERT INTO setting(key,value) VALUES (?1,?2)",
+                params![key, value],
+            )?;
+        }
+        transaction.execute("DELETE FROM planet_object", [])?;
+        for object in &planet_state.objects {
+            transaction.execute(
+                "INSERT INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed)
+                 VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    planet_state.current_cycle_id,
+                    object.stage,
+                    object.ordinal,
+                    object.kind,
+                    object.x,
+                    object.y,
+                    object.seed.to_string(),
+                ],
+            )?;
+        }
+        transaction.execute("DELETE FROM planet_wallet_credit", [])?;
+        for credit in &planet_state.wallet_credits {
+            transaction.execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+                 VALUES (?1,?2,?3)",
+                params![
+                    credit.previous_cycle_id,
+                    i64::try_from(credit.amount).map_err(|_| ScanError::InvalidCount)?,
+                    credit.created_at_utc,
+                ],
+            )?;
+        }
+        transaction.execute(
+            "UPDATE planet_usage_owner SET account_id=?1 WHERE account_id='local'",
+            [target_account_id],
+        )?;
+        transaction.execute(
+            "UPDATE setting SET value=?1 WHERE key='planet_account_id'",
+            [target_account_id],
+        )?;
+
+        transaction.execute(
+            "INSERT INTO growth_journal_state(account_id,generation,deleted_at_utc)
+             VALUES (?1,?2,?3) ON CONFLICT(account_id) DO UPDATE SET
+             generation=excluded.generation,deleted_at_utc=excluded.deleted_at_utc",
+            params![
+                target_account_id,
+                i64::try_from(journal.generation).map_err(|_| ScanError::InvalidCount)?,
+                journal.deleted_at_utc,
+            ],
+        )?;
+        for cycle in &journal.cycles {
+            transaction.execute(
+                "INSERT INTO growth_journal_cycle(account_id,cycle_id,started_at_utc,ended_at_utc,
+                 wallet_credit,wallet_credit_at_utc) VALUES (?1,?2,?3,?4,?5,?6)
+                 ON CONFLICT(account_id,cycle_id) DO UPDATE SET
+                 started_at_utc=excluded.started_at_utc,ended_at_utc=excluded.ended_at_utc,
+                 wallet_credit=excluded.wallet_credit,wallet_credit_at_utc=excluded.wallet_credit_at_utc",
+                params![
+                    target_account_id,
+                    cycle.cycle_id,
+                    cycle.started_at_utc,
+                    cycle.ended_at_utc,
+                    cycle.wallet_credit.map(i64::try_from).transpose().map_err(|_| ScanError::InvalidCount)?,
+                    cycle.wallet_credit_at_utc,
+                ],
+            )?;
+        }
+        for entry in &journal.entries {
+            if entry.payload_hash != entry.compute_hash() {
+                return Err(ScanError::InvalidShopState);
+            }
+            transaction.execute(
+                "INSERT INTO growth_journal_entry(account_id,device_id,cycle_id,bucket_date,agent,
+                 revision,acknowledged_revision,generation,present,confirmed_tokens,coverage,payload_hash)
+                 VALUES (?1,?2,?3,?4,?5,?6,0,?7,?8,?9,?10,?11)
+                 ON CONFLICT(account_id,device_id,cycle_id,bucket_date,agent) DO UPDATE SET
+                 revision=excluded.revision,acknowledged_revision=0,generation=excluded.generation,
+                 present=excluded.present,confirmed_tokens=excluded.confirmed_tokens,
+                 coverage=excluded.coverage,payload_hash=excluded.payload_hash
+                 WHERE excluded.revision>=growth_journal_entry.revision",
+                params![
+                    target_account_id,
+                    entry.device_id,
+                    entry.cycle_id,
+                    entry.bucket_date,
+                    crate::storage::ledger::agent_name(entry.agent),
+                    i64::try_from(entry.revision).map_err(|_| ScanError::InvalidCount)?,
+                    i64::try_from(entry.generation).map_err(|_| ScanError::InvalidCount)?,
+                    entry.present,
+                    entry.confirmed_tokens.map(i64::try_from).transpose().map_err(|_| ScanError::InvalidCount)?,
+                    match entry.coverage {
+                        crate::domain::usage::UsageCoverage::Complete => "complete",
+                        crate::domain::usage::UsageCoverage::Partial => "partial",
+                        crate::domain::usage::UsageCoverage::Unavailable => "unavailable",
+                        crate::domain::usage::UsageCoverage::Unsupported => "unsupported",
+                        crate::domain::usage::UsageCoverage::UserDisabled => "user_disabled",
+                    },
+                    entry.payload_hash,
+                ],
+            )?;
+        }
+        for ack_entry in &ack.journal_entries {
+            transaction.execute(
+                "UPDATE growth_journal_entry SET acknowledged_revision=max(acknowledged_revision,?8)
+                 WHERE account_id=?1 AND device_id=?2 AND cycle_id=?3 AND bucket_date=?4 AND agent=?5
+                   AND generation=?6 AND revision=?8 AND payload_hash=?7",
+                params![
+                    target_account_id,
+                    ack_entry.logical_key.device_id,
+                    ack_entry.logical_key.cycle_id,
+                    ack_entry.logical_key.bucket_date,
+                    crate::storage::ledger::agent_name(ack_entry.logical_key.agent),
+                    i64::try_from(ack_entry.logical_key.generation).map_err(|_| ScanError::InvalidCount)?,
+                    ack_entry.payload_hash,
+                    i64::try_from(ack_entry.revision).map_err(|_| ScanError::InvalidCount)?,
+                ],
+            )?;
+        }
+        let source_entries = {
+            let mut statement = transaction.prepare(
+                "SELECT device_id,cycle_id,bucket_date,agent,revision,generation,present,
+                        confirmed_tokens,coverage,payload_hash
+                 FROM growth_journal_entry WHERE account_id='local'",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, i64>(4)?,
+                        row.get::<_, i64>(5)?,
+                        row.get::<_, bool>(6)?,
+                        row.get::<_, Option<i64>>(7)?,
+                        row.get::<_, String>(8)?,
+                        row.get::<_, String>(9)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        for (
+            device_id,
+            cycle_id,
+            date,
+            agent,
+            revision,
+            generation,
+            present,
+            tokens,
+            coverage,
+            hash,
+        ) in source_entries
+        {
+            transaction.execute(
+                "INSERT INTO growth_journal_entry(account_id,device_id,cycle_id,bucket_date,agent,
+                 revision,acknowledged_revision,generation,present,confirmed_tokens,coverage,payload_hash)
+                 VALUES (?1,?2,?3,?4,?5,?6,0,?7,?8,?9,?10,?11)
+                 ON CONFLICT(account_id,device_id,cycle_id,bucket_date,agent) DO UPDATE SET
+                 revision=excluded.revision,
+                 acknowledged_revision=growth_journal_entry.acknowledged_revision,
+                 generation=excluded.generation,
+                 present=excluded.present,confirmed_tokens=excluded.confirmed_tokens,
+                 coverage=excluded.coverage,payload_hash=excluded.payload_hash
+                 WHERE excluded.revision>growth_journal_entry.revision",
+                params![target_account_id,device_id,cycle_id,date,agent,revision,generation,
+                    present,tokens,coverage,hash],
+            )?;
+        }
+
+        super::cosmetic_shop::store_confirmed_shop_state_in_transaction(&transaction, shop_state)?;
+        super::shop_effects::seed_guest_import_contribution_baseline_in_transaction(
+            &transaction,
+            target_account_id,
+            request.snapshot.canonical_payload.canonical_version,
+            &request.snapshot.data.effect_contributions,
+            &request.snapshot.data.activity_days,
+        )?;
+        super::shop_effects::apply_confirmed_shop_effect_timeline_in_transaction(
+            &transaction,
+            timeline,
+            target_account_id,
+            &planet_state.current_cycle_id,
+        )?;
+        let raw = Ledger::planet_device_contribution_from_connection(&transaction, false)?;
+        let persisted = super::shop_effects::capture_shop_device_contribution_from_connection(
+            &transaction,
+            raw,
+        )?;
+        if source_relation == GuestImportSourceRelation::Exact
+            && canonical_json_bytes(&persisted).map_err(|_| ScanError::InvalidShopState)?
+                != canonical_json_bytes(canonical).map_err(|_| ScanError::InvalidShopState)?
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+
+        transaction.execute(
+            "UPDATE guest_shop_import_v2_capture
+             SET phase='imported',correction_hold=?3,result_json=?4
+             WHERE target_account_id=?1 AND import_id=?2 AND phase='attempt_started'",
+            params![
+                target_account_id,
+                import_id,
+                if correction_hold { 1_i64 } else { 0_i64 },
+                result_json,
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(if correction_hold {
+            GuestImportCompletion::ImportedWithCorrectionHold
+        } else {
+            GuestImportCompletion::Imported
+        })
+    }
 }
 
 fn capture_table_exists(connection: &Connection) -> Result<bool, ScanError> {
@@ -1455,10 +2015,18 @@ fn verified_v2_reset_wallet_claim(
 }
 
 #[cfg(test)]
-mod guest_import_v2_capture_tests {
+pub(crate) mod guest_import_v2_capture_tests {
     use super::*;
     use crate::collectors::{ParsedRecord, RecordKind};
-    use crate::domain::guest_shop_import::canonical_json_bytes;
+    use crate::domain::cosmetic_shop::{
+        AvatarEquipment, AvatarEquipmentItem, RewardState, ShopEffectTimeline, ShopState,
+    };
+    use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
+    use crate::domain::guest_shop_import::{
+        canonical_json_bytes, GuestImportAck, GuestImportAckJournalEntry, GuestJournalLogicalKey,
+        GuestShopImportV2Result,
+    };
+    use crate::domain::planet::{PlanetAvatar, PlanetProfile, PlanetState};
     use crate::domain::usage::{TokenUsage, UsageCoverage};
     use crate::storage::shop_import::PendingGuestShopImport;
     use chrono::Duration;
@@ -1521,6 +2089,1061 @@ mod guest_import_v2_capture_tests {
             std::thread::sleep((reset_at - Utc::now()).to_std().unwrap());
         }
         ledger
+    }
+
+    fn prepared_first_reset_ledger_with_multiple_ordinary_scans() -> Ledger {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let occurred_at = Utc::now();
+        for (event_key, total_tokens, offset_ms) in [
+            ("v2-multiscan-raw-1", 400_000, 0_i64),
+            ("v2-multiscan-raw-2", 300_000, 1_i64),
+            ("v2-multiscan-raw-3", 300_000, 2_i64),
+        ] {
+            ledger
+                .insert(&raw_one_date_record_with_tokens(
+                    event_key,
+                    occurred_at + Duration::milliseconds(offset_ms),
+                    total_tokens,
+                ))
+                .unwrap();
+            ledger.rebuild_shop_contributions().unwrap();
+        }
+        let ordinary_scan_version: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT canonical_version FROM shop_contribution_state WHERE account_id='local'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(ordinary_scan_version > 1);
+        ledger
+            .settle_guest_rewards(occurred_at + Duration::milliseconds(4))
+            .unwrap();
+        let old_cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger
+            .settle_guest_cycle_tokens(&old_cycle_id, occurred_at + Duration::milliseconds(5))
+            .unwrap();
+        ledger.prepare_growth_journal().unwrap();
+        let reset_at = occurred_at + Duration::milliseconds(250);
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        ledger.prepare_growth_journal().unwrap();
+        if Utc::now() < reset_at {
+            std::thread::sleep((reset_at - Utc::now()).to_std().unwrap());
+        }
+        ledger
+    }
+
+    pub(crate) fn imported_result_for(
+        request: &GuestShopImportV2Request,
+    ) -> GuestShopImportV2Result {
+        let snapshot = &request.snapshot;
+        let provenance = &snapshot.provenance;
+        let current_cycle = provenance
+            .cycle_bounds
+            .last()
+            .expect("first-reset provenance has a current cycle");
+        let canonical = snapshot.canonical_payload.clone();
+        let canonical_fingerprint = sha2::Sha256::digest(canonical_json_bytes(&canonical).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let new_cycle = &provenance.reset_receipt.result.new_cycle_id;
+        let account_uuid = snapshot
+            .target_account_id
+            .strip_prefix("account:")
+            .expect("target uses account scope");
+
+        let shop_state = ShopState {
+            account_id: snapshot.target_account_id.clone(),
+            current_cycle_id: new_cycle.clone(),
+            catalog_revision: 1,
+            state_revision: snapshot.data.shop_state_revision,
+            available_balance: 0,
+            products: vec![],
+            landscape_instances: vec![],
+            placements: vec![],
+            removed_natural_keys: vec![],
+            avatar_owned_skus: vec![],
+            avatar_equipment: AvatarEquipment {
+                head: AvatarEquipmentItem {
+                    sku: None,
+                    version: 0,
+                },
+                outfit: AvatarEquipmentItem {
+                    sku: None,
+                    version: 0,
+                },
+                face: AvatarEquipmentItem {
+                    sku: None,
+                    version: 0,
+                },
+                back: AvatarEquipmentItem {
+                    sku: None,
+                    version: 0,
+                },
+            },
+            effects: ActiveEffects::default(),
+            reward_state: RewardState::default(),
+            action_unavailable_reason: None,
+            guest_import_pending: false,
+            guest_import_error: None,
+        };
+        let last_reset = provenance.reset_receipt.result.reset_at_utc.clone();
+        let planet_state = PlanetState {
+            version: 1,
+            profile: Some(PlanetProfile {
+                nickname: "Imported planet".into(),
+                avatar: PlanetAvatar::Masculine,
+            }),
+            timezone: snapshot.data.planet_timezone.clone(),
+            current_cycle_id: new_cycle.clone(),
+            cycle_started_at_utc: current_cycle.started_at_utc.clone(),
+            last_reset_at_utc: Some(last_reset),
+            wallet_balance: snapshot
+                .data
+                .wallet_credits
+                .iter()
+                .map(|credit| credit.amount)
+                .sum(),
+            wallet_credits: vec![],
+            current_planet_tokens: canonical.raw.current_planet_tokens,
+            lifetime_tokens: canonical.raw.lifetime_tokens,
+            growth_credit: 0.0,
+            stage: 0,
+            progress_to_next: 0.0,
+            incomplete: canonical.raw.incomplete,
+            can_reset: false,
+            reset_available_at_utc: Some(
+                provenance
+                    .reset_receipt
+                    .result
+                    .reset_available_at_utc
+                    .clone(),
+            ),
+            objects: vec![],
+            removed_natural_keys: vec![],
+        };
+        let effect_timeline = ShopEffectTimeline {
+            account_id: account_uuid.into(),
+            current_cycle_id: new_cycle.clone(),
+            effect_revision: 0,
+            server_time_utc: Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
+            reward_timezone: snapshot.data.reward_timezone.clone(),
+            cycle_bounds: provenance
+                .cycle_bounds
+                .iter()
+                .map(|bound| ShopCycleBound {
+                    cycle_id: bound.cycle_id.clone(),
+                    started_at_utc: bound.started_at_utc.clone(),
+                    ended_at_utc: bound.ended_at_utc.clone(),
+                })
+                .collect(),
+            intervals: vec![],
+        };
+        let journal_state = snapshot.data.growth_journal_state.as_ref();
+        let journal_cycles = snapshot
+            .data
+            .growth_journal_cycles
+            .iter()
+            .map(|cycle| GrowthJournalCycle {
+                cycle_id: cycle.cycle_id.clone(),
+                started_at_utc: cycle.started_at_utc.clone(),
+                ended_at_utc: cycle.ended_at_utc.clone(),
+                wallet_credit: cycle.wallet_credit,
+                wallet_credit_at_utc: cycle.wallet_credit_at_utc.clone(),
+            })
+            .collect();
+        let journal_entries = snapshot
+            .data
+            .growth_journal_entries
+            .iter()
+            .map(|entry| {
+                let agent =
+                    serde_json::from_value(serde_json::Value::String(entry.agent.clone())).unwrap();
+                let coverage =
+                    serde_json::from_value(serde_json::Value::String(entry.coverage.clone()))
+                        .unwrap();
+                GrowthJournalEntry {
+                    device_id: entry.device_id.clone(),
+                    cycle_id: entry.cycle_id.clone(),
+                    bucket_date: entry.bucket_date.clone(),
+                    agent,
+                    revision: entry.revision,
+                    generation: entry.generation,
+                    present: entry.present,
+                    confirmed_tokens: entry.confirmed_tokens,
+                    coverage,
+                    payload_hash: entry.payload_hash.clone(),
+                }
+            })
+            .collect::<Vec<_>>();
+        let journal = GrowthJournal {
+            generation: journal_state.map_or(0, |state| state.generation),
+            deleted_at_utc: journal_state.and_then(|state| state.deleted_at_utc.clone()),
+            timezone: Some(snapshot.data.planet_timezone.clone()),
+            cycles: journal_cycles,
+            entries: journal_entries,
+        };
+        let ack = GuestImportAck {
+            lineage_id: provenance.lineage_id.clone(),
+            device_id: provenance.device_id.clone(),
+            ingest_watermark: provenance.ingest_watermark,
+            occurrence_count: provenance.occurrence_count,
+            prefix_fingerprint: provenance.prefix_fingerprint.clone(),
+            canonical_version: canonical.canonical_version,
+            canonical_payload_fingerprint: canonical_fingerprint,
+            journal_entries: journal
+                .entries
+                .iter()
+                .map(|entry| GuestImportAckJournalEntry {
+                    logical_key: GuestJournalLogicalKey {
+                        device_id: entry.device_id.clone(),
+                        cycle_id: entry.cycle_id.clone(),
+                        bucket_date: entry.bucket_date.clone(),
+                        agent: entry.agent,
+                        generation: entry.generation,
+                    },
+                    revision: entry.revision,
+                    payload_hash: entry.payload_hash.clone(),
+                })
+                .collect(),
+        };
+
+        GuestShopImportV2Result {
+            schema_version: 2,
+            import_id: snapshot.import_id.clone(),
+            account_id: snapshot.target_account_id.clone(),
+            source_fingerprint: snapshot.source_fingerprint.clone(),
+            status: crate::domain::guest_shop_import::GuestImportStatus::Imported,
+            shop_state: Some(shop_state),
+            planet_state: Some(planet_state),
+            effect_timeline: Some(effect_timeline),
+            canonical_contribution: Some(canonical),
+            journal_confirmation: Some(journal),
+            ack: Some(ack),
+        }
+    }
+
+    fn guest_import_cache_snapshot(ledger: &Ledger) -> Vec<(String, String)> {
+        [
+            ("setting", "SELECT * FROM setting ORDER BY key"),
+            (
+                "planet_account_state",
+                "SELECT * FROM planet_account_state ORDER BY account_id",
+            ),
+            (
+                "planet_usage_owner",
+                "SELECT * FROM planet_usage_owner ORDER BY event_key",
+            ),
+            ("usage_record", "SELECT * FROM usage_record ORDER BY event_key"),
+            (
+                "growth_journal_state",
+                "SELECT * FROM growth_journal_state ORDER BY account_id",
+            ),
+            (
+                "growth_journal_cycle",
+                "SELECT * FROM growth_journal_cycle ORDER BY account_id,cycle_id",
+            ),
+            (
+                "growth_journal_entry",
+                "SELECT * FROM growth_journal_entry
+                 ORDER BY account_id,device_id,cycle_id,bucket_date,agent",
+            ),
+            (
+                "planet_object",
+                "SELECT * FROM planet_object ORDER BY cycle_id,stage,ordinal",
+            ),
+            (
+                "planet_wallet_credit",
+                "SELECT * FROM planet_wallet_credit ORDER BY previous_cycle_id",
+            ),
+            (
+                "shop_remote_state",
+                "SELECT * FROM shop_remote_state ORDER BY account_id",
+            ),
+            (
+                "shop_account_state",
+                "SELECT * FROM shop_account_state ORDER BY account_id",
+            ),
+            (
+                "shop_effect_history",
+                "SELECT * FROM shop_effect_history ORDER BY account_id,cycle_id,revision,started_at_utc",
+            ),
+            (
+                "shop_effect_cycle_bound",
+                "SELECT * FROM shop_effect_cycle_bound ORDER BY account_id,cycle_id",
+            ),
+            (
+                "shop_effect_contribution",
+                "SELECT * FROM shop_effect_contribution
+                 ORDER BY account_id,device_id,cycle_id,date,effect_revision",
+            ),
+            (
+                "shop_activity_day",
+                "SELECT * FROM shop_activity_day ORDER BY account_id,reward_date",
+            ),
+            (
+                "shop_contribution_state",
+                "SELECT * FROM shop_contribution_state ORDER BY account_id",
+            ),
+            (
+                "guest_shop_import_v2_capture_schema",
+                "PRAGMA table_info(guest_shop_import_v2_capture)",
+            ),
+            (
+                "guest_shop_import_v2_capture",
+                "SELECT * FROM guest_shop_import_v2_capture ORDER BY target_account_id",
+            ),
+        ]
+        .into_iter()
+        .map(|(name, query)| {
+            let mut statement = ledger.connection.prepare(query).unwrap();
+            let rows = statement
+                .query_map([], |row| {
+                    (0..row.as_ref().column_count())
+                        .map(|index| {
+                            row.get::<_, rusqlite::types::Value>(index)
+                                .map(|value| format!("{value:?}"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            (name.to_owned(), format!("{rows:?}"))
+        })
+        .collect()
+    }
+
+    #[test]
+    fn guest_import_v2_completion_imports_valid_receipt_and_replays_idempotently() {
+        let mut ledger = prepared_first_reset_ledger();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected");
+        };
+        let request = capture.request;
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                request.snapshot.import_id.parse().unwrap(),
+            )
+            .unwrap();
+        let result = imported_result_for(&request);
+
+        assert!(
+            crate::sync::client::validate_guest_shop_import_v2_result(&request, &result).is_ok(),
+            "the server-shaped imported receipt must pass native transport validation"
+        );
+        assert_eq!(
+            ledger
+                .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+                .unwrap(),
+            GuestImportCompletion::Imported
+        );
+
+        let (active_account, current_cycle): (String, String) = ledger
+            .connection
+            .query_row(
+                "SELECT
+                   (SELECT value FROM setting WHERE key='planet_account_id'),
+                   (SELECT value FROM setting WHERE key='planet_current_cycle_id')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(active_account, TARGET_ACCOUNT);
+        assert_eq!(
+            current_cycle,
+            request
+                .snapshot
+                .provenance
+                .reset_receipt
+                .result
+                .new_cycle_id
+        );
+        let (phase, correction_hold, result_json): (String, i64, String) = ledger
+            .connection
+            .query_row(
+                "SELECT phase,correction_hold,result_json FROM guest_shop_import_v2_capture
+                 WHERE target_account_id=?1",
+                [TARGET_ACCOUNT],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, "imported");
+        assert_eq!(correction_hold, 0);
+        assert_eq!(
+            result_json,
+            String::from_utf8(canonical_json_bytes(&result).unwrap()).unwrap()
+        );
+
+        for ack_entry in &result.ack.as_ref().unwrap().journal_entries {
+            let (revision, acknowledged_revision, payload_hash): (i64, i64, String) = ledger
+                .connection
+                .query_row(
+                    "SELECT revision,acknowledged_revision,payload_hash FROM growth_journal_entry
+                     WHERE account_id=?1 AND device_id=?2 AND cycle_id=?3 AND bucket_date=?4 AND agent=?5",
+                    rusqlite::params![
+                        TARGET_ACCOUNT,
+                        ack_entry.logical_key.device_id,
+                        ack_entry.logical_key.cycle_id,
+                        ack_entry.logical_key.bucket_date,
+                        crate::storage::ledger::agent_name(ack_entry.logical_key.agent),
+                    ],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(revision, ack_entry.revision as i64);
+            assert_eq!(acknowledged_revision, ack_entry.revision as i64);
+            assert_eq!(payload_hash, ack_entry.payload_hash);
+        }
+
+        let before_replay = guest_import_cache_snapshot(&ledger);
+        assert_eq!(
+            ledger
+                .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+                .unwrap(),
+            GuestImportCompletion::Imported
+        );
+        assert_eq!(guest_import_cache_snapshot(&ledger), before_replay);
+    }
+
+    #[test]
+    fn guest_import_v2_completion_preserves_canonical_version_after_multiple_ordinary_scans() {
+        let mut ledger = prepared_first_reset_ledger_with_multiple_ordinary_scans();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected");
+        };
+        let request = capture.request;
+        let captured_canonical = request.snapshot.canonical_payload.clone();
+        assert!(captured_canonical.canonical_version > 1);
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                request.snapshot.import_id.parse().unwrap(),
+            )
+            .unwrap();
+        let result = imported_result_for(&request);
+
+        let completion = ledger.complete_guest_shop_import(TARGET_ACCOUNT, &result);
+        assert_eq!(
+            completion,
+            Ok(GuestImportCompletion::Imported),
+            "exact completion failed for captured canonical version {}",
+            captured_canonical.canonical_version
+        );
+        let imported_canonical = result.canonical_contribution.as_ref().unwrap();
+        let persisted_canonical =
+            crate::storage::shop_effects::shop_device_contribution_from_connection(
+                &ledger.connection,
+                imported_canonical.raw.clone(),
+            )
+            .unwrap();
+        assert_eq!(persisted_canonical, *imported_canonical);
+    }
+
+    #[test]
+    fn guest_import_v2_completion_advances_canonical_version_for_append_after_multiple_scans() {
+        let mut ledger = prepared_first_reset_ledger_with_multiple_ordinary_scans();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected");
+        };
+        let request = capture.request;
+        let captured_version = request.snapshot.canonical_payload.canonical_version;
+        assert!(captured_version > 1);
+        let import_id = uuid::Uuid::parse_str(&request.snapshot.import_id).unwrap();
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(TARGET_ACCOUNT, import_id)
+            .unwrap();
+
+        let reset_at = parse_utc(
+            &request
+                .snapshot
+                .provenance
+                .reset_receipt
+                .result
+                .reset_at_utc,
+        )
+        .unwrap();
+        let appended_event_key = "v2-multiscan-canonical-append";
+        ledger
+            .insert(&raw_one_date_record_with_tokens(
+                appended_event_key,
+                reset_at - Duration::milliseconds(1),
+                1,
+            ))
+            .unwrap();
+        let transaction = ledger.connection.transaction().unwrap();
+        Ledger::prepare_growth_journal_in_transaction(&transaction).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(
+            ledger.guest_import_source_relation(import_id).unwrap(),
+            GuestImportSourceRelation::AppendOnly
+        );
+
+        let result = imported_result_for(&request);
+        assert_eq!(
+            ledger
+                .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+                .unwrap(),
+            GuestImportCompletion::Imported
+        );
+        let imported_canonical = result.canonical_contribution.as_ref().unwrap();
+        let persisted_canonical =
+            crate::storage::shop_effects::shop_device_contribution_from_connection(
+                &ledger.connection,
+                imported_canonical.raw.clone(),
+            )
+            .unwrap();
+        assert!(
+            persisted_canonical.canonical_version > captured_version,
+            "append changed canonical contributions but version stayed at {} (captured {})",
+            persisted_canonical.canonical_version,
+            captured_version
+        );
+        let owner: String = ledger
+            .connection
+            .query_row(
+                "SELECT account_id FROM planet_usage_owner WHERE event_key=?1",
+                [appended_event_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(owner, TARGET_ACCOUNT);
+    }
+
+    #[test]
+    fn guest_import_v2_completion_duplicate_after_reopen_is_idempotent() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("guest-import-completion.sqlite");
+        let mut ledger = prepared_first_reset_ledger_at(&path);
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected");
+        };
+        let request = capture.request;
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                request.snapshot.import_id.parse().unwrap(),
+            )
+            .unwrap();
+        let result = imported_result_for(&request);
+
+        assert_eq!(
+            ledger
+                .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+                .unwrap(),
+            GuestImportCompletion::Imported
+        );
+        let committed_snapshot = guest_import_cache_snapshot(&ledger);
+        let committed_result_json: String = ledger
+            .connection
+            .query_row(
+                "SELECT result_json FROM guest_shop_import_v2_capture WHERE target_account_id=?1",
+                [TARGET_ACCOUNT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            committed_result_json,
+            String::from_utf8(canonical_json_bytes(&result).unwrap()).unwrap()
+        );
+        drop(ledger);
+
+        let mut reopened = Ledger::open(&path, chrono_tz::UTC).unwrap();
+        assert_eq!(
+            guest_import_cache_snapshot(&reopened),
+            committed_snapshot,
+            "reopen must preserve the completed local cache and capture receipt"
+        );
+        assert_eq!(
+            reopened
+                .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+                .unwrap(),
+            GuestImportCompletion::Imported
+        );
+        assert_eq!(
+            guest_import_cache_snapshot(&reopened),
+            committed_snapshot,
+            "a duplicate completion after reopen must not rewrite committed state"
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_completion_rolls_back_all_cache_and_ack_writes_if_final_marker_fails() {
+        let mut ledger = prepared_first_reset_ledger();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected")
+        };
+        let request = capture.request;
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                request.snapshot.import_id.parse().unwrap(),
+            )
+            .unwrap();
+        let result = imported_result_for(&request);
+        ledger
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_v2_import_marker
+                 BEFORE UPDATE OF phase ON guest_shop_import_v2_capture
+                 WHEN NEW.phase='imported'
+                 BEGIN SELECT RAISE(ABORT,'injected final import marker failure'); END;",
+            )
+            .unwrap();
+        let before = guest_import_cache_snapshot(&ledger);
+
+        let completion = ledger.complete_guest_shop_import(TARGET_ACCOUNT, &result);
+
+        assert_eq!(
+            completion,
+            Err(crate::storage::ledger::ScanError::Database),
+            "the otherwise-valid completion must fail at the injected final marker trigger"
+        );
+        assert_eq!(guest_import_cache_snapshot(&ledger), before);
+        ledger
+            .connection
+            .execute_batch("DROP TRIGGER fail_v2_import_marker")
+            .unwrap();
+        assert_eq!(
+            ledger
+                .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+                .unwrap(),
+            GuestImportCompletion::Imported,
+            "retrying the same ID and result after removing only the injected trigger must commit"
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_completion_rejects_altered_journal_generation_without_writes() {
+        let mut ledger = prepared_first_reset_ledger();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected")
+        };
+        let request = capture.request;
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                request.snapshot.import_id.parse().unwrap(),
+            )
+            .unwrap();
+        let captured_generation = request
+            .snapshot
+            .data
+            .growth_journal_state
+            .as_ref()
+            .map_or(0, |state| state.generation);
+        let mut result = imported_result_for(&request);
+        result.journal_confirmation.as_mut().unwrap().generation = captured_generation + 1;
+        let before = guest_import_cache_snapshot(&ledger);
+
+        assert_eq!(
+            ledger.complete_guest_shop_import(TARGET_ACCOUNT, &result),
+            Err(crate::storage::ledger::ScanError::InvalidShopState)
+        );
+        assert_eq!(
+            guest_import_cache_snapshot(&ledger),
+            before,
+            "a receipt with changed journal metadata must not mutate any cache or capture row"
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_completion_holds_when_selected_auth_account_differs() {
+        let mut ledger = prepared_first_reset_ledger();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected")
+        };
+        let request = capture.request;
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                request.snapshot.import_id.parse().unwrap(),
+            )
+            .unwrap();
+        ledger
+            .set_selected_auth_account(OTHER_TARGET_ACCOUNT)
+            .unwrap();
+        let result = imported_result_for(&request);
+        let before = guest_import_cache_snapshot(&ledger);
+
+        let completion = ledger
+            .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+            .unwrap();
+
+        assert_eq!(completion, GuestImportCompletion::Held);
+        assert_eq!(guest_import_cache_snapshot(&ledger), before);
+    }
+
+    #[test]
+    fn guest_import_v2_completion_held_server_result_does_not_transfer_local_ownership() {
+        let mut ledger = prepared_first_reset_ledger();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected");
+        };
+        let request = capture.request;
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                request.snapshot.import_id.parse().unwrap(),
+            )
+            .unwrap();
+        let result = GuestShopImportV2Result {
+            schema_version: 2,
+            import_id: request.snapshot.import_id.clone(),
+            account_id: request.snapshot.target_account_id.clone(),
+            source_fingerprint: request.snapshot.source_fingerprint.clone(),
+            status: crate::domain::guest_shop_import::GuestImportStatus::SourceUnverifiable,
+            shop_state: None,
+            planet_state: None,
+            effect_timeline: None,
+            canonical_contribution: None,
+            journal_confirmation: None,
+            ack: None,
+        };
+        assert!(
+            crate::sync::client::validate_guest_shop_import_v2_result(&request, &result).is_ok()
+        );
+        let before = guest_import_cache_snapshot(&ledger);
+
+        assert_eq!(
+            ledger
+                .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+                .unwrap(),
+            GuestImportCompletion::Held
+        );
+        let after = guest_import_cache_snapshot(&ledger);
+        let business_tables = |snapshot: &[(String, String)]| {
+            snapshot
+                .iter()
+                .filter(|(name, _)| {
+                    name != "guest_shop_import_v2_capture_schema"
+                        && name != "guest_shop_import_v2_capture"
+                })
+                .cloned()
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            business_tables(&after),
+            business_tables(&before),
+            "a server-held result must leave all planet, usage, journal, and shop state unchanged"
+        );
+        let before_capture_schema = before
+            .iter()
+            .find(|(name, _)| name == "guest_shop_import_v2_capture_schema")
+            .unwrap();
+        let after_capture_schema = after
+            .iter()
+            .find(|(name, _)| name == "guest_shop_import_v2_capture_schema")
+            .unwrap();
+        assert!(!before_capture_schema.1.contains("result_json"));
+        assert!(after_capture_schema.1.contains("result_json"));
+        let (phase, correction_hold, owner, active_account): (
+            String,
+            i64,
+            Option<String>,
+            String,
+        ) = ledger
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT phase FROM guest_shop_import_v2_capture WHERE target_account_id=?1),
+                    (SELECT correction_hold FROM guest_shop_import_v2_capture WHERE target_account_id=?1),
+                    (SELECT account_id FROM planet_usage_owner WHERE event_key=?2),
+                    (SELECT value FROM setting WHERE key='planet_account_id')",
+                rusqlite::params![TARGET_ACCOUNT, "v2-capture-raw-1m"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, "held");
+        assert_eq!(correction_hold, 1);
+        assert_eq!(owner.as_deref(), Some("local"));
+        assert_eq!(active_account, "local");
+    }
+
+    #[test]
+    fn guest_import_v2_completion_keeps_append_delta_unacknowledged_without_correction_hold() {
+        let mut ledger = prepared_first_reset_ledger();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("schema-2 import capture expected");
+        };
+        let request = capture.request;
+        let import_id = uuid::Uuid::parse_str(&request.snapshot.import_id).unwrap();
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(TARGET_ACCOUNT, import_id)
+            .unwrap();
+
+        let reset_at = parse_utc(
+            &request
+                .snapshot
+                .provenance
+                .reset_receipt
+                .result
+                .reset_at_utc,
+        )
+        .unwrap();
+        let appended_event_key = "v2-completion-raw-append";
+        ledger
+            .insert(&raw_one_date_record_with_tokens(
+                appended_event_key,
+                reset_at - Duration::milliseconds(1),
+                1,
+            ))
+            .unwrap();
+        let transaction = ledger.connection.transaction().unwrap();
+        Ledger::prepare_growth_journal_in_transaction(&transaction).unwrap();
+        transaction.commit().unwrap();
+        assert_eq!(
+            ledger.guest_import_source_relation(import_id).unwrap(),
+            GuestImportSourceRelation::AppendOnly
+        );
+
+        let result = imported_result_for(&request);
+        let timeline_account_id = &result.effect_timeline.as_ref().unwrap().account_id;
+        assert_eq!(
+            timeline_account_id,
+            request
+                .snapshot
+                .target_account_id
+                .strip_prefix("account:")
+                .unwrap(),
+            "the server timeline uses a bare auth UUID while the native account key is prefixed"
+        );
+        assert_ne!(timeline_account_id, &request.snapshot.target_account_id);
+        let snapshot = &request.snapshot;
+        let expected_cycle = &snapshot.provenance.reset_receipt.result.new_cycle_id;
+        let shop = result.shop_state.as_ref().unwrap();
+        let planet = result.planet_state.as_ref().unwrap();
+        let timeline = result.effect_timeline.as_ref().unwrap();
+        let canonical = result.canonical_contribution.as_ref().unwrap();
+        let journal = result.journal_confirmation.as_ref().unwrap();
+        let ack = result.ack.as_ref().unwrap();
+        let canonical_fingerprint = sha2::Sha256::digest(canonical_json_bytes(canonical).unwrap())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let correlation_checks = [
+            ("wire shape", result.validate_wire_shape().is_ok()),
+            (
+                "shop account",
+                shop.account_id == snapshot.target_account_id,
+            ),
+            ("shop cycle", shop.current_cycle_id == *expected_cycle),
+            ("planet cycle", planet.current_cycle_id == *expected_cycle),
+            (
+                "timeline account is bare target UUID",
+                timeline.account_id == snapshot.target_account_id.strip_prefix("account:").unwrap(),
+            ),
+            (
+                "timeline account equals prefixed native key",
+                timeline.account_id == snapshot.target_account_id,
+            ),
+            (
+                "timeline cycle",
+                timeline.current_cycle_id == *expected_cycle,
+            ),
+            (
+                "canonical device",
+                canonical.raw.device_id == snapshot.provenance.device_id,
+            ),
+            (
+                "canonical cycle",
+                canonical.raw.current_cycle_id == *expected_cycle,
+            ),
+            (
+                "canonical payload",
+                canonical == &snapshot.canonical_payload,
+            ),
+            (
+                "canonical version",
+                canonical.canonical_version == ack.canonical_version,
+            ),
+            (
+                "ACK lineage",
+                ack.lineage_id == snapshot.provenance.lineage_id,
+            ),
+            ("ACK device", ack.device_id == snapshot.provenance.device_id),
+            (
+                "ACK watermark",
+                ack.ingest_watermark == snapshot.provenance.ingest_watermark,
+            ),
+            (
+                "ACK count",
+                ack.occurrence_count == snapshot.provenance.occurrence_count,
+            ),
+            (
+                "ACK prefix",
+                ack.prefix_fingerprint == snapshot.provenance.prefix_fingerprint,
+            ),
+            (
+                "ACK canonical fingerprint",
+                ack.canonical_payload_fingerprint == canonical_fingerprint,
+            ),
+            (
+                "ACK journal rows",
+                ack.journal_entries.iter().all(|ack_entry| {
+                    journal.entries.iter().any(|entry| {
+                        entry.device_id == ack_entry.logical_key.device_id
+                            && entry.cycle_id == ack_entry.logical_key.cycle_id
+                            && entry.bucket_date == ack_entry.logical_key.bucket_date
+                            && entry.agent == ack_entry.logical_key.agent
+                            && entry.generation == ack_entry.logical_key.generation
+                            && entry.revision == ack_entry.revision
+                            && entry.payload_hash == ack_entry.payload_hash
+                    })
+                }),
+            ),
+        ];
+        assert!(
+            crate::sync::client::validate_guest_shop_import_v2_result(&request, &result).is_ok(),
+            "imported result correlation rejected a server-shaped result: {correlation_checks:?}"
+        );
+        let mut wrong_timeline_account = imported_result_for(&request);
+        wrong_timeline_account
+            .effect_timeline
+            .as_mut()
+            .unwrap()
+            .account_id = OTHER_TARGET_ACCOUNT
+            .strip_prefix("account:")
+            .unwrap()
+            .into();
+        assert!(crate::sync::client::validate_guest_shop_import_v2_result(
+            &request,
+            &wrong_timeline_account,
+        )
+        .is_err());
+
+        let mut wrong_timeline_cycle = imported_result_for(&request);
+        wrong_timeline_cycle
+            .effect_timeline
+            .as_mut()
+            .unwrap()
+            .current_cycle_id = "00000000-0000-4000-a000-000000000099".into();
+        assert!(crate::sync::client::validate_guest_shop_import_v2_result(
+            &request,
+            &wrong_timeline_cycle,
+        )
+        .is_err());
+
+        let completion = ledger
+            .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+            .unwrap();
+
+        assert_eq!(completion, GuestImportCompletion::Imported);
+        let (phase, correction_hold, result_json): (String, i64, Option<String>) = ledger
+            .connection
+            .query_row(
+                "SELECT phase,correction_hold,result_json FROM guest_shop_import_v2_capture
+                 WHERE target_account_id=?1",
+                [TARGET_ACCOUNT],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, "imported");
+        assert_eq!(correction_hold, 0);
+        assert_eq!(
+            result_json.as_deref(),
+            Some(std::str::from_utf8(&canonical_json_bytes(&result).unwrap()).unwrap())
+        );
+
+        let (raw_exists, owner): (bool, Option<String>) = ledger
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM usage_record WHERE event_key=?1),
+                        (SELECT account_id FROM planet_usage_owner WHERE event_key=?1)",
+                [appended_event_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(raw_exists, "append raw usage must survive local completion");
+        assert_eq!(owner.as_deref(), Some(TARGET_ACCOUNT));
+
+        let ack_entry = result
+            .ack
+            .as_ref()
+            .unwrap()
+            .journal_entries
+            .first()
+            .expect("the captured prefix includes a journal acknowledgement");
+        let (local_revision, local_payload_hash): (i64, String) = ledger
+            .connection
+            .query_row(
+                "SELECT revision,payload_hash FROM growth_journal_entry
+                 WHERE account_id='local' AND device_id=?1 AND cycle_id=?2 AND bucket_date=?3 AND agent=?4",
+                rusqlite::params![
+                    ack_entry.logical_key.device_id,
+                    ack_entry.logical_key.cycle_id,
+                    ack_entry.logical_key.bucket_date,
+                    crate::storage::ledger::agent_name(ack_entry.logical_key.agent),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(local_revision > ack_entry.revision as i64);
+        let (revision, acknowledged_revision, payload_hash): (i64, i64, String) = ledger
+            .connection
+            .query_row(
+                "SELECT revision,acknowledged_revision,payload_hash FROM growth_journal_entry
+                 WHERE account_id=?1 AND device_id=?2 AND cycle_id=?3 AND bucket_date=?4 AND agent=?5",
+                rusqlite::params![
+                    TARGET_ACCOUNT,
+                    ack_entry.logical_key.device_id,
+                    ack_entry.logical_key.cycle_id,
+                    ack_entry.logical_key.bucket_date,
+                    crate::storage::ledger::agent_name(ack_entry.logical_key.agent),
+                ],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(revision, local_revision);
+        assert_eq!(acknowledged_revision, ack_entry.revision as i64);
+        assert_eq!(payload_hash, local_payload_hash);
+        assert_ne!(payload_hash, ack_entry.payload_hash);
+
+        let before_replay = guest_import_cache_snapshot(&ledger);
+        let replay = ledger
+            .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+            .unwrap();
+        assert_eq!(replay, GuestImportCompletion::Imported);
+        assert_eq!(guest_import_cache_snapshot(&ledger), before_replay);
     }
 
     #[test]
@@ -2248,6 +3871,83 @@ mod guest_import_v2_capture_tests {
         assert_eq!(request_json, stored_request_json);
         assert_eq!(phase, "attempt_started");
         assert_eq!(correction_hold, 1);
+    }
+
+    #[test]
+    fn guest_import_v2_completion_attempted_capture_correction_returns_imported_with_atomic_correction_hold(
+    ) {
+        let mut ledger = prepared_first_reset_ledger();
+        let PendingGuestShopImport::V2(captured) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("a fresh first reset must capture a schema 2 request");
+        };
+        let request = captured.request;
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                request.snapshot.import_id.parse().unwrap(),
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE usage_record SET total_tokens=total_tokens+1 WHERE event_key=?1",
+                ["v2-capture-raw-1m"],
+            )
+            .unwrap();
+        let Some(PendingGuestShopImport::V2(held_capture)) = ledger
+            .pending_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("the attempted capture must remain available with a correction hold");
+        };
+        assert_eq!(
+            held_capture.source_relation,
+            GuestImportSourceRelation::CapturedPrefixChanged
+        );
+        assert_eq!(held_capture.phase, GuestImportPhase::AttemptStarted);
+        assert!(held_capture.correction_hold);
+        assert_eq!(held_capture.request, request);
+
+        let result = imported_result_for(&request);
+        assert_eq!(
+            ledger
+                .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+                .unwrap(),
+            GuestImportCompletion::ImportedWithCorrectionHold
+        );
+        let (phase, correction_hold, stored_result): (String, i64, String) = ledger
+            .connection
+            .query_row(
+                "SELECT phase,correction_hold,result_json FROM guest_shop_import_v2_capture
+                 WHERE target_account_id=?1",
+                [TARGET_ACCOUNT],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(phase, "imported");
+        assert_eq!(correction_hold, 1);
+        assert_eq!(
+            stored_result,
+            String::from_utf8(canonical_json_bytes(&result).unwrap()).unwrap()
+        );
+        let (raw_tokens, owner, active_account): (i64, Option<String>, String) = ledger
+            .connection
+            .query_row(
+                "SELECT
+                    (SELECT total_tokens FROM usage_record WHERE event_key=?1),
+                    (SELECT account_id FROM planet_usage_owner WHERE event_key=?1),
+                    (SELECT value FROM setting WHERE key='planet_account_id')",
+                ["v2-capture-raw-1m"],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(raw_tokens, 1_000_001);
+        assert_eq!(owner.as_deref(), Some(TARGET_ACCOUNT));
+        assert_eq!(active_account, TARGET_ACCOUNT);
     }
 
     #[test]

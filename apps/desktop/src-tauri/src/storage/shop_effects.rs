@@ -210,6 +210,68 @@ fn rebuild_shop_contributions_in_transaction(connection: &Connection) -> Result<
     Ok(())
 }
 
+pub(crate) fn seed_guest_import_contribution_baseline_in_transaction(
+    connection: &Connection,
+    account_id: &str,
+    canonical_version: u64,
+    contributions: &[crate::domain::cosmetic_shop::GuestEffectContribution],
+    activity_days: &[crate::domain::cosmetic_shop::GuestActivityDay],
+) -> Result<(), ScanError> {
+    let canonical_version = to_i64(canonical_version)?;
+    connection.execute(
+        "DELETE FROM shop_effect_contribution WHERE account_id=?1",
+        [account_id],
+    )?;
+    for contribution in contributions {
+        if to_i64(contribution.canonical_version)? != canonical_version {
+            return Err(ScanError::InvalidShopState);
+        }
+        connection.execute(
+            "INSERT INTO shop_effect_contribution(account_id,device_id,cycle_id,date,effect_revision,
+             canonical_version,tokens,growth_bps,wallet_bps) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![
+                account_id,
+                contribution.device_id,
+                contribution.cycle_id,
+                contribution.date,
+                to_i64(contribution.effect_revision)?,
+                canonical_version,
+                to_i64(contribution.tokens)?,
+                contribution.growth_bps,
+                contribution.wallet_bps,
+            ],
+        )?;
+    }
+
+    connection.execute(
+        "DELETE FROM shop_activity_day WHERE account_id=?1",
+        [account_id],
+    )?;
+    for activity_day in activity_days {
+        if to_i64(activity_day.canonical_version)? != canonical_version {
+            return Err(ScanError::InvalidShopState);
+        }
+        connection.execute(
+            "INSERT INTO shop_activity_day(account_id,reward_date,cycle_id,first_occurred_at_utc,
+             canonical_version,tokens) VALUES (?1,?2,?3,?4,?5,?6)",
+            params![
+                account_id,
+                activity_day.reward_date,
+                activity_day.cycle_id,
+                activity_day.first_occurred_at_utc,
+                canonical_version,
+                to_i64(activity_day.tokens)?,
+            ],
+        )?;
+    }
+    connection.execute(
+        "INSERT INTO shop_contribution_state(account_id,canonical_version) VALUES (?1,?2)
+         ON CONFLICT(account_id) DO UPDATE SET canonical_version=excluded.canonical_version",
+        params![account_id, canonical_version],
+    )?;
+    Ok(())
+}
+
 fn normalize_account_uuid(value: &str) -> Result<String, ScanError> {
     let value = value.strip_prefix("account:").unwrap_or(value);
     uuid::Uuid::parse_str(value)
