@@ -632,6 +632,90 @@ mod account_switch_tests {
     }
 
     #[test]
+    fn first_login_records_auth_selection_while_v2_guest_ownership_stays_local() {
+        let state = test_state(prepared_first_reset_ledger());
+        let target_account = format!("account:{USER_ID}");
+
+        let selection = state.select_planet_account(USER_ID);
+
+        assert!(
+            selection.is_err(),
+            "active account ownership remains held until guest import completes"
+        );
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+        let selected_auth_account: String = ledger
+            .connection
+            .query_row(
+                "SELECT coalesce((SELECT value FROM setting WHERE key='selected_auth_account_id'), '')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(selected_auth_account, target_account);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM guest_shop_import_v2_capture
+                     WHERE target_account_id=?1",
+                    [&target_account],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            1,
+            "first login must leave a durable v2 capture for the selected auth account"
+        );
+    }
+
+    #[test]
+    fn next_sync_records_auth_selection_for_existing_v2_capture_without_switching_owner() {
+        let mut ledger = prepared_first_reset_ledger();
+        let target_account = format!("account:{USER_ID}");
+        ledger
+            .capture_guest_shop_import_request(&target_account)
+            .unwrap();
+        let request_before: String = ledger
+            .connection
+            .query_row(
+                "SELECT request_json FROM guest_shop_import_v2_capture
+                 WHERE target_account_id=?1",
+                [&target_account],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let state = test_state(ledger);
+
+        let selection = state.select_planet_account(USER_ID);
+
+        assert!(
+            selection.is_err(),
+            "active account ownership remains held while an existing v2 capture is pending"
+        );
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+        let selected_auth_account: String = ledger
+            .connection
+            .query_row(
+                "SELECT coalesce((SELECT value FROM setting WHERE key='selected_auth_account_id'), '')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(selected_auth_account, target_account);
+        let request_after: String = ledger
+            .connection
+            .query_row(
+                "SELECT request_json FROM guest_shop_import_v2_capture
+                 WHERE target_account_id=?1",
+                [&target_account],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(request_after, request_before);
+    }
+
+    #[test]
     fn app_scan_ingests_raw_usage_without_mutating_frozen_game_state() {
         let temp = tempfile::tempdir().unwrap();
         let codex_root = temp.path().join("codex");
@@ -894,11 +978,25 @@ mod account_switch_tests {
 
 impl AppState {
     pub(crate) fn select_planet_account(&self, user_id: &str) -> Result<(), String> {
-        if self
-            .switch_planet_account(user_id)
-            .map_err(PlanetAccountSwitchError::into_message)?
-        {
-            self.scan()?;
+        self.select_planet_account_with_outcome(user_id)
+            .map_err(PlanetAccountSwitchError::into_message)
+    }
+
+    pub(crate) fn select_planet_account_with_outcome(
+        &self,
+        user_id: &str,
+    ) -> Result<(), PlanetAccountSwitchError> {
+        let authenticated_account_id = format!("account:{user_id}");
+        self.ledger
+            .lock()
+            .map_err(|_| PlanetAccountSwitchError::Other("행성 계정을 확인할 수 없습니다".into()))?
+            .set_selected_auth_account(&authenticated_account_id)
+            .map_err(|_| {
+                PlanetAccountSwitchError::Other("인증 계정을 저장할 수 없습니다".into())
+            })?;
+        if self.switch_planet_account(user_id)? {
+            self.scan()
+                .map_err(|error| PlanetAccountSwitchError::Other(error.into()))?;
         }
         Ok(())
     }
@@ -1025,13 +1123,13 @@ impl AppState {
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum PlanetAccountSwitchError {
+pub(crate) enum PlanetAccountSwitchError {
     GuestShopImportPending,
     Other(String),
 }
 
 impl PlanetAccountSwitchError {
-    fn into_message(self) -> String {
+    pub(crate) fn into_message(self) -> String {
         match self {
             Self::GuestShopImportPending => {
                 "게스트 상점 가져오기를 완료한 뒤 계정을 전환할 수 있습니다".into()

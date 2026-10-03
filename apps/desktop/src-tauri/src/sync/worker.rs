@@ -53,6 +53,14 @@ pub(crate) fn require_guest_shop_import_complete(ledger: &Ledger) -> Result<(), 
     Ok(())
 }
 
+fn require_guest_shop_import_complete_from_state(state: &AppState) -> Result<(), String> {
+    let ledger = state
+        .ledger
+        .lock()
+        .map_err(|_| "게스트 상점 가져오기 상태를 확인할 수 없습니다")?;
+    require_guest_shop_import_complete(&ledger)
+}
+
 #[cfg(test)]
 fn bootstrap_contribution_snapshot(
     raw: PlanetDeviceContribution,
@@ -502,40 +510,240 @@ async fn finish_signed_reset_intent<C: SignedResetSyncApi>(
 
 pub async fn sync_once(state: &AppState) -> Result<(), String> {
     let _gate = state.sync_gate.lock().await;
-    {
-        let ledger = state.ledger.lock().map_err(|_| "로컬 대기열 오류")?;
-        require_guest_shop_import_complete(&ledger)?;
-    }
     sync_after_guest_import_check(state).await
+}
+
+#[cfg(test)]
+async fn sync_guest_import_before_legacy_sync<T, F, Fut>(
+    state: &AppState,
+    client: &T,
+    access_token: &str,
+    target: &str,
+    legacy_sync: F,
+) -> Result<crate::sync::guest_shop_import::GuestImportSyncOutcome, String>
+where
+    T: crate::sync::guest_shop_import::GuestShopImportTransport,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    use crate::sync::guest_shop_import::{sync_pending_guest_shop_import, GuestImportSyncOutcome};
+
+    let outcome = sync_pending_guest_shop_import(state, client, access_token, target).await?;
+    if matches!(
+        outcome,
+        GuestImportSyncOutcome::NoPending | GuestImportSyncOutcome::Imported
+    ) {
+        if outcome == GuestImportSyncOutcome::Imported {
+            let user_id = target
+                .strip_prefix("account:")
+                .ok_or("게스트 상점 가져오기 계정을 확인할 수 없습니다")?;
+            state.select_planet_account(user_id)?;
+        }
+        legacy_sync().await?;
+    }
+    Ok(outcome)
+}
+
+#[cfg(test)]
+async fn sync_authenticated_legacy_after_guest_import<T, F, Fut>(
+    state: &AppState,
+    user_id: &str,
+    access_token: &str,
+    client: &T,
+    legacy_sync: F,
+) -> Result<crate::sync::guest_shop_import::GuestImportSyncOutcome, String>
+where
+    T: crate::sync::guest_shop_import::GuestShopImportTransport,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    let target = format!("account:{user_id}");
+    sync_guest_import_before_legacy_sync(state, client, access_token, &target, legacy_sync).await
+}
+
+async fn sync_authenticated_legacy_after_guest_import_with_state_read<T, R, RFut, F, Fut>(
+    state: &AppState,
+    user_id: &str,
+    access_token: &str,
+    client: &T,
+    read_confirmed_state: R,
+    legacy_sync: F,
+) -> Result<crate::sync::guest_shop_import::GuestImportSyncOutcome, String>
+where
+    T: crate::sync::guest_shop_import::GuestShopImportTransport,
+    R: FnOnce() -> RFut,
+    RFut: Future<Output = Result<Option<PlanetState>, SyncError>>,
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<(), String>>,
+{
+    use crate::sync::guest_shop_import::{sync_pending_guest_shop_import, GuestImportSyncOutcome};
+
+    let target = format!("account:{user_id}");
+    let outcome = sync_pending_guest_shop_import(state, client, access_token, &target).await?;
+    match outcome {
+        GuestImportSyncOutcome::NoPending | GuestImportSyncOutcome::Imported => {
+            if outcome == GuestImportSyncOutcome::Imported {
+                state.select_planet_account(user_id)?;
+            }
+            legacy_sync().await?;
+        }
+        GuestImportSyncOutcome::ImportedWithCorrectionHold => {
+            let cycle_id = {
+                let ledger = state.ledger.lock().map_err(|_| "행성 상태 오류")?;
+                require_guest_imported_state_read_context(&ledger, &target)?;
+                ledger
+                    .planet_cycle_id()
+                    .map_err(|_| "행성 주기를 확인할 수 없습니다")?
+            };
+            let remote_state = read_confirmed_state().await;
+            {
+                let ledger = state.ledger.lock().map_err(|_| "행성 상태 오류")?;
+                require_guest_imported_state_read_context(&ledger, &target)?;
+                if ledger
+                    .planet_cycle_id()
+                    .map_err(|_| "행성 주기를 확인할 수 없습니다")?
+                    != cycle_id
+                {
+                    return Err("계정 또는 행성 주기가 변경되어 상태 조회를 중단했습니다".into());
+                }
+            }
+            if remote_state
+                .map_err(|_| "서버 행성 상태를 불러올 수 없습니다")?
+                .is_none()
+            {
+                return Err("서버 행성 상태가 확인될 때까지 조회를 보류합니다".into());
+            }
+        }
+        GuestImportSyncOutcome::Held => {}
+    }
+    Ok(outcome)
+}
+
+fn require_guest_imported_state_read_context(
+    ledger: &Ledger,
+    target_account_id: &str,
+) -> Result<(), String> {
+    let selected_auth_account: String = ledger
+        .connection
+        .query_row(
+            "SELECT coalesce((SELECT value FROM setting WHERE key='selected_auth_account_id'), '')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "선택한 계정의 행성 상태를 확인할 수 없습니다")?;
+    let active_planet_account: String = ledger
+        .connection
+        .query_row(
+            "SELECT coalesce((SELECT value FROM setting WHERE key='planet_account_id'), '')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(|_| "활성 행성 소유권을 확인할 수 없습니다")?;
+    let cached_planet_owner_exists: bool = ledger
+        .connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM planet_account_state WHERE account_id=?1)",
+            [target_account_id],
+            |row| row.get(0),
+        )
+        .map_err(|_| "활성 행성 소유권을 확인할 수 없습니다")?;
+    if selected_auth_account != target_account_id
+        || active_planet_account != target_account_id
+        || ledger
+            .cosmetic_account_id()
+            .map_err(|_| "활성 행성 소유권을 확인할 수 없습니다")?
+            != target_account_id
+        || !cached_planet_owner_exists
+    {
+        return Err("선택 계정의 행성 소유권을 확인할 수 없어 상태 조회를 보류합니다".into());
+    }
+    Ok(())
+}
+
+async fn refresh_saved_session_or_queue_cached_state<Fut>(
+    state: &AppState,
+    saved_user_id: &str,
+    refresh: Fut,
+) -> Result<crate::sync::auth::StoredSession, String>
+where
+    Fut: Future<Output = Result<crate::sync::auth::StoredSession, crate::sync::auth::AuthError>>,
+{
+    match refresh.await {
+        Ok(session) => Ok(session),
+        Err(_) => {
+            queue_cached(state, saved_user_id);
+            Err("공동 세계 연결 실패".into())
+        }
+    }
+}
+
+fn select_planet_account_for_authenticated_sync(
+    state: &AppState,
+    user_id: &str,
+) -> Result<(), String> {
+    match state.select_planet_account_with_outcome(user_id) {
+        Ok(()) => Ok(()),
+        Err(crate::PlanetAccountSwitchError::GuestShopImportPending) => {
+            let target = format!("account:{user_id}");
+            let target_has_pending_import = state
+                .ledger
+                .lock()
+                .map_err(|_| "게스트 가져오기 상태 오류")?
+                .pending_guest_shop_import_request(&target)
+                .map_err(|_| "게스트 상점 가져오기 상태를 확인할 수 없습니다")?
+                .is_some();
+            if target_has_pending_import {
+                Ok(())
+            } else {
+                Err(crate::PlanetAccountSwitchError::GuestShopImportPending.into_message())
+            }
+        }
+        Err(error) => Err(error.into_message()),
+    }
 }
 
 async fn sync_after_guest_import_check(state: &AppState) -> Result<(), String> {
     let Some(config) = AuthConfig::from_env() else {
-        return Ok(());
+        return require_guest_shop_import_complete_from_state(state);
     };
     let store = SessionStore::new(&config).map_err(|_| "보안 저장소 오류")?;
     let Some(saved) = store.load().map_err(|_| "로그인 정보 오류")? else {
-        return Ok(());
+        return require_guest_shop_import_complete_from_state(state);
     };
-    state.select_planet_account(&saved.user.id)?;
+    select_planet_account_for_authenticated_sync(state, &saved.user.id)?;
     if state.has_usage_scan_failure() {
         return Err("사용량 기록을 확인한 뒤 동기화할 수 있습니다".into());
     }
-    let session = match SupabaseAuthClient::new(config.clone())
-        .session(&store)
-        .await
-    {
-        Ok(session) => session,
-        Err(_) => {
-            queue_cached(state, &saved.user.id);
-            return Err("공동 세계 연결 실패".into());
-        }
-    };
+    let auth_client = SupabaseAuthClient::new(config.clone());
+    let session = refresh_saved_session_or_queue_cached_state(
+        state,
+        &saved.user.id,
+        auth_client.session(&store),
+    )
+    .await?;
     let client = SupabaseSyncClient::new(&config.base_url, &config.publishable_key);
+    sync_authenticated_legacy_after_guest_import_with_state_read(
+        state,
+        &session.user.id,
+        &session.access_token,
+        &client,
+        || PrivateEffectSyncApi::my_planet_state(&client, &session.access_token),
+        || sync_legacy_authenticated(state, &saved, &session, &client),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn sync_legacy_authenticated(
+    state: &AppState,
+    saved: &crate::sync::auth::StoredSession,
+    session: &crate::sync::auth::StoredSession,
+    client: &SupabaseSyncClient,
+) -> Result<(), String> {
     // A remote reset may already have succeeded even if the previous process
     // lost its response. Resolve its durable receipt before any normal state
     // fetch can merge a newer cycle into the local ledger.
-    if recover_pending_signed_reset(state, &session.user.id, &session.access_token, &client)
+    if recover_pending_signed_reset(state, &session.user.id, &session.access_token, client)
         .await?
         .is_some()
     {
@@ -573,7 +781,7 @@ async fn sync_after_guest_import_check(state: &AppState) -> Result<(), String> {
         state,
         &session.user.id,
         &session.access_token,
-        &client,
+        client,
         world_policy_paused,
     )
     .await?;
@@ -1933,7 +2141,17 @@ mod tests {
         fail_first_upload: Mutex<bool>,
         context_change: Option<(ContextChangeAt, ContextChange)>,
         calls: Mutex<Vec<&'static str>>,
+        order_calls: Option<std::sync::Arc<Mutex<Vec<&'static str>>>>,
         uploads: Mutex<Vec<(serde_json::Value, serde_json::Value)>>,
+    }
+
+    impl MockPrivateSyncApi<'_> {
+        fn record_call(&self, name: &'static str) {
+            self.calls.lock().unwrap().push(name);
+            if let Some(order_calls) = &self.order_calls {
+                order_calls.lock().unwrap().push(name);
+            }
+        }
     }
 
     impl MockPrivateSyncApi<'_> {
@@ -1968,7 +2186,7 @@ mod tests {
             _access_token: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<Option<PlanetState>, SyncError>> + Send + 'a>>
         {
-            self.calls.lock().unwrap().push("planet_state");
+            self.record_call("planet_state");
             self.change_context(ContextChangeAt::PlanetState);
             let result = if self.fail_state {
                 Err(SyncError::Transport)
@@ -1983,7 +2201,7 @@ mod tests {
             _access_token: &'a str,
         ) -> Pin<Box<dyn Future<Output = Result<ShopEffectTimeline, SyncError>> + Send + 'a>>
         {
-            self.calls.lock().unwrap().push("timeline");
+            self.record_call("timeline");
             self.change_context(ContextChangeAt::Timeline);
             let result = if self.fail_timeline {
                 Err(SyncError::Transport)
@@ -1999,7 +2217,7 @@ mod tests {
             state: &'a PlanetState,
             contribution: &'a PlanetDeviceContributionSnapshot,
         ) -> Pin<Box<dyn Future<Output = Result<PlanetState, SyncError>> + Send + 'a>> {
-            self.calls.lock().unwrap().push("upload");
+            self.record_call("upload");
             self.change_context(ContextChangeAt::Upload);
             self.uploads.lock().unwrap().push((
                 serde_json::to_value(state).unwrap(),
@@ -2035,6 +2253,7 @@ mod tests {
             fail_first_upload: Mutex::new(false),
             context_change: None,
             calls: Mutex::new(Vec::new()),
+            order_calls: None,
             uploads: Mutex::new(Vec::new()),
         }
     }
@@ -2673,5 +2892,1911 @@ mod tests {
         assert_eq!(retry.next_after(false).as_secs(), 60);
         assert_eq!(retry.next_after(true).as_secs(), 60);
         assert_eq!(retry.next_after(false).as_secs(), 5);
+    }
+
+    #[cfg(test)]
+    mod guest_import_v2_worker_order_tests {
+        use super::app_state_from_ledger;
+        use super::sync_private_effect_contribution;
+        use crate::{
+            domain::guest_shop_import::{
+                GuestImportPhase, GuestImportSourceRelation, GuestImportStatus,
+                GuestShopImportV2Request, GuestShopImportV2Result,
+            },
+            storage::{
+                guest_shop_import_v2::guest_import_v2_capture_tests::{
+                    imported_result_for, prepared_first_reset_ledger,
+                },
+                PendingGuestShopImport,
+            },
+            sync::{
+                client::SyncError,
+                guest_shop_import::{
+                    sync_pending_guest_shop_import, GuestImportSyncOutcome,
+                    GuestShopImportTransport,
+                },
+            },
+            AppState,
+        };
+        use std::{
+            future::Future,
+            sync::{
+                atomic::{AtomicBool, Ordering},
+                Arc, Mutex,
+            },
+        };
+
+        const TARGET_ACCOUNT: &str = "account:00000000-0000-4000-a000-000000000071";
+        const OTHER_TARGET_ACCOUNT: &str = "account:00000000-0000-4000-a000-000000000072";
+
+        fn ledger_snapshot_excluding_selected_auth(
+            connection: &rusqlite::Connection,
+        ) -> Vec<String> {
+            use rusqlite::types::Value;
+
+            let table_names = {
+                let mut statement = connection
+                    .prepare(
+                        "SELECT name FROM sqlite_master WHERE type='table' \
+                         AND name NOT LIKE 'sqlite_%' ORDER BY name",
+                    )
+                    .unwrap();
+                statement
+                    .query_map([], |row| row.get::<_, String>(0))
+                    .unwrap()
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap()
+            };
+            table_names
+                .into_iter()
+                .map(|table| {
+                    let query = if table == "setting" {
+                        "SELECT key,value FROM setting WHERE key!='selected_auth_account_id'"
+                            .to_owned()
+                    } else {
+                        format!("SELECT * FROM \"{}\"", table.replace('"', "\"\""))
+                    };
+                    let mut statement = connection.prepare(&query).unwrap();
+                    let mut rows = statement
+                        .query_map([], |row| {
+                            (0..row.as_ref().column_count())
+                                .map(|index| {
+                                    row.get::<_, Value>(index).map(|value| format!("{value:?}"))
+                                })
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .unwrap()
+                        .collect::<Result<Vec<_>, _>>()
+                        .unwrap();
+                    rows.sort();
+                    format!("{table}:{rows:?}")
+                })
+                .collect()
+        }
+
+        struct MockLegacyRemoteCalls {
+            order_calls: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl MockLegacyRemoteCalls {
+            fn record(&self, call: &'static str) {
+                self.order_calls.lock().unwrap().push(call);
+            }
+
+            fn current_world(&self) {
+                self.record("current_world");
+            }
+
+            fn get_shop(&self) {
+                self.record("get_shop");
+            }
+
+            fn growth_journal(&self) {
+                self.record("growth_journal");
+            }
+
+            fn upload_journal(&self) {
+                self.record("journal_upload");
+            }
+        }
+
+        struct FakeGuestShopImportTransport<'a> {
+            state: &'a AppState,
+            calls: Mutex<Vec<&'static str>>,
+            order_calls: Arc<Mutex<Vec<&'static str>>>,
+            result: Option<GuestShopImportV2Result>,
+            invalid_response: bool,
+            attempt_started_during_await: AtomicBool,
+            same_request_during_await: AtomicBool,
+            ledger_unlocked_during_await: AtomicBool,
+            select_other_auth_account_after_await: Option<String>,
+            snapshot_before_response: Mutex<Option<Vec<String>>>,
+            append_usage_during_await: Option<(String, String, u64)>,
+        }
+
+        impl GuestShopImportTransport for FakeGuestShopImportTransport<'_> {
+            fn import_guest_shop<'a>(
+                &'a self,
+                _access_token: &'a str,
+                request: &'a GuestShopImportV2Request,
+            ) -> impl Future<Output = Result<GuestShopImportV2Result, SyncError>> + Send + 'a
+            {
+                let request = request.clone();
+                async move {
+                    self.calls.lock().unwrap().push("import_guest_shop");
+                    self.order_calls.lock().unwrap().push("import_guest_shop");
+                    let Ok(ledger) = self.state.ledger.try_lock() else {
+                        self.ledger_unlocked_during_await
+                            .store(false, Ordering::SeqCst);
+                        return Err(SyncError::Transport);
+                    };
+                    self.ledger_unlocked_during_await
+                        .store(true, Ordering::SeqCst);
+                    let pending = ledger
+                        .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                        .map_err(|_| SyncError::InvalidResponse)?;
+                    let attempt_started = matches!(
+                        pending,
+                        Some(PendingGuestShopImport::V2(ref status))
+                            if status.phase == GuestImportPhase::AttemptStarted
+                    );
+                    let same_request = matches!(
+                        pending,
+                        Some(PendingGuestShopImport::V2(ref status))
+                            if status.request == request
+                    );
+                    self.attempt_started_during_await
+                        .store(attempt_started, Ordering::SeqCst);
+                    self.same_request_during_await
+                        .store(same_request, Ordering::SeqCst);
+                    *self.snapshot_before_response.lock().unwrap() =
+                        Some(ledger_snapshot_excluding_selected_auth(&ledger.connection));
+                    drop(ledger);
+                    if !attempt_started || !same_request {
+                        return Err(SyncError::InvalidResponse);
+                    }
+                    if let Some(other_account) = &self.select_other_auth_account_after_await {
+                        let mut ledger = self.state.ledger.lock().unwrap();
+                        ledger
+                            .set_selected_auth_account(other_account)
+                            .map_err(|_| SyncError::InvalidResponse)?;
+                    }
+                    if let Some((event_key, occurred_at_utc, total_tokens)) =
+                        &self.append_usage_during_await
+                    {
+                        let mut ledger = self.state.ledger.lock().unwrap();
+                        let import_id = uuid::Uuid::parse_str(&request.snapshot.import_id).unwrap();
+                        super::add_usage(&mut ledger, event_key, occurred_at_utc, *total_tokens);
+                        assert_eq!(
+                            ledger.guest_import_source_relation(import_id).unwrap(),
+                            GuestImportSourceRelation::AppendOnly
+                        );
+                        let transaction = ledger
+                            .connection
+                            .transaction()
+                            .map_err(|_| SyncError::InvalidResponse)?;
+                        crate::storage::ledger::Ledger::prepare_growth_journal_in_transaction(
+                            &transaction,
+                        )
+                        .map_err(|_| SyncError::InvalidResponse)?;
+                        transaction
+                            .commit()
+                            .map_err(|_| SyncError::InvalidResponse)?;
+                        let Some(PendingGuestShopImport::V2(status)) = ledger
+                            .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                            .unwrap()
+                        else {
+                            panic!("the in-flight v2 capture must remain readable");
+                        };
+                        assert_eq!(
+                            status.source_relation,
+                            GuestImportSourceRelation::AppendOnly
+                        );
+                        assert!(!status.correction_hold);
+                        assert_eq!(
+                            ledger.guest_import_source_relation(import_id).unwrap(),
+                            GuestImportSourceRelation::AppendOnly
+                        );
+                    }
+                    if self.invalid_response {
+                        return Err(SyncError::InvalidResponse);
+                    }
+                    Ok(self
+                        .result
+                        .clone()
+                        .unwrap_or_else(|| imported_result_for(&request)))
+                }
+            }
+        }
+
+        struct LostResponseGuestShopImportTransport {
+            requests: Mutex<Vec<GuestShopImportV2Request>>,
+            applied_request: Mutex<Option<GuestShopImportV2Request>>,
+            order_calls: Arc<Mutex<Vec<&'static str>>>,
+        }
+
+        impl GuestShopImportTransport for LostResponseGuestShopImportTransport {
+            fn import_guest_shop<'a>(
+                &'a self,
+                _access_token: &'a str,
+                request: &'a GuestShopImportV2Request,
+            ) -> impl Future<Output = Result<GuestShopImportV2Result, SyncError>> + Send + 'a
+            {
+                let request = request.clone();
+                async move {
+                    self.order_calls.lock().unwrap().push("import_guest_shop");
+                    let mut requests = self.requests.lock().unwrap();
+                    requests.push(request.clone());
+                    if requests.len() == 1 {
+                        *self.applied_request.lock().unwrap() = Some(request);
+                        return Err(SyncError::Transport);
+                    }
+                    drop(requests);
+                    if self.applied_request.lock().unwrap().as_ref() != Some(&request) {
+                        return Err(SyncError::InvalidResponse);
+                    }
+                    Ok(imported_result_for(&request))
+                }
+            }
+        }
+
+        #[test]
+        fn guest_import_v2_worker_pending_dispatches_import_with_attempt_before_await() {
+            let state = app_state_from_ledger(prepared_first_reset_ledger());
+            {
+                let mut ledger = state.ledger.lock().unwrap();
+                let PendingGuestShopImport::V2(capture) = ledger
+                    .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap()
+                else {
+                    panic!("schema-2 import capture expected");
+                };
+                assert_eq!(capture.request.schema_version, 2);
+                ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            }
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: Arc::new(Mutex::new(Vec::new())),
+                result: None,
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+
+            let result = tauri::async_runtime::block_on(sync_pending_guest_shop_import(
+                &state,
+                &transport,
+                "test-access-token",
+                TARGET_ACCOUNT,
+            ));
+
+            assert_eq!(result, Ok(GuestImportSyncOutcome::Imported));
+            assert_eq!(*transport.calls.lock().unwrap(), ["import_guest_shop"]);
+            assert!(transport
+                .attempt_started_during_await
+                .load(Ordering::SeqCst));
+            assert!(transport.same_request_during_await.load(Ordering::SeqCst));
+            assert!(transport
+                .ledger_unlocked_during_await
+                .load(Ordering::SeqCst));
+        }
+
+        #[test]
+        fn authenticated_sync_keeps_new_cycle_append_pending_after_import_await() {
+            const APPENDED_EVENT_KEY: &str = "v2-worker-append-during-await";
+            const APPENDED_TOKENS: u64 = 1_234;
+
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let imported_result = imported_result_for(&request);
+            let ack = imported_result.ack.as_ref().unwrap().clone();
+            let current_cycle_id = request
+                .snapshot
+                .provenance
+                .reset_receipt
+                .result
+                .new_cycle_id
+                .clone();
+            let reset_at = chrono::DateTime::parse_from_rfc3339(
+                &request
+                    .snapshot
+                    .provenance
+                    .reset_receipt
+                    .result
+                    .reset_at_utc,
+            )
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+            let appended_at = chrono::Utc::now();
+            assert!(appended_at >= reset_at);
+            let appended_at_rfc3339 = appended_at.to_rfc3339();
+            let appended_bucket_date = appended_at.format("%Y-%m-%d").to_string();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: Some(imported_result),
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: Some((
+                    APPENDED_EVENT_KEY.into(),
+                    appended_at_rfc3339,
+                    APPENDED_TOKENS,
+                )),
+            };
+            let legacy_order = order_calls.clone();
+            let legacy_state = &state;
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        let ledger = legacy_state.ledger.lock().unwrap();
+                        assert_eq!(ledger.cosmetic_account_id().unwrap(), TARGET_ACCOUNT);
+                        let Some(PendingGuestShopImport::V2(status)) = ledger
+                            .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                            .unwrap()
+                        else {
+                            panic!("legacy continuation must observe the completed import");
+                        };
+                        assert_eq!(status.phase, GuestImportPhase::Imported);
+
+                        let contribution = ledger.shop_device_contribution(false).unwrap();
+                        assert_eq!(contribution.raw.current_cycle_id, current_cycle_id);
+                        assert_eq!(contribution.raw.current_planet_tokens, APPENDED_TOKENS);
+                        assert!(contribution.canonical_version > ack.canonical_version);
+
+                        for acknowledged in &ack.journal_entries {
+                            let acknowledged_revision: i64 = ledger
+                                .connection
+                                .query_row(
+                                    "SELECT acknowledged_revision FROM growth_journal_entry
+                                     WHERE account_id=?1 AND device_id=?2 AND cycle_id=?3
+                                       AND bucket_date=?4 AND agent=?5 AND generation=?6",
+                                    rusqlite::params![
+                                        TARGET_ACCOUNT,
+                                        acknowledged.logical_key.device_id,
+                                        acknowledged.logical_key.cycle_id,
+                                        acknowledged.logical_key.bucket_date,
+                                        crate::storage::ledger::agent_name(
+                                            acknowledged.logical_key.agent
+                                        ),
+                                        acknowledged.logical_key.generation,
+                                    ],
+                                    |row| row.get(0),
+                                )
+                                .unwrap();
+                            assert_eq!(
+                                acknowledged_revision, acknowledged.revision as i64,
+                                "only the captured journal revision should be acknowledged"
+                            );
+                        }
+
+                        let (revision, acknowledged_revision): (i64, i64) = ledger
+                            .connection
+                            .query_row(
+                                "SELECT revision,acknowledged_revision FROM growth_journal_entry
+                                 WHERE account_id=?1 AND device_id=?2 AND cycle_id=?3
+                                   AND bucket_date=?4 AND agent='codex'",
+                                rusqlite::params![
+                                    TARGET_ACCOUNT,
+                                    request.snapshot.provenance.device_id,
+                                    current_cycle_id,
+                                    appended_bucket_date,
+                                ],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .unwrap();
+                        assert!(revision > acknowledged_revision);
+                        assert!(!ack.journal_entries.iter().any(|entry| {
+                            entry.logical_key.cycle_id == current_cycle_id
+                                && entry.logical_key.bucket_date == appended_bucket_date
+                        }));
+                        assert_eq!(
+                            ledger
+                                .connection
+                                .query_row::<i64, _, _>(
+                                    "SELECT count(*) FROM usage_record WHERE event_key=?1",
+                                    [APPENDED_EVENT_KEY],
+                                    |row| row.get(0),
+                                )
+                                .unwrap(),
+                            1,
+                            "the appended raw event must remain durable"
+                        );
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(result, Ok(GuestImportSyncOutcome::Imported));
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                ["import_guest_shop", "legacy_sync"]
+            );
+        }
+
+        #[test]
+        fn authenticated_sync_late_old_usage_only_increases_lifetime_after_import_await() {
+            const LATE_EVENT_KEY: &str = "v2-worker-late-old-during-await";
+            const LATE_TOKENS: u64 = 2_345;
+
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let imported_result = imported_result_for(&request);
+            let ack = imported_result.ack.as_ref().unwrap().clone();
+            let imported_planet_wallet_credits = imported_result
+                .planet_state
+                .as_ref()
+                .unwrap()
+                .wallet_credits
+                .clone();
+            let old_cycle_id = request
+                .snapshot
+                .provenance
+                .reset_receipt
+                .request
+                .cycle_id
+                .clone();
+            let reset_result = &request.snapshot.provenance.reset_receipt.result;
+            let expected_reset_credit = imported_result
+                .journal_confirmation
+                .as_ref()
+                .unwrap()
+                .cycles
+                .iter()
+                .find(|cycle| cycle.cycle_id == old_cycle_id)
+                .and_then(|cycle| cycle.wallet_credit)
+                .expect("the imported old cycle retains its settled reset credit");
+            assert_eq!(expected_reset_credit, 1_000_000);
+            assert_eq!(expected_reset_credit, reset_result.credited_tokens);
+            let imported_planet_state = imported_result.planet_state.as_ref().unwrap();
+            assert_eq!(
+                imported_planet_state.wallet_balance,
+                reset_result.credited_tokens
+            );
+            assert_eq!(imported_planet_state.wallet_credits.len(), 1);
+            assert_eq!(
+                imported_planet_state.wallet_credits[0].previous_cycle_id,
+                reset_result.previous_cycle_id
+            );
+            assert_eq!(
+                imported_planet_state.wallet_credits[0].amount,
+                reset_result.credited_tokens
+            );
+            assert_eq!(
+                imported_planet_state.wallet_credits[0].created_at_utc,
+                reset_result.reset_at_utc
+            );
+            let imported_shop_wallet_balance = imported_result
+                .shop_state
+                .as_ref()
+                .unwrap()
+                .available_balance;
+            assert_eq!(imported_shop_wallet_balance, reset_result.credited_tokens);
+            let captured_lifetime_tokens = imported_result
+                .canonical_contribution
+                .as_ref()
+                .unwrap()
+                .raw
+                .lifetime_tokens;
+            let current_cycle_id = request
+                .snapshot
+                .provenance
+                .reset_receipt
+                .result
+                .new_cycle_id
+                .clone();
+            let reset_at = chrono::DateTime::parse_from_rfc3339(
+                &request
+                    .snapshot
+                    .provenance
+                    .reset_receipt
+                    .result
+                    .reset_at_utc,
+            )
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+            let captured_at =
+                chrono::DateTime::parse_from_rfc3339(&request.snapshot.captured_at_utc)
+                    .unwrap()
+                    .with_timezone(&chrono::Utc);
+            assert!(captured_at > reset_at);
+            let late_at = reset_at - chrono::Duration::milliseconds(1);
+            let late_at_rfc3339 = late_at.to_rfc3339();
+            let late_bucket_date = late_at.format("%Y-%m-%d").to_string();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: Some(imported_result),
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: Some((
+                    LATE_EVENT_KEY.into(),
+                    late_at_rfc3339,
+                    LATE_TOKENS,
+                )),
+            };
+            let legacy_order = order_calls.clone();
+            let legacy_state = &state;
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        let ledger = legacy_state.ledger.lock().unwrap();
+                        assert_eq!(ledger.cosmetic_account_id().unwrap(), TARGET_ACCOUNT);
+                        let Some(PendingGuestShopImport::V2(status)) = ledger
+                            .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                            .unwrap()
+                        else {
+                            panic!("legacy continuation must observe the completed import");
+                        };
+                        assert_eq!(status.phase, GuestImportPhase::Imported);
+
+                        let contribution = ledger.shop_device_contribution(false).unwrap();
+                        assert_eq!(contribution.raw.current_cycle_id, current_cycle_id);
+                        assert_eq!(contribution.raw.current_planet_tokens, 0);
+                        assert_eq!(
+                            contribution.raw.lifetime_tokens,
+                            captured_lifetime_tokens + LATE_TOKENS
+                        );
+                        assert!(contribution.canonical_version > ack.canonical_version);
+                        assert_eq!(
+                            ledger.planet_wallet_credits().unwrap(),
+                            imported_planet_wallet_credits
+                        );
+                        let retained_reset_credit: Option<i64> = ledger
+                            .connection
+                            .query_row(
+                                "SELECT wallet_credit FROM growth_journal_cycle
+                                 WHERE account_id=?1 AND cycle_id=?2",
+                                rusqlite::params![TARGET_ACCOUNT, old_cycle_id],
+                                |row| row.get(0),
+                            )
+                            .unwrap();
+                        assert_eq!(
+                            retained_reset_credit,
+                            Some(expected_reset_credit as i64),
+                            "the captured reset credit must remain and must not be credited again"
+                        );
+                        let (credit_count, credit_total): (i64, i64) = ledger
+                            .connection
+                            .query_row(
+                                "SELECT count(wallet_credit),coalesce(sum(wallet_credit),0)
+                                 FROM growth_journal_cycle WHERE account_id=?1",
+                                [TARGET_ACCOUNT],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .unwrap();
+                        assert_eq!(credit_count, 1);
+                        assert_eq!(credit_total, expected_reset_credit as i64);
+                        let confirmed_shop_state_json: String = ledger
+                            .connection
+                            .query_row(
+                                "SELECT state_json FROM shop_remote_state WHERE account_id=?1",
+                                [TARGET_ACCOUNT],
+                                |row| row.get(0),
+                            )
+                            .unwrap();
+                        let confirmed_shop_state: crate::domain::cosmetic_shop::ShopState =
+                            serde_json::from_str(&confirmed_shop_state_json).unwrap();
+                        assert_eq!(
+                            confirmed_shop_state.available_balance,
+                            imported_shop_wallet_balance
+                        );
+
+                        let captured_old_entry = ack
+                            .journal_entries
+                            .iter()
+                            .find(|entry| {
+                                entry.logical_key.cycle_id == old_cycle_id
+                                    && entry.logical_key.bucket_date == late_bucket_date
+                            })
+                            .expect("captured old-cycle journal entry expected");
+                        let (revision, acknowledged_revision): (i64, i64) = ledger
+                            .connection
+                            .query_row(
+                                "SELECT revision,acknowledged_revision FROM growth_journal_entry
+                                 WHERE account_id=?1 AND device_id=?2 AND cycle_id=?3
+                                   AND bucket_date=?4 AND agent=?5 AND generation=?6",
+                                rusqlite::params![
+                                    TARGET_ACCOUNT,
+                                    captured_old_entry.logical_key.device_id,
+                                    captured_old_entry.logical_key.cycle_id,
+                                    captured_old_entry.logical_key.bucket_date,
+                                    crate::storage::ledger::agent_name(
+                                        captured_old_entry.logical_key.agent
+                                    ),
+                                    captured_old_entry.logical_key.generation,
+                                ],
+                                |row| Ok((row.get(0)?, row.get(1)?)),
+                            )
+                            .unwrap();
+                        assert!(revision > captured_old_entry.revision as i64);
+                        assert_eq!(acknowledged_revision, captured_old_entry.revision as i64);
+                        assert_eq!(
+                            ledger
+                                .connection
+                                .query_row::<i64, _, _>(
+                                    "SELECT count(*) FROM usage_record WHERE event_key=?1",
+                                    [LATE_EVENT_KEY],
+                                    |row| row.get(0),
+                                )
+                                .unwrap(),
+                            1,
+                            "late old-cycle raw usage must remain durable"
+                        );
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(result, Ok(GuestImportSyncOutcome::Imported));
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                ["import_guest_shop", "legacy_sync"]
+            );
+        }
+
+        #[test]
+        fn sync_guest_import_pipeline_dispatches_before_private_contribution_upload() {
+            let state = app_state_from_ledger(prepared_first_reset_ledger());
+            let request = {
+                let mut ledger = state.ledger.lock().unwrap();
+                let PendingGuestShopImport::V2(capture) = ledger
+                    .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap()
+                else {
+                    panic!("schema-2 import capture expected");
+                };
+                ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+                capture.request
+            };
+            let new_cycle_id = request
+                .snapshot
+                .provenance
+                .reset_receipt
+                .result
+                .new_cycle_id
+                .clone();
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let import_result = imported_result_for(&request);
+            let imported_timeline = import_result.effect_timeline.clone().unwrap();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: Some(import_result),
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+            let mut private_api = super::mock_private_api(None, user_id, &new_cycle_id);
+            private_api.timeline = imported_timeline;
+            private_api.order_calls = Some(order_calls.clone());
+
+            let result =
+                tauri::async_runtime::block_on(super::super::sync_guest_import_before_legacy_sync(
+                    &state,
+                    &transport,
+                    "test-access-token",
+                    TARGET_ACCOUNT,
+                    || async {
+                        sync_private_effect_contribution(
+                            &state,
+                            user_id,
+                            "test-access-token",
+                            &private_api,
+                            false,
+                        )
+                        .await
+                        .map(|_| ())
+                    },
+                ));
+
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                ["import_guest_shop", "planet_state", "timeline", "upload"]
+            );
+            assert_eq!(result, Ok(GuestImportSyncOutcome::Imported));
+        }
+
+        #[test]
+        fn authenticated_sync_dispatches_import_before_world_private_shop_and_journal_calls() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            assert!(state.select_planet_account(user_id).is_err());
+            let import_result = imported_result_for(&request);
+            let imported_timeline = import_result.effect_timeline.clone().unwrap();
+            let new_cycle_id = request
+                .snapshot
+                .provenance
+                .reset_receipt
+                .result
+                .new_cycle_id
+                .clone();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: Some(import_result),
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+            let mut private_api = super::mock_private_api(None, user_id, &new_cycle_id);
+            private_api.timeline = imported_timeline;
+            private_api.order_calls = Some(order_calls.clone());
+            let legacy_calls = MockLegacyRemoteCalls {
+                order_calls: order_calls.clone(),
+            };
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async {
+                        legacy_calls.current_world();
+                        sync_private_effect_contribution(
+                            &state,
+                            user_id,
+                            "test-access-token",
+                            &private_api,
+                            false,
+                        )
+                        .await
+                        .map(|_| ())?;
+                        legacy_calls.get_shop();
+                        legacy_calls.growth_journal();
+                        legacy_calls.upload_journal();
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                [
+                    "import_guest_shop",
+                    "current_world",
+                    "planet_state",
+                    "timeline",
+                    "upload",
+                    "get_shop",
+                    "growth_journal",
+                    "journal_upload",
+                ]
+            );
+            assert_eq!(result, Ok(GuestImportSyncOutcome::Imported));
+            assert_eq!(
+                state.ledger.lock().unwrap().cosmetic_account_id().unwrap(),
+                TARGET_ACCOUNT
+            );
+        }
+
+        #[test]
+        fn authenticated_sync_holds_changed_guest_capture_without_legacy_continuation() {
+            let mut ledger = prepared_first_reset_ledger();
+            ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap();
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            assert!(state.select_planet_account(user_id).is_err());
+            state
+                .ledger
+                .lock()
+                .unwrap()
+                .connection
+                .execute(
+                    "UPDATE usage_record SET total_tokens=total_tokens+1 WHERE event_key=?1",
+                    ["v2-capture-raw-1m"],
+                )
+                .unwrap();
+
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: None,
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+            let legacy_order = order_calls.clone();
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(result, Ok(GuestImportSyncOutcome::Held));
+            assert!(transport.calls.lock().unwrap().is_empty());
+            assert!(order_calls.lock().unwrap().is_empty());
+        }
+
+        #[test]
+        fn authenticated_sync_keeps_imported_correction_hold_before_legacy_continuation() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            ledger
+                .mark_guest_shop_import_attempt_started(
+                    TARGET_ACCOUNT,
+                    request.snapshot.import_id.parse().unwrap(),
+                )
+                .unwrap();
+            ledger
+                .connection
+                .execute(
+                    "UPDATE usage_record SET total_tokens=total_tokens+1 WHERE event_key=?1",
+                    ["v2-capture-raw-1m"],
+                )
+                .unwrap();
+            let imported_result = imported_result_for(&request);
+            assert_eq!(
+                ledger
+                    .complete_guest_shop_import(TARGET_ACCOUNT, &imported_result)
+                    .unwrap(),
+                crate::storage::guest_shop_import_v2::GuestImportCompletion::
+                    ImportedWithCorrectionHold
+            );
+
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let current_cycle_id = imported_result
+                .planet_state
+                .as_ref()
+                .unwrap()
+                .current_cycle_id
+                .clone();
+            let mut private_api =
+                super::mock_private_api(Some(&state.ledger), user_id, &current_cycle_id);
+            private_api.remote_state = imported_result.planet_state.clone();
+            private_api.order_calls = Some(order_calls.clone());
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: None,
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+            let imported_status_before = state
+                .ledger
+                .lock()
+                .unwrap()
+                .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap();
+            let legacy_order = order_calls.clone();
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import_with_state_read(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || {
+                        super::PrivateEffectSyncApi::my_planet_state(
+                            &private_api,
+                            "test-access-token",
+                        )
+                    },
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(
+                result,
+                Ok(GuestImportSyncOutcome::ImportedWithCorrectionHold)
+            );
+            assert!(transport.calls.lock().unwrap().is_empty());
+            assert_eq!(*private_api.calls.lock().unwrap(), ["planet_state"]);
+            assert_eq!(*order_calls.lock().unwrap(), ["planet_state"]);
+            assert_eq!(
+                state
+                    .ledger
+                    .lock()
+                    .unwrap()
+                    .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap(),
+                imported_status_before,
+                "the confirmed-state read must preserve the imported correction marker and receipt"
+            );
+        }
+
+        #[test]
+        fn authenticated_sync_aborts_confirmed_state_read_if_account_changes_during_await() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            ledger
+                .mark_guest_shop_import_attempt_started(
+                    TARGET_ACCOUNT,
+                    request.snapshot.import_id.parse().unwrap(),
+                )
+                .unwrap();
+            ledger
+                .connection
+                .execute(
+                    "UPDATE usage_record SET total_tokens=total_tokens+1 WHERE event_key=?1",
+                    ["v2-capture-raw-1m"],
+                )
+                .unwrap();
+            let imported_result = imported_result_for(&request);
+            assert_eq!(
+                ledger
+                    .complete_guest_shop_import(TARGET_ACCOUNT, &imported_result)
+                    .unwrap(),
+                crate::storage::guest_shop_import_v2::GuestImportCompletion::
+                    ImportedWithCorrectionHold
+            );
+
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: None,
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+            let status_before = state
+                .ledger
+                .lock()
+                .unwrap()
+                .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap();
+            let snapshot_before = {
+                let ledger = state.ledger.lock().unwrap();
+                ledger_snapshot_excluding_selected_auth(&ledger.connection)
+            };
+            let read_calls = Arc::new(Mutex::new(Vec::new()));
+            let read_call_record = read_calls.clone();
+            let state_ref = &state;
+            let remote_state = imported_result.planet_state.clone().unwrap();
+            let legacy_order = order_calls.clone();
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import_with_state_read(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        read_call_record.lock().unwrap().push("planet_state");
+                        state_ref
+                            .ledger
+                            .lock()
+                            .unwrap()
+                            .set_selected_auth_account(OTHER_TARGET_ACCOUNT)
+                            .unwrap();
+                        Ok(Some(remote_state))
+                    },
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert!(result.is_err(), "the post-read account guard must abort");
+            assert!(transport.calls.lock().unwrap().is_empty());
+            assert_eq!(*read_calls.lock().unwrap(), ["planet_state"]);
+            assert!(order_calls.lock().unwrap().is_empty());
+            let ledger = state.ledger.lock().unwrap();
+            assert_eq!(
+                snapshot_before,
+                ledger_snapshot_excluding_selected_auth(&ledger.connection),
+                "a late response from the old account must not mutate local state"
+            );
+            assert_eq!(
+                ledger
+                    .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap(),
+                status_before,
+                "the imported correction hold and receipt remain recoverable"
+            );
+            assert_eq!(
+                ledger
+                    .connection
+                    .query_row::<String, _, _>(
+                        "SELECT value FROM setting WHERE key='selected_auth_account_id'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                OTHER_TARGET_ACCOUNT
+            );
+        }
+
+        #[test]
+        fn authenticated_sync_keeps_typed_server_hold_before_legacy_continuation() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            ledger
+                .mark_guest_shop_import_attempt_started(
+                    TARGET_ACCOUNT,
+                    request.snapshot.import_id.parse().unwrap(),
+                )
+                .unwrap();
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let held_result = GuestShopImportV2Result {
+                schema_version: 2,
+                import_id: request.snapshot.import_id.clone(),
+                account_id: request.snapshot.target_account_id.clone(),
+                source_fingerprint: request.snapshot.source_fingerprint.clone(),
+                status: GuestImportStatus::SourceUnverifiable,
+                shop_state: None,
+                planet_state: None,
+                effect_timeline: None,
+                canonical_contribution: None,
+                journal_confirmation: None,
+                ack: None,
+            };
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: Some(held_result),
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+            let legacy_order = order_calls.clone();
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(result, Ok(GuestImportSyncOutcome::Held));
+            assert_eq!(*transport.calls.lock().unwrap(), ["import_guest_shop"]);
+            assert!(order_calls
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|call| *call == "import_guest_shop"));
+            assert!(transport
+                .attempt_started_during_await
+                .load(Ordering::SeqCst));
+            assert!(transport.same_request_during_await.load(Ordering::SeqCst));
+        }
+
+        #[test]
+        fn authenticated_sync_without_pending_import_runs_legacy_continuation() {
+            let state = app_state_from_ledger(
+                crate::storage::ledger::Ledger::open(
+                    std::path::Path::new(":memory:"),
+                    chrono_tz::UTC,
+                )
+                .unwrap(),
+            );
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: None,
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+            let legacy_order = order_calls.clone();
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(result, Ok(GuestImportSyncOutcome::NoPending));
+            assert!(transport.calls.lock().unwrap().is_empty());
+            assert_eq!(*order_calls.lock().unwrap(), ["legacy_sync"]);
+        }
+
+        #[test]
+        fn authenticated_import_completes_during_local_sharing_pause_without_legacy_upload() {
+            let mut ledger = prepared_first_reset_ledger();
+            ledger.set_sharing_paused(true).unwrap();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let cycle_id = request
+                .snapshot
+                .canonical_payload
+                .raw
+                .current_cycle_id
+                .clone();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let imported_result = imported_result_for(&request);
+            let mut private_api = super::mock_private_api(Some(&state.ledger), user_id, &cycle_id);
+            private_api.remote_state = imported_result.planet_state.clone();
+            private_api.timeline = imported_result.effect_timeline.clone().unwrap();
+            private_api.canonical_state = imported_result.planet_state.clone().unwrap();
+            private_api.order_calls = Some(order_calls.clone());
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: Some(imported_result),
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+
+            let first_state = &state;
+            let first_api = &private_api;
+            let first_order = order_calls.clone();
+            let first_request = request.clone();
+            let first = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        first_order
+                            .lock()
+                            .unwrap()
+                            .push("legacy_private_effect_sync");
+                        {
+                            let ledger = first_state.ledger.lock().unwrap();
+                            let Some(PendingGuestShopImport::V2(imported)) = ledger
+                                .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                                .unwrap()
+                            else {
+                                panic!("legacy sync must start after import completion");
+                            };
+                            assert_eq!(imported.phase, GuestImportPhase::Imported);
+                            assert_eq!(imported.request, first_request);
+                        }
+                        let outcome = super::sync_private_effect_contribution(
+                            first_state,
+                            user_id,
+                            "test-access-token",
+                            first_api,
+                            false,
+                        )
+                        .await?;
+                        assert_eq!(
+                            outcome,
+                            super::super::PrivateEffectSyncOutcome::HeldForSharingPause
+                        );
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(first, Ok(GuestImportSyncOutcome::Imported));
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                [
+                    "import_guest_shop",
+                    "legacy_private_effect_sync",
+                    "planet_state",
+                    "timeline"
+                ]
+            );
+            assert_eq!(
+                *private_api.calls.lock().unwrap(),
+                ["planet_state", "timeline"]
+            );
+            assert!(private_api.uploads.lock().unwrap().is_empty());
+            assert_eq!(*transport.calls.lock().unwrap(), ["import_guest_shop"]);
+            let committed_result_json: String = state
+                .ledger
+                .lock()
+                .unwrap()
+                .connection
+                .query_row(
+                    "SELECT result_json FROM guest_shop_import_v2_capture WHERE target_account_id=?1",
+                    [TARGET_ACCOUNT],
+                    |row| row.get(0),
+                )
+                .unwrap();
+
+            let retry_state = &state;
+            let retry_api = &private_api;
+            let retry_order = order_calls.clone();
+            let retry_request = request.clone();
+            let retry = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        retry_order
+                            .lock()
+                            .unwrap()
+                            .push("legacy_private_effect_sync");
+                        {
+                            let ledger = retry_state.ledger.lock().unwrap();
+                            let Some(PendingGuestShopImport::V2(imported)) = ledger
+                                .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                                .unwrap()
+                            else {
+                                panic!("retry must observe the committed import receipt");
+                            };
+                            assert_eq!(imported.phase, GuestImportPhase::Imported);
+                            assert_eq!(imported.request, retry_request);
+                        }
+                        let outcome = super::sync_private_effect_contribution(
+                            retry_state,
+                            user_id,
+                            "test-access-token",
+                            retry_api,
+                            false,
+                        )
+                        .await?;
+                        assert_eq!(
+                            outcome,
+                            super::super::PrivateEffectSyncOutcome::HeldForSharingPause
+                        );
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(retry, Ok(GuestImportSyncOutcome::Imported));
+            assert_eq!(*transport.calls.lock().unwrap(), ["import_guest_shop"]);
+            assert_eq!(
+                *private_api.calls.lock().unwrap(),
+                ["planet_state", "timeline", "planet_state", "timeline"]
+            );
+            assert!(private_api.uploads.lock().unwrap().is_empty());
+            let ledger = state.ledger.lock().unwrap();
+            assert_eq!(
+                ledger
+                    .connection
+                    .query_row::<String, _, _>(
+                        "SELECT result_json FROM guest_shop_import_v2_capture WHERE target_account_id=?1",
+                        [TARGET_ACCOUNT],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                committed_result_json
+            );
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                [
+                    "import_guest_shop",
+                    "legacy_private_effect_sync",
+                    "planet_state",
+                    "timeline",
+                    "legacy_private_effect_sync",
+                    "planet_state",
+                    "timeline"
+                ]
+            );
+        }
+
+        #[test]
+        fn authenticated_selection_only_suppresses_the_guest_import_pending_outcome() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger
+                .connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_auth_selection_insert
+                     BEFORE INSERT ON setting
+                     WHEN NEW.key='selected_auth_account_id'
+                     BEGIN SELECT RAISE(ABORT,'injected auth selection storage failure'); END;",
+                )
+                .unwrap();
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+
+            let unrelated_storage_failure =
+                super::super::select_planet_account_for_authenticated_sync(&state, user_id);
+
+            assert_eq!(
+                unrelated_storage_failure,
+                Err("인증 계정을 저장할 수 없습니다".into()),
+                "a pending capture must not hide an unrelated auth-selection storage error"
+            );
+            {
+                let ledger = state.ledger.lock().unwrap();
+                let Some(PendingGuestShopImport::V2(pending)) = ledger
+                    .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap()
+                else {
+                    panic!("the original capture must remain pending");
+                };
+                assert_eq!(pending.phase, GuestImportPhase::Captured);
+                assert_eq!(pending.request, request);
+                assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+                ledger
+                    .connection
+                    .execute_batch("DROP TRIGGER fail_auth_selection_insert")
+                    .unwrap();
+            }
+
+            assert_eq!(
+                super::super::select_planet_account_for_authenticated_sync(&state, user_id),
+                Ok(()),
+                "the typed GuestShopImportPending outcome remains resumable"
+            );
+            let ledger = state.ledger.lock().unwrap();
+            let Some(PendingGuestShopImport::V2(pending)) = ledger
+                .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("the resumable capture must remain pending");
+            };
+            assert_eq!(pending.phase, GuestImportPhase::Captured);
+            assert_eq!(pending.request, request);
+            assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+        }
+
+        #[test]
+        fn authenticated_sync_retries_lost_response_with_same_import_request() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let first_request = capture.request;
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            assert!(state.select_planet_account(user_id).is_err());
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = LostResponseGuestShopImportTransport {
+                requests: Mutex::new(Vec::new()),
+                applied_request: Mutex::new(None),
+                order_calls: order_calls.clone(),
+            };
+
+            let first = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async { panic!("legacy continuation ran after a lost response") },
+                ),
+            );
+
+            assert_eq!(
+                first,
+                Err("게스트 상점 가져오기를 완료하지 못했습니다".into())
+            );
+            assert_eq!(
+                transport.requests.lock().unwrap().as_slice(),
+                [first_request.clone()]
+            );
+            {
+                let ledger = state.ledger.lock().unwrap();
+                let Some(PendingGuestShopImport::V2(pending)) = ledger
+                    .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap()
+                else {
+                    panic!("the durable attempt must remain after response loss");
+                };
+                assert_eq!(pending.phase, GuestImportPhase::AttemptStarted);
+                assert_eq!(pending.request, first_request);
+                assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+            }
+
+            let legacy_order = order_calls.clone();
+            let retry = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(retry, Ok(GuestImportSyncOutcome::Imported));
+            assert_eq!(
+                transport.requests.lock().unwrap().as_slice(),
+                [first_request.clone(), first_request.clone()]
+            );
+            assert_eq!(
+                *transport.applied_request.lock().unwrap(),
+                Some(first_request)
+            );
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                ["import_guest_shop", "import_guest_shop", "legacy_sync"]
+            );
+        }
+
+        #[test]
+        fn authenticated_sync_retries_same_import_after_local_marker_failure() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            ledger
+                .connection
+                .execute_batch(
+                    "CREATE TRIGGER fail_v2_import_marker
+                     BEFORE UPDATE OF phase ON guest_shop_import_v2_capture
+                     WHEN NEW.phase='imported'
+                     BEGIN SELECT RAISE(ABORT,'injected final import marker failure'); END;",
+                )
+                .unwrap();
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: Some(imported_result_for(&request)),
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+
+            let first = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async { panic!("legacy continuation ran after local completion failed") },
+                ),
+            );
+
+            assert_eq!(
+                first,
+                Err("게스트 상점 가져오기 응답을 저장할 수 없습니다".into())
+            );
+            assert_eq!(*transport.calls.lock().unwrap(), ["import_guest_shop"]);
+            assert!(transport
+                .attempt_started_during_await
+                .load(Ordering::SeqCst));
+            assert!(transport.same_request_during_await.load(Ordering::SeqCst));
+            let before_failed_completion = transport
+                .snapshot_before_response
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the in-flight response must capture the AttemptStarted snapshot");
+            {
+                let ledger = state.ledger.lock().unwrap();
+                assert_eq!(
+                    ledger_snapshot_excluding_selected_auth(&ledger.connection),
+                    before_failed_completion,
+                    "failed local completion must roll back cache, credits, journals, and ACKs"
+                );
+                let Some(PendingGuestShopImport::V2(pending)) = ledger
+                    .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap()
+                else {
+                    panic!("the durable attempt must remain after local marker failure");
+                };
+                assert_eq!(pending.phase, GuestImportPhase::AttemptStarted);
+                assert_eq!(pending.request, request);
+                assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+                ledger
+                    .connection
+                    .execute_batch("DROP TRIGGER fail_v2_import_marker")
+                    .unwrap();
+            }
+
+            let legacy_order = order_calls.clone();
+            let legacy_state = &state;
+            let retry = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        let ledger = legacy_state.ledger.lock().unwrap();
+                        let Some(PendingGuestShopImport::V2(completed)) = ledger
+                            .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                            .unwrap()
+                        else {
+                            panic!("legacy continuation must observe the imported marker");
+                        };
+                        assert_eq!(completed.phase, GuestImportPhase::Imported);
+                        assert_eq!(completed.request, request);
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(retry, Ok(GuestImportSyncOutcome::Imported));
+            assert_eq!(
+                *transport.calls.lock().unwrap(),
+                ["import_guest_shop", "import_guest_shop"]
+            );
+            assert!(transport.same_request_during_await.load(Ordering::SeqCst));
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                ["import_guest_shop", "import_guest_shop", "legacy_sync"]
+            );
+        }
+
+        #[test]
+        fn authenticated_sync_keeps_attempt_pending_after_backend_rejection() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: None,
+                invalid_response: true,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: None,
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async { panic!("legacy continuation ran after backend rejection") },
+                ),
+            );
+
+            assert_eq!(
+                result,
+                Err("게스트 상점 가져오기를 완료하지 못했습니다".into())
+            );
+            assert_eq!(*transport.calls.lock().unwrap(), ["import_guest_shop"]);
+            assert!(transport
+                .attempt_started_during_await
+                .load(Ordering::SeqCst));
+            assert!(transport.same_request_during_await.load(Ordering::SeqCst));
+            let before_response = transport
+                .snapshot_before_response
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the in-flight response must capture the AttemptStarted snapshot");
+            {
+                let ledger = state.ledger.lock().unwrap();
+                assert_eq!(
+                    ledger_snapshot_excluding_selected_auth(&ledger.connection),
+                    before_response,
+                    "a rejected backend response must not alter local cache or ACK state"
+                );
+                let Some(PendingGuestShopImport::V2(pending)) = ledger
+                    .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap()
+                else {
+                    panic!("the rejected response must leave the request pending");
+                };
+                assert_eq!(pending.phase, GuestImportPhase::AttemptStarted);
+                assert_eq!(pending.request, request);
+                assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+            }
+            assert_eq!(*order_calls.lock().unwrap(), ["import_guest_shop"]);
+        }
+
+        #[test]
+        fn authenticated_sync_does_not_apply_import_after_auth_account_switch_during_await() {
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("schema-2 import capture expected");
+            };
+            let request = capture.request;
+            let state = app_state_from_ledger(ledger);
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            assert!(state.select_planet_account(user_id).is_err());
+            let order_calls = Arc::new(Mutex::new(Vec::new()));
+            let transport = FakeGuestShopImportTransport {
+                state: &state,
+                calls: Mutex::new(Vec::new()),
+                order_calls: order_calls.clone(),
+                result: Some(imported_result_for(&request)),
+                invalid_response: false,
+                attempt_started_during_await: AtomicBool::new(false),
+                same_request_during_await: AtomicBool::new(false),
+                ledger_unlocked_during_await: AtomicBool::new(false),
+                select_other_auth_account_after_await: Some(OTHER_TARGET_ACCOUNT.into()),
+                snapshot_before_response: Mutex::new(None),
+                append_usage_during_await: None,
+            };
+            let legacy_order = order_calls.clone();
+
+            let result = tauri::async_runtime::block_on(
+                super::super::sync_authenticated_legacy_after_guest_import(
+                    &state,
+                    user_id,
+                    "test-access-token",
+                    &transport,
+                    || async move {
+                        legacy_order.lock().unwrap().push("legacy_sync");
+                        Ok(())
+                    },
+                ),
+            );
+
+            assert_eq!(result, Ok(GuestImportSyncOutcome::Held));
+            assert_eq!(*transport.calls.lock().unwrap(), ["import_guest_shop"]);
+            assert!(transport
+                .attempt_started_during_await
+                .load(Ordering::SeqCst));
+            assert!(transport.same_request_during_await.load(Ordering::SeqCst));
+            assert!(transport
+                .ledger_unlocked_during_await
+                .load(Ordering::SeqCst));
+            assert_eq!(
+                *order_calls.lock().unwrap(),
+                ["import_guest_shop"],
+                "legacy continuation must be skipped after the selected account changes"
+            );
+
+            let ledger = state.ledger.lock().unwrap();
+            let before = transport
+                .snapshot_before_response
+                .lock()
+                .unwrap()
+                .clone()
+                .expect("the in-flight response should capture its pre-response ledger state");
+            assert_eq!(
+                before,
+                ledger_snapshot_excluding_selected_auth(&ledger.connection)
+            );
+            let Some(PendingGuestShopImport::V2(pending)) = ledger
+                .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("the original target marker must remain pending");
+            };
+            assert_eq!(pending.phase, GuestImportPhase::AttemptStarted);
+            assert_eq!(pending.request, request);
+            assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+            assert_eq!(
+                ledger
+                    .connection
+                    .query_row::<String, _, _>(
+                        "SELECT value FROM setting WHERE key='selected_auth_account_id'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                OTHER_TARGET_ACCOUNT
+            );
+            assert_eq!(
+                ledger
+                    .connection
+                    .query_row::<i64, _, _>(
+                        "SELECT count(*) FROM planet_account_state WHERE account_id=?1",
+                        [OTHER_TARGET_ACCOUNT],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                0
+            );
+        }
+
+        #[test]
+        fn session_refresh_failure_keeps_first_login_import_marker_unchanged() {
+            let state = app_state_from_ledger(prepared_first_reset_ledger());
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            assert!(state.select_planet_account(user_id).is_err());
+            let before = state
+                .ledger
+                .lock()
+                .unwrap()
+                .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+                .unwrap();
+
+            let result = tauri::async_runtime::block_on(
+                super::super::refresh_saved_session_or_queue_cached_state(&state, user_id, async {
+                    Err(crate::sync::auth::AuthError::Transport)
+                }),
+            );
+
+            assert!(result.is_err());
+            let ledger = state.ledger.lock().unwrap();
+            assert_eq!(
+                ledger
+                    .pending_guest_shop_import_request(TARGET_ACCOUNT)
+                    .unwrap(),
+                Some(before)
+            );
+            assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+            assert_eq!(
+                ledger
+                    .connection
+                    .query_row::<String, _, _>(
+                        "SELECT value FROM setting WHERE key='selected_auth_account_id'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap(),
+                TARGET_ACCOUNT
+            );
+        }
     }
 }

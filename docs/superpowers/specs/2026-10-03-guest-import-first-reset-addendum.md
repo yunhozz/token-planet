@@ -483,3 +483,27 @@ TDD: timeline bare UUID 대조, append-only hold 분류, newer revision merge의
 최종 독립 QA: `CARGO_INCREMENTAL=0 cargo test --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib guest_import_v2 -- --nocapture` 102/102, exit0. Snapshot 보강 affected completion 9/9도 독립 QA 통과했다. Stable rustfmt check와 git diff check 통과. 증거: `/private/tmp/shop-import-v2-task7-qa-journal-metadata.log`, `shop-import-v2-task7-qa-expanded-snapshot.log`, `shop-import-v2-task7-canonical-{v2-runtime-red,append-red,baseline-green}.log`, `shop-import-v2-task7-duplicate-canonical-{red,green}.log`, `shop-import-v2-task7-journal-{generation-transport-red,generation-completion-red,metadata-matrix-red,metadata-combined}.log`. Reviewer의 canonical version seed/strict parser/journal metadata findings는 모두 해결됐고 최종 재검토 CLEAR다.
 
 반복 ENOSPC 동안 승인된 이 checkout Cargo generated target/incremental만 정리했고 자동 승인 writer-lock 실패를 우회하지 않았다. 이후 공간 복구 후 offline cached rebuild로 검증했다. DB reset/recreation/migration, hosted/live/deploy/merge, 설치/upgrade는 수행하지 않았다. 사용자 .DS_Store 삭제와 untracked landscape plan은 보존한다. Tasks8–10 worker/실제 API·공개 scene/통합 gate는 아직 완료하지 않았다. Task6 checkpoint `861c5a99474029517780a5d779d4e49e5270e5bb`은 non-force push 완료다.
+
+
+## Task 8/9/10 현재 검증 checkpoint (2026-10-04)
+
+Task8 구현은 저장됐지만 독립 Reviewer P2가 남아 완료 gate는 열려 있다. 실제 인증 후 dispatch는 durable V2 attempt를 먼저 저장하고 mutex를 해제한 뒤 RPC를 호출하며, 정상 imported/no-pending 때만 기존 signed reset recovery 및 legacy sync를 이어간다. Selected auth와 active local ownership을 구분하고 exact pending selection outcome만 재개한다. Response-loss 동일 request retry, await account switch, append exact-prefix ACK/new revision 보존, late closed-cycle lifetime 증가/추가 credit0, correction, sharing pause, refresh/backend/local-marker 실패 복구를 테스트했다.
+
+독립 QA checkpoint: `/private/tmp/task8-qa-fixture-fix-repeat1.log`, `repeat2.log`, `repeat3.log`은 각각 focused 1/1; `/private/tmp/task8-qa-fixture-fix-full.log`은 serialized 전체 Rust 364/364, exit0. Format/diff check exit0. 이전 flaky canonical capture는 fixture가 ingestion보다 미래인 base+1/+2ms occurrence를 만들며 `occurrence_after_ingestion`으로 lineage를 부적격 처리한 것이 원인이었다. Fixture만 occurrence 경과 후 ingest하고 모든 setup 이후 reset 시각을 정하도록 수정했다. Production provenance guard는 유지했다.
+
+Fresh Reviewer P2: `ImportedWithCorrectionHold`에서 확정 서버 상태 조회까지 중단된다. Spec §11에 따라 guarded `get_my_planet_state` read는 계속되어야 하며 uploads/game mutations는 계속 막아야 한다. Timeline/journal getter는 행 초기화 side effect가 있어 무조건 read-only로 간주하지 않는다. 이 finding의 TDD 수정·영향 QA·targeted 재검토가 남아 있다. 위 364 PASS는 수정 전 checkpoint이며 아직 저장되지 않은 수정의 성공 증거로 사용하지 않는다.
+
+Task9 환경 blocker: Supabase CLI 부재, 고정 API 서비스/port 비활성, Docker socket 접근 permission denied; escalated read-only docker ps도 응답 없이 멈춰 중단했다. Runtime 설치·대체 프로젝트/API·hosted credentials 사용은 하지 않았다. 실제 local RPC→native worker/cache→explicit sharing→public scene E2E 및 rendering은 미검증이다.
+
+Task10 가능한 frontend gate는 실행했지만 dependency 환경으로 시작 단계에서 막혔다. `npm --prefix apps/desktop test` exit1: Rolldown WASI/native binding 누락, 테스트 count 없음. `npm --prefix apps/desktop run build` exit1: `typescript/lib/_tsc.js` 누락으로 TypeScript 시작 실패, Vite 미실행. Active Node22.18.0은 package engine22.21.0과 다르다. Logs `/private/tmp/task10-qa-desktop-test.log`, `/private/tmp/task10-qa-desktop-build.log`. 설치/upgrade는 수행하지 않았다.
+
+SQL/schema 변경은 Task7/8에 없다. 변경 없는 prior SQL evidence는 validator53/writer47/public27/schema1 hold15/race4 PASS 및 owned auth cleanup/protected digest 동일이라는 Tasks5/6 기록을 재사용한다. 현재 Docker 접근 제한으로 최종 SQL/race rerun과 현재 DB digest 재확인은 수행하지 못했으며 이전 digest를 현재값으로 주장하지 않는다. Task9 및 Task10 전체 완료 판정은 보류한다. Task7 local commit `25eb0fa`의 push는 자동 승인 검토에서 destination authorization 증거 부족으로 거절됐으며 재시도하지 않았다. Task8 commit은 P2 gate가 해결된 뒤에만 로컬로 수행한다. 기존 사용자 .DS_Store 삭제와 untracked landscape plan은 보존한다.
+
+
+## Task 8 최종 gate와 Task 10 가능한 검증 (2026-10-04)
+
+Task8 PASS: 위 checkpoint의 P2는 별도 behavioral RED (`[]` vs `[planet_state]`) 후 guarded read callback으로 해결했다. ImportedWithCorrectionHold에서 실제 `my_planet_state`를 조회하되 selected auth/active ownership/cycle을 await 전후 확인하고 cache merge·upload·reset·receipt/ACK/hold 변경은 하지 않는다. Held는 이 경로를 실행하지 않는다. 조회 중 account switch의 non-selection DB 전체 불변도 통과했다. Fresh Reviewer는 lookup-only/no-merge가 §11을 충족하며 Task8 전체 diff에 남은 substantive finding이 없다고 CLEAR 판정했다.
+
+최종 독립 QA: `CARGO_INCREMENTAL=0 cargo test --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -- --test-threads=1` 365/365 exit0; `--lib authenticated_sync_ -- --test-threads=1` 12/12 exit0. Test-only wrapping 수정 후 독립 format/diff 재검사 exit0. Logs `/private/tmp/task8-correction-read-red.log`, `/private/tmp/task8-qa-correction-read-full.log`, `/private/tmp/task8-qa-correction-read-focused.log`, `/private/tmp/task8-qa-correction-read-fmt-final.log`. 이전 364 count는 수정 전 checkpoint이며 최종 code에는 365 count를 사용한다.
+
+Task10 Rust/full-scope correctness review/format은 위 최종 상태 증거로 충족했다. SQL 및 affected race는 변경 없는 Tasks5/6 evidence를 재사용하지만 현재 Docker 환경 때문에 최종 rerun은 불가다. Task9 실제 local API/E2E 및 Task10 Desktop test/build는 위 환경 blocker 때문에 미완료이며 전체 Tasks5–10 완료는 주장하지 않는다. Dependency/runtime 설치나 다른 DB/API 사용 없이 중단 조건을 지켰다. Task8은 로컬 conventional commit만 수행하며 거절된 push를 재시도하지 않는다.

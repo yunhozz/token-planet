@@ -2026,7 +2026,7 @@ pub(crate) mod guest_import_v2_capture_tests {
         canonical_json_bytes, GuestImportAck, GuestImportAckJournalEntry, GuestJournalLogicalKey,
         GuestShopImportV2Result,
     };
-    use crate::domain::planet::{PlanetAvatar, PlanetProfile, PlanetState};
+    use crate::domain::planet::{PlanetAvatar, PlanetProfile, PlanetState, PlanetWalletCredit};
     use crate::domain::usage::{TokenUsage, UsageCoverage};
     use crate::storage::shop_import::PendingGuestShopImport;
     use chrono::Duration;
@@ -2063,7 +2063,7 @@ pub(crate) mod guest_import_v2_capture_tests {
         }
     }
 
-    fn prepared_first_reset_ledger() -> Ledger {
+    pub(crate) fn prepared_first_reset_ledger() -> Ledger {
         prepared_first_reset_ledger_at(std::path::Path::new(":memory:"))
     }
 
@@ -2082,7 +2082,7 @@ pub(crate) mod guest_import_v2_capture_tests {
             .settle_guest_cycle_tokens(&old_cycle_id, occurred_at + Duration::milliseconds(2))
             .unwrap();
         ledger.prepare_growth_journal().unwrap();
-        let reset_at = occurred_at + Duration::milliseconds(250);
+        let reset_at = Utc::now() + Duration::milliseconds(250);
         assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
         ledger.prepare_growth_journal().unwrap();
         if Utc::now() < reset_at {
@@ -2094,6 +2094,10 @@ pub(crate) mod guest_import_v2_capture_tests {
     fn prepared_first_reset_ledger_with_multiple_ordinary_scans() -> Ledger {
         let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
         let occurred_at = Utc::now();
+        let latest_occurrence_at = occurred_at + Duration::milliseconds(2);
+        if Utc::now() < latest_occurrence_at {
+            std::thread::sleep((latest_occurrence_at - Utc::now()).to_std().unwrap());
+        }
         for (event_key, total_tokens, offset_ms) in [
             ("v2-multiscan-raw-1", 400_000, 0_i64),
             ("v2-multiscan-raw-2", 300_000, 1_i64),
@@ -2125,7 +2129,7 @@ pub(crate) mod guest_import_v2_capture_tests {
             .settle_guest_cycle_tokens(&old_cycle_id, occurred_at + Duration::milliseconds(5))
             .unwrap();
         ledger.prepare_growth_journal().unwrap();
-        let reset_at = occurred_at + Duration::milliseconds(250);
+        let reset_at = Utc::now() + Duration::milliseconds(250);
         assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
         ledger.prepare_growth_journal().unwrap();
         if Utc::now() < reset_at {
@@ -2149,6 +2153,12 @@ pub(crate) mod guest_import_v2_capture_tests {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let new_cycle = &provenance.reset_receipt.result.new_cycle_id;
+        let reset_result = &provenance.reset_receipt.result;
+        let reset_credit = PlanetWalletCredit {
+            previous_cycle_id: reset_result.previous_cycle_id.clone(),
+            amount: reset_result.credited_tokens,
+            created_at_utc: reset_result.reset_at_utc.clone(),
+        };
         let account_uuid = snapshot
             .target_account_id
             .strip_prefix("account:")
@@ -2159,7 +2169,7 @@ pub(crate) mod guest_import_v2_capture_tests {
             current_cycle_id: new_cycle.clone(),
             catalog_revision: 1,
             state_revision: snapshot.data.shop_state_revision,
-            available_balance: 0,
+            available_balance: reset_result.credited_tokens,
             products: vec![],
             landscape_instances: vec![],
             placements: vec![],
@@ -2189,7 +2199,7 @@ pub(crate) mod guest_import_v2_capture_tests {
             guest_import_pending: false,
             guest_import_error: None,
         };
-        let last_reset = provenance.reset_receipt.result.reset_at_utc.clone();
+        let last_reset = reset_result.reset_at_utc.clone();
         let planet_state = PlanetState {
             version: 1,
             profile: Some(PlanetProfile {
@@ -2200,13 +2210,8 @@ pub(crate) mod guest_import_v2_capture_tests {
             current_cycle_id: new_cycle.clone(),
             cycle_started_at_utc: current_cycle.started_at_utc.clone(),
             last_reset_at_utc: Some(last_reset),
-            wallet_balance: snapshot
-                .data
-                .wallet_credits
-                .iter()
-                .map(|credit| credit.amount)
-                .sum(),
-            wallet_credits: vec![],
+            wallet_balance: reset_result.credited_tokens,
+            wallet_credits: vec![reset_credit],
             current_planet_tokens: canonical.raw.current_planet_tokens,
             lifetime_tokens: canonical.raw.lifetime_tokens,
             growth_credit: 0.0,
@@ -2419,11 +2424,11 @@ pub(crate) mod guest_import_v2_capture_tests {
     #[test]
     fn guest_import_v2_completion_imports_valid_receipt_and_replays_idempotently() {
         let mut ledger = prepared_first_reset_ledger();
-        let PendingGuestShopImport::V2(capture) = ledger
+        let captured = ledger
             .capture_guest_shop_import_request(TARGET_ACCOUNT)
-            .unwrap()
-        else {
-            panic!("schema-2 import capture expected");
+            .unwrap();
+        let PendingGuestShopImport::V2(capture) = captured else {
+            panic!("schema-2 import capture expected, got {captured:#?}");
         };
         let request = capture.request;
         ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
@@ -2554,11 +2559,11 @@ pub(crate) mod guest_import_v2_capture_tests {
     #[test]
     fn guest_import_v2_completion_advances_canonical_version_for_append_after_multiple_scans() {
         let mut ledger = prepared_first_reset_ledger_with_multiple_ordinary_scans();
-        let PendingGuestShopImport::V2(capture) = ledger
+        let captured = ledger
             .capture_guest_shop_import_request(TARGET_ACCOUNT)
-            .unwrap()
-        else {
-            panic!("schema-2 import capture expected");
+            .unwrap();
+        let PendingGuestShopImport::V2(capture) = captured else {
+            panic!("schema-2 import capture expected, got {captured:#?}");
         };
         let request = capture.request;
         let captured_version = request.snapshot.canonical_payload.canonical_version;
