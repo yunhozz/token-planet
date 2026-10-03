@@ -44,8 +44,7 @@ fn set_tray_press_pending(app: &AppHandle, pending: bool) {
 }
 
 fn show_window(app: &AppHandle, target: WindowMode, icon_rect: Option<Rect>) {
-    if crate::transition_window_mode(app, target, icon_rect).is_ok()
-        && target == WindowMode::Popup
+    if crate::transition_window_mode(app, target, icon_rect).is_ok() && target == WindowMode::Popup
     {
         let _ = app.emit("show-compact", ());
     }
@@ -170,7 +169,13 @@ mod tests {
     #[test]
     fn tray_click_toggles_popup_and_switches_from_detail() {
         assert_eq!(tray_target(WindowMode::Popup, true), None);
-        assert_eq!(tray_target(WindowMode::Popup, false), Some(WindowMode::Popup));
-        assert_eq!(tray_target(WindowMode::Detail, true), Some(WindowMode::Popup));
+        assert_eq!(
+            tray_target(WindowMode::Popup, false),
+            Some(WindowMode::Popup)
+        );
+        assert_eq!(
+            tray_target(WindowMode::Detail, true),
+            Some(WindowMode::Popup)
+        );
     }
 }

@@ -25,10 +25,15 @@ pub fn contribution_credit(known_tokens: u64, k: f64) -> f64 {
 
 pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapshot, ScanError> {
     let (daily, local_current_tokens, local_lifetime_tokens) = ledger.planet_usage_totals()?;
+    let shop_growth_by_date = ledger.shop_growth_credit_by_date()?;
     let mut growth_credit: f64 = daily
-        .values()
-        .copied()
-        .map(|tokens| contribution_credit(tokens, K_TOKENS as f64))
+        .iter()
+        .map(|(date, tokens)| {
+            shop_growth_by_date
+                .get(date)
+                .copied()
+                .unwrap_or_else(|| contribution_credit(*tokens, K_TOKENS as f64))
+        })
         .sum();
     let cycle_id = ledger.planet_cycle_id()?;
     let mut current_planet_tokens = local_current_tokens;
@@ -72,7 +77,7 @@ pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapsh
     let wallet_balance = ledger.cosmetic_shop_state()?.available_balance;
     let now = chrono::Utc::now();
     let last_reset = ledger.last_reset_at()?;
-    let reset_available = last_reset.map(|last| last + chrono::Duration::hours(24));
+    let reset_available = ledger.reset_available_at()?;
     let can_reset = reset_available.is_none_or(|available| now >= available);
     let planet = PlanetState {
         version: 1,
@@ -92,6 +97,7 @@ pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapsh
         can_reset,
         reset_available_at_utc: reset_available.map(|value| value.to_rfc3339()),
         objects: ledger.planet_objects()?,
+        removed_natural_keys: ledger.planet_removed_natural_keys()?,
     };
     Ok(WorldSnapshot {
         usage,
@@ -199,12 +205,16 @@ mod tests {
     }
 
     fn insert(ledger: &mut Ledger, agent: Agent, key: &str, tokens: u64) {
+        insert_at(ledger, agent, key, "2026-09-25T00:00:00Z", tokens);
+    }
+
+    fn insert_at(ledger: &mut Ledger, agent: Agent, key: &str, at: &str, tokens: u64) {
         ledger
             .insert(&ParsedRecord {
                 agent,
                 kind: RecordKind::Response,
                 event_key: key.into(),
-                occurred_at_utc: DateTime::parse_from_rfc3339("2026-09-25T00:00:00Z")
+                occurred_at_utc: DateTime::parse_from_rfc3339(at)
                     .unwrap()
                     .with_timezone(&Utc),
                 usage: usage(Some(tokens), UsageCoverage::Complete),
@@ -231,15 +241,17 @@ mod tests {
     #[test]
     fn planet_wallet_balance_reflects_cosmetic_purchase() {
         let mut ledger = fixture_ledger();
-        ledger.connection.execute(
-            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
              VALUES ('wallet-cycle',500000,'2026-09-25T00:00:00Z')",
-            [],
-        ).unwrap();
-        ledger.purchase_guest_cosmetic(
-            "77777777-7777-4777-8777-777777777777",
-            "star_cluster_v2",
-        ).unwrap();
+                [],
+            )
+            .unwrap();
+        ledger
+            .purchase_guest_cosmetic("77777777-7777-4777-8777-777777777777", "star_cluster_v2")
+            .unwrap();
 
         let world = world_snapshot(
             &ledger,
@@ -247,7 +259,8 @@ mod tests {
                 usage(Some(0), UsageCoverage::Complete),
                 usage(Some(0), UsageCoverage::Complete),
             ),
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(world.planet.wallet_balance, 0);
     }
 
@@ -268,6 +281,65 @@ mod tests {
         assert_eq!(world.stage, 0);
         assert_eq!(K_TOKENS, 100_000);
         assert_eq!(STAGE_THRESHOLDS, [5.0, 20.0, 50.0, 100.0]);
+    }
+
+    #[test]
+    fn shop_growth_bonus_uses_effect_at_each_occurrence_without_changing_raw_tokens() {
+        let mut ledger = fixture_ledger();
+        insert_at(
+            &mut ledger,
+            Agent::Codex,
+            "codex:before-shop-effect",
+            "2026-09-25T06:00:00Z",
+            50_000,
+        );
+        let account_id: String = ledger
+            .connection
+            .query_row(
+                "SELECT value FROM setting WHERE key='planet_account_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let cycle_id = ledger.planet_cycle_id().unwrap();
+        let effects = crate::domain::cosmetic_shop::ActiveEffects {
+            civilization_growth_bps: 2_000,
+            ..Default::default()
+        };
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+                 active_instance_ids_json,effects_json) VALUES (?1,?2,1,'2026-09-25T12:00:00Z',
+                 '[\"placed-instance\"]',?3)",
+                rusqlite::params![
+                    account_id,
+                    cycle_id,
+                    serde_json::to_string(&effects).unwrap()
+                ],
+            )
+            .unwrap();
+        insert_at(
+            &mut ledger,
+            Agent::Codex,
+            "codex:after-shop-effect",
+            "2026-09-25T18:00:00Z",
+            50_000,
+        );
+        ledger.rebuild_shop_contributions().unwrap();
+
+        let world = world_snapshot(
+            &ledger,
+            summary(
+                usage(Some(100_000), UsageCoverage::Complete),
+                usage(Some(0), UsageCoverage::Complete),
+            ),
+        )
+        .unwrap();
+
+        assert!((world.growth_credit - 1.1).abs() < 1e-12);
+        assert_eq!(world.planet.current_planet_tokens, 100_000);
+        assert_eq!(ledger.planet_usage_totals().unwrap().1, 100_000);
     }
 
     #[test]

@@ -39,12 +39,32 @@ select throws_ok($$select * from public.get_world_planets('20000000-0000-0000-00
 select throws_ok($$select * from public.planet_member_state$$, '42501', null, 'members cannot bypass the planet RPC');
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000102', true);
 select is((select count(*)::int from public.get_world_planets('20000000-0000-0000-0000-000000000001')), 2, 'non-owner can read the group planets');
+reset role;
+-- Seed historical compatibility rows for aggregate-read/privacy assertions.
+-- These direct fixtures do not represent supported cosmetic write APIs.
+insert into private.cosmetic_purchase(user_id, purchase_id, sku, price, purchased_at)
+values
+  ('00000000-0000-0000-0000-000000000101', '11111111-1111-4111-8111-111111111111',
+    'star_cluster_v2', 500000, '2026-09-28T00:00:00Z'),
+  ('00000000-0000-0000-0000-000000000102', '22222222-2222-4222-8222-222222222222',
+    'thin_ring_v2', 500000, '2026-09-28T00:00:00Z');
+insert into private.cosmetic_equipment(user_id, cycle_id, slot_id, sku, version)
+values
+  ('00000000-0000-0000-0000-000000000101', 'cycle-1', 'sky', 'star_cluster_v2', 1),
+  ('00000000-0000-0000-0000-000000000102', 'cycle-1', 'ring', 'thin_ring_v2', 1);
+set local role authenticated;
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000101', true);
-select is((public.purchase_my_cosmetic('11111111-1111-4111-8111-111111111111', 'star_cluster_v2', 1)->>'status'), 'purchased', 'Alice can buy a private cosmetic');
-select is((public.equip_my_cosmetic('cycle-1', 'sky', 'star_cluster_v2', 0)->>'status'), 'equipped', 'Alice can equip the purchased cosmetic');
+select throws_ok($$select public.purchase_my_cosmetic(
+  '33333333-3333-4333-8333-333333333333', 'star_cluster_v2', 1)$$,
+  '42501', null, 'world owner cannot use the retired cosmetic purchase RPC');
+select throws_ok($$select public.equip_my_cosmetic('cycle-1', 'sky', 'star_cluster_v2', 0)$$,
+  '42501', null, 'world owner cannot use the retired cosmetic equipment RPC');
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000102', true);
-select is((public.purchase_my_cosmetic('22222222-2222-4222-8222-222222222222', 'thin_ring_v2', 1)->>'status'), 'purchased', 'Bob can buy a private cosmetic');
-select is((public.equip_my_cosmetic('cycle-1', 'ring', 'thin_ring_v2', 0)->>'status'), 'equipped', 'Bob can equip the purchased cosmetic');
+select throws_ok($$select public.purchase_my_cosmetic(
+  '44444444-4444-4444-8444-444444444444', 'thin_ring_v2', 1)$$,
+  '42501', null, 'world member cannot use the retired cosmetic purchase RPC');
+select throws_ok($$select public.equip_my_cosmetic('cycle-1', 'ring', 'thin_ring_v2', 0)$$,
+  '42501', null, 'world member cannot use the retired cosmetic equipment RPC');
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000101', true);
 select is((select equipped_cosmetics from public.get_world_planets('20000000-0000-0000-0000-000000000001') where nickname='Alice'),
   '[{"slot_id":"sky","sku":"star_cluster_v2"}]'::jsonb, 'Alice group row exposes only her current equipped keys');

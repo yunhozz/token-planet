@@ -2,6 +2,9 @@ import type { LandscapeBounds } from "./planetLandscapeLayout";
 
 export type LandscapeViewport = { width: number; height: number };
 export type LandscapeCamera = { centerX: number; centerY: number; zoom: number };
+export type ScreenPoint = { x: number; y: number };
+export type LandscapePoint = { x: number; y: number };
+export type LandscapeViewportRect = Pick<DOMRect, "left" | "top" | "width" | "height">;
 
 const DEFAULT_BOUNDS: LandscapeBounds = { x: 0, y: 0, width: 600, height: 320 };
 const DEFAULT_VIEWPORT: LandscapeViewport = { width: 1200, height: 420 };
@@ -60,6 +63,43 @@ function normalizedCamera(camera: LandscapeCamera, bounds: LandscapeBounds): Lan
 function clampCenter(center: number, minimum: number, size: number, viewSize: number): number {
   if (viewSize >= size) return minimum + size / 2;
   return Math.max(minimum + viewSize / 2, Math.min(minimum + size - viewSize / 2, center));
+}
+
+export function screenToLandscape(
+  point: ScreenPoint,
+  rect: LandscapeViewportRect,
+  viewBox: LandscapeBounds,
+): LandscapePoint | null {
+  const values = [
+    point.x,
+    point.y,
+    rect.left,
+    rect.top,
+    rect.width,
+    rect.height,
+    viewBox.x,
+    viewBox.y,
+    viewBox.width,
+    viewBox.height,
+  ];
+
+  if (!values.every(Number.isFinite) || rect.width <= 0 || rect.height <= 0 || viewBox.width <= 0 || viewBox.height <= 0) {
+    return null;
+  }
+
+  const scale = Math.min(rect.width / viewBox.width, rect.height / viewBox.height);
+  if (!Number.isFinite(scale) || scale <= 0) return null;
+
+  const renderedWidth = viewBox.width * scale;
+  const renderedHeight = viewBox.height * scale;
+  const contentLeft = rect.left + (rect.width - renderedWidth) / 2;
+  const contentTop = rect.top + (rect.height - renderedHeight) / 2;
+  const landscapePoint = {
+    x: viewBox.x + (point.x - contentLeft) / scale,
+    y: viewBox.y + (point.y - contentTop) / scale,
+  };
+
+  return Number.isFinite(landscapePoint.x) && Number.isFinite(landscapePoint.y) ? landscapePoint : null;
 }
 
 export function fitLandscape(bounds: LandscapeBounds): LandscapeCamera {

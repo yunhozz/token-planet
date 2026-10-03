@@ -67,10 +67,7 @@ fn local_state(state: &AppState, phase: &'static str, user_id: Option<String>) -
     }
 }
 
-fn offline_state(
-    state: &AppState,
-    user_id: &str,
-) -> Result<SharingState, String> {
+fn offline_state(state: &AppState, user_id: &str) -> Result<SharingState, String> {
     let mut ledger = state.ledger.lock().map_err(|_| "로컬 공동 세계 오류")?;
     if let Some((world_id, cached_user_id, timezone)) = ledger
         .cached_world_scope()
@@ -323,7 +320,9 @@ pub async fn join_world(
     client
         .join_world_by_member_code(&session.access_token, code.trim())
         .await
-        .map_err(|_| "코드를 확인할 수 없거나 참여할 수 없습니다. 소유자에게 코드를 다시 확인하세요")?;
+        .map_err(|_| {
+            "코드를 확인할 수 없거나 참여할 수 없습니다. 소유자에게 코드를 다시 확인하세요"
+        })?;
     get_sharing_state(state).await
 }
 

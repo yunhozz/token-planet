@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { createElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlanetScene, planWalk, WALK_POINTS } from "../PlanetScene";
@@ -11,6 +12,29 @@ afterEach(() => {
 });
 
 describe("planet cosmetics", () => {
+  it("renders the canonical avatar equipment layers on the animated planet avatar", () => {
+    const equipment = {
+      head: { sku: "avatar_space_helmet", version: 1 },
+      outfit: { sku: "avatar_nebula_suit", version: 2 },
+      face: { sku: "avatar_glasses", version: 3 },
+      back: { sku: "avatar_jetpack", version: 4 },
+    };
+    const props = {
+      stage: 2,
+      progress: 0.4,
+      avatar: "feminine" as const,
+      avatarEquipment: equipment,
+    };
+    const { container } = render(createElement(
+      PlanetScene,
+      props as Parameters<typeof PlanetScene>[0],
+    ));
+
+    const avatar = container.querySelector("[data-planet-avatar='true']");
+    expect(avatar?.querySelector("[data-avatar-equipment-layers='true']")).toHaveAttribute("data-avatar-style", "feminine");
+    expect(avatar?.querySelectorAll("[data-avatar-equipment]")).toHaveLength(4);
+  });
+
   it("draws all replacement and new art styles at every planet stage", () => {
     for (const stage of [0, 1, 2, 3, 4]) {
       const { container, unmount } = render(

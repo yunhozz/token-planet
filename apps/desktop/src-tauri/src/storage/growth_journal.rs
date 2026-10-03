@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, HashSet};
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::collectors::discovery::SourceHealth;
 use crate::domain::growth_journal::{GrowthJournal, GrowthJournalCycle, GrowthJournalEntry};
@@ -59,6 +59,9 @@ impl Ledger {
     }
 
     pub fn prepare_growth_journal(&mut self) -> Result<(), ScanError> {
+        if !self.guest_import_game_mutations_allowed()? {
+            return Ok(());
+        }
         let data_version = self
             .connection
             .query_row("PRAGMA data_version", [], |row| row.get::<_, u64>(0))?;
@@ -67,20 +70,43 @@ impl Ledger {
             return Ok(());
         }
 
-        let account_id = self.current_planet_account_id()?;
+        let transaction = self.connection.transaction()?;
+        Self::prepare_growth_journal_in_transaction(&transaction)?;
+        transaction.commit()?;
+
+        let final_data_version = self
+            .connection
+            .query_row("PRAGMA data_version", [], |row| row.get::<_, u64>(0))?;
+        if final_data_version == data_version {
+            self.growth_journal_signature =
+                Some((self.connection.total_changes(), final_data_version));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn prepare_growth_journal_in_transaction(
+        transaction: &Transaction<'_>,
+    ) -> Result<(), ScanError> {
+        let account_id =
+            journal_setting(transaction, "planet_account_id")?.ok_or(ScanError::Database)?;
         let device_id =
-            journal_setting(&self.connection, "planet_device_id")?.ok_or(ScanError::Database)?;
-        self.connection.execute(
+            journal_setting(transaction, "planet_device_id")?.ok_or(ScanError::Database)?;
+        transaction.execute(
             "INSERT OR IGNORE INTO growth_journal_state(account_id) VALUES (?1)",
             [&account_id],
         )?;
-        let (generation, deleted_at) = self.growth_journal_cursor(&account_id)?;
+        let (generation, deleted_at) =
+            Self::growth_journal_cursor_in_connection(transaction, &account_id)?;
         let deleted_at = deleted_at
             .map(|value| parse_timestamp(&value))
             .transpose()?;
-        let cycles = self.derived_growth_cycles(deleted_at)?;
+        let cycles = Self::derived_growth_cycles_in_connection(
+            transaction,
+            &account_id,
+            deleted_at.clone(),
+        )?;
         for cycle in &cycles {
-            self.connection.execute(
+            transaction.execute(
                 "INSERT INTO growth_journal_cycle(
                     account_id,cycle_id,started_at_utc,ended_at_utc,wallet_credit,wallet_credit_at_utc
                  ) VALUES (?1,?2,?3,?4,?5,?6)
@@ -100,8 +126,11 @@ impl Ledger {
             )?;
         }
 
-        let timezone = self.planet_timezone()?;
-        let mut statement = self.connection.prepare(
+        let timezone: chrono_tz::Tz = journal_setting(transaction, "planet_timezone")?
+            .ok_or(ScanError::Database)?
+            .parse()
+            .map_err(|_| ScanError::TimezoneMismatch)?;
+        let mut statement = transaction.prepare(
             "SELECT r.agent,r.occurred_at_utc,r.total_tokens,r.coverage
              FROM usage_record r JOIN planet_usage_owner o ON o.event_key=r.event_key
              WHERE o.account_id=?1
@@ -120,14 +149,23 @@ impl Ledger {
             ))
         })?;
         let enabled = [
-            ("codex", self.agent_enabled(Agent::Codex)?),
-            ("claude_code", self.agent_enabled(Agent::ClaudeCode)?),
-        ];
-        let source_health = [
-            ("codex", self.journal_source_health(Agent::Codex)?),
+            (
+                "codex",
+                Self::agent_enabled_in_connection(transaction, Agent::Codex)?,
+            ),
             (
                 "claude_code",
-                self.journal_source_health(Agent::ClaudeCode)?,
+                Self::agent_enabled_in_connection(transaction, Agent::ClaudeCode)?,
+            ),
+        ];
+        let source_health = [
+            (
+                "codex",
+                Self::journal_source_health_in_connection(transaction, Agent::Codex)?,
+            ),
+            (
+                "claude_code",
+                Self::journal_source_health_in_connection(transaction, Agent::ClaudeCode)?,
             ),
         ];
         let mut daily: BTreeMap<(String, String, String), DailyAgent> = BTreeMap::new();
@@ -213,11 +251,11 @@ impl Ledger {
                 payload_hash: String::new(),
             };
             active_keys.insert((cycle_id, bucket_date, agent));
-            self.upsert_local_growth_entry(&account_id, entry)?;
+            Self::upsert_local_growth_entry_in_connection(transaction, &account_id, entry)?;
         }
 
         let stale: Vec<(String, String, String)> = {
-            let mut statement = self.connection.prepare(
+            let mut statement = transaction.prepare(
                 "SELECT cycle_id,bucket_date,agent FROM growth_journal_entry
                  WHERE account_id=?1 AND device_id=?2 AND generation=?3 AND present=1",
             )?;
@@ -231,7 +269,8 @@ impl Ledger {
             if active_keys.contains(&(cycle_id.clone(), bucket_date.clone(), agent.clone())) {
                 continue;
             }
-            self.upsert_local_growth_entry(
+            Self::upsert_local_growth_entry_in_connection(
+                transaction,
                 &account_id,
                 GrowthJournalEntry {
                     device_id: device_id.clone(),
@@ -246,13 +285,6 @@ impl Ledger {
                     payload_hash: String::new(),
                 },
             )?;
-        }
-        let final_data_version = self
-            .connection
-            .query_row("PRAGMA data_version", [], |row| row.get::<_, u64>(0))?;
-        if final_data_version == data_version {
-            self.growth_journal_signature =
-                Some((self.connection.total_changes(), final_data_version));
         }
         Ok(())
     }
@@ -453,6 +485,7 @@ impl Ledger {
     }
 
     pub fn apply_growth_journal_state(&mut self, remote: &GrowthJournal) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let account_id = self.current_planet_account_id()?;
         let (local_generation, _) = self.growth_journal_cursor(&account_id)?;
         if remote.generation < local_generation {
@@ -611,9 +644,12 @@ impl Ledger {
         journal_setting(&self.connection, "planet_account_id")?.ok_or(ScanError::Database)
     }
 
-    fn journal_source_health(&self, agent: Agent) -> Result<Option<SourceHealth>, ScanError> {
+    fn journal_source_health_in_connection(
+        connection: &Connection,
+        agent: Agent,
+    ) -> Result<Option<SourceHealth>, ScanError> {
         journal_setting(
-            &self.connection,
+            connection,
             &format!("sharing_source_health:{}", agent_name(agent)),
         )?
         .map(|value| serde_json::from_str(&value).map_err(|_| ScanError::Database))
@@ -621,7 +657,14 @@ impl Ledger {
     }
 
     fn growth_journal_cursor(&self, account_id: &str) -> Result<(u64, Option<String>), ScanError> {
-        self.connection
+        Self::growth_journal_cursor_in_connection(&self.connection, account_id)
+    }
+
+    fn growth_journal_cursor_in_connection(
+        connection: &Connection,
+        account_id: &str,
+    ) -> Result<(u64, Option<String>), ScanError> {
+        connection
             .query_row(
                 "SELECT generation,deleted_at_utc FROM growth_journal_state WHERE account_id=?1",
                 [account_id],
@@ -632,33 +675,63 @@ impl Ledger {
             .unwrap_or_else(|| Ok((0, None)))
     }
 
-    fn derived_growth_cycles(
-        &self,
+    fn agent_enabled_in_connection(
+        connection: &Connection,
+        agent: Agent,
+    ) -> Result<bool, ScanError> {
+        let key = format!("{}_enabled", agent_name(agent));
+        Ok(journal_setting(connection, &key)?.as_deref() != Some("false"))
+    }
+
+    fn derived_growth_cycles_in_connection(
+        connection: &Connection,
+        account_id: &str,
         deleted_at: Option<DateTime<Utc>>,
     ) -> Result<Vec<GrowthJournalCycle>, ScanError> {
-        let current_cycle = self.planet_cycle_id()?;
-        let current_started = self.planet_cycle_started_at()?;
-        let mut credits = self
-            .planet_wallet_credits()?
-            .into_iter()
-            .map(|credit| Ok((parse_timestamp(&credit.created_at_utc)?, credit)))
+        let current_cycle =
+            journal_setting(connection, "planet_current_cycle_id")?.ok_or(ScanError::Database)?;
+        let current_started = journal_setting(connection, "planet_cycle_started_at_utc")?
+            .ok_or(ScanError::Database)?;
+        let mut credit_statement = connection.prepare(
+            "SELECT previous_cycle_id,amount,created_at_utc FROM planet_wallet_credit
+             ORDER BY created_at_utc",
+        )?;
+        let credit_rows = credit_statement.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        })?;
+        let mut credits = credit_rows
+            .map(|row| {
+                let (previous_cycle_id, amount, created_at_utc) = row?;
+                Ok((
+                    parse_timestamp(&created_at_utc)?,
+                    previous_cycle_id,
+                    as_u64(amount)?,
+                    created_at_utc,
+                ))
+            })
             .collect::<Result<Vec<_>, ScanError>>()?;
-        credits.sort_by_key(|(created_at, _)| created_at.clone());
-        let mut start = Some(self.planet_activation_at()?);
+        credits.sort_by_key(|(created_at, _, _, _)| created_at.clone());
+        let mut start = Some(parse_timestamp(
+            &journal_setting(connection, "planet_activation_at_utc")?.ok_or(ScanError::Database)?,
+        )?);
         let mut cycles = Vec::new();
-        for (end, credit) in credits {
-            if credit.previous_cycle_id == current_cycle {
+        for (end, previous_cycle_id, amount, created_at_utc) in credits {
+            if previous_cycle_id == current_cycle {
                 continue;
             }
             if start.as_ref().is_some_and(|started| started >= &end) {
                 start = None;
             }
             cycles.push(GrowthJournalCycle {
-                cycle_id: credit.previous_cycle_id,
+                cycle_id: previous_cycle_id,
                 started_at_utc: start.map(|started| started.to_rfc3339()),
-                ended_at_utc: Some(credit.created_at_utc.clone()),
-                wallet_credit: Some(credit.amount),
-                wallet_credit_at_utc: Some(credit.created_at_utc),
+                ended_at_utc: Some(created_at_utc.clone()),
+                wallet_credit: Some(amount),
+                wallet_credit_at_utc: Some(created_at_utc),
             });
             start = Some(end);
         }
@@ -669,8 +742,7 @@ impl Ledger {
             wallet_credit: None,
             wallet_credit_at_utc: None,
         });
-        let account_id = self.current_planet_account_id()?;
-        let mut local_statement = self.connection.prepare(
+        let mut local_statement = connection.prepare(
             "SELECT cycle_id,started_at_utc,ended_at_utc,wallet_credit,wallet_credit_at_utc
              FROM growth_journal_cycle WHERE account_id=?1",
         )?;
@@ -699,7 +771,7 @@ impl Ledger {
                 cycles.push(saved);
             }
         }
-        let mut remote_statement = self.connection.prepare(
+        let mut remote_statement = connection.prepare(
             "SELECT cycle_id,started_at_utc,ended_at_utc,wallet_credit,wallet_credit_at_utc
              FROM growth_journal_remote_cycle WHERE account_id=?1",
         )?;
@@ -746,13 +818,12 @@ impl Ledger {
         Ok(cycles)
     }
 
-    fn upsert_local_growth_entry(
-        &self,
+    fn upsert_local_growth_entry_in_connection(
+        connection: &Connection,
         account_id: &str,
         mut entry: GrowthJournalEntry,
     ) -> Result<(), ScanError> {
-        let old: Option<(i64, i64, i64, bool, Option<i64>, String)> = self
-            .connection
+        let old: Option<(i64, i64, i64, bool, Option<i64>, String)> = connection
             .query_row(
                 "SELECT revision,acknowledged_revision,generation,present,confirmed_tokens,coverage
              FROM growth_journal_entry
@@ -796,7 +867,7 @@ impl Ledger {
         entry.revision = revision;
         entry.payload_hash.clear();
         entry = entry.seal();
-        self.connection.execute(
+        connection.execute(
             "INSERT INTO growth_journal_entry(
                 account_id,device_id,cycle_id,bucket_date,agent,revision,acknowledged_revision,
                 generation,present,confirmed_tokens,coverage,payload_hash
@@ -1129,6 +1200,109 @@ mod tests {
         let entry = ledger.growth_journal().unwrap().entries.remove(0);
         assert_eq!(entry.confirmed_tokens, None);
         assert_eq!(entry.coverage, UsageCoverage::Partial);
+    }
+
+    #[test]
+    fn failed_preparation_does_not_leave_partial_cycle_writes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::open(&temp.path().join("ledger.db"), Seoul).unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='2026-09-27T00:00:00Z' WHERE key='planet_activation_at_utc'",
+                [],
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='2026-09-27T00:00:00Z' WHERE key='planet_cycle_started_at_utc'",
+                [],
+            )
+            .unwrap();
+        ledger
+            .insert(&record(
+                "aborted-prepare",
+                "2026-09-28T10:00:00Z",
+                Some(100),
+            ))
+            .unwrap();
+        ledger
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_journal_entry BEFORE INSERT ON growth_journal_entry
+                 BEGIN SELECT RAISE(ABORT, 'test preparation failure'); END;",
+            )
+            .unwrap();
+
+        assert!(ledger.prepare_growth_journal().is_err());
+        let cycle_count: i64 = ledger
+            .connection
+            .query_row("SELECT COUNT(*) FROM growth_journal_cycle", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(cycle_count, 0);
+    }
+
+    #[test]
+    fn transaction_preparation_rolls_back_and_preserves_committed_journal_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut ledger = Ledger::open(&temp.path().join("ledger.db"), Seoul).unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='2026-09-27T00:00:00Z' WHERE key='planet_activation_at_utc'",
+                [],
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='2026-09-27T00:00:00Z' WHERE key='planet_cycle_started_at_utc'",
+                [],
+            )
+            .unwrap();
+        let cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger
+            .insert(&record("first", "2026-09-28T10:00:00Z", Some(100)))
+            .unwrap();
+        ledger.prepare_growth_journal().unwrap();
+        let committed_before = ledger.growth_journal().unwrap();
+        assert_eq!(committed_before.entries.len(), 1);
+        assert_eq!(committed_before.entries[0].confirmed_tokens, Some(100));
+
+        ledger
+            .insert(&record("second", "2026-09-28T11:00:00Z", Some(200)))
+            .unwrap();
+        {
+            let transaction = ledger.connection.transaction().unwrap();
+            Ledger::prepare_growth_journal_in_transaction(&transaction).unwrap();
+            let prepared_tokens: i64 = transaction
+                .query_row(
+                    "SELECT confirmed_tokens FROM growth_journal_entry
+                     WHERE account_id=(SELECT value FROM setting WHERE key='planet_account_id')
+                       AND cycle_id=?1 AND bucket_date='2026-09-28' AND agent='codex' AND present=1",
+                    [&cycle_id],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(prepared_tokens, 300);
+        }
+
+        assert_eq!(ledger.growth_journal().unwrap(), committed_before);
+
+        let transaction = ledger.connection.transaction().unwrap();
+        Ledger::prepare_growth_journal_in_transaction(&transaction).unwrap();
+        transaction.commit().unwrap();
+        let committed_after = ledger.growth_journal().unwrap();
+        assert_eq!(committed_after.cycles.len(), 1);
+        assert_eq!(committed_after.cycles[0].cycle_id, cycle_id);
+        assert_eq!(committed_after.entries.len(), 1);
+        assert_eq!(committed_after.entries[0].bucket_date, "2026-09-28");
+        assert_eq!(committed_after.entries[0].confirmed_tokens, Some(300));
+        assert_eq!(committed_after.entries[0].revision, 2);
+        assert_eq!(committed_after.entries[0].coverage, UsageCoverage::Complete);
     }
 
     #[test]
