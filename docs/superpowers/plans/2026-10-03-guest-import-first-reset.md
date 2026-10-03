@@ -24,7 +24,7 @@
 - pending 중 게임 변경·guest reward 확정은 제한하되 raw 수집·저장은 계속한다.
 - 동일 capture ID/payload, captured prefix/version/journal ACK를 보존한다. 새 ID retry·부분 bootstrap·active overwrite·held 승격 없음.
 - correction은 명세의 보류와 same-ID receipt 복구다. 자동 재정산 없음.
-- hosted/live 데이터·배포·push/merge를 실행하지 않는다. 계획 작성 단계의 code/DB/probe/migration/commit도 금지다.
+- hosted/live 데이터·배포·merge를 실행하지 않는다. 후속 사용자 지시에 따라 완료된 Task의 QA/Reviewer gate 후 commit·non-force push를 수행한다. 계획 작성 단계의 code/DB/probe/migration/commit 금지는 당시 단계에 적용된다.
 - 새 migration은 승인 후 설치된 CLI의 `supabase migration new <semantic_name>`으로 생성한다. timestamp 파일명을 미리 만들지 않는다.
 - 편집은 Task별 Coder 소유다. Lead는 통합/검사/승인, QA와 Reviewer는 독립 읽기·검사만 한다. 공유 파일의 작업은 gate 이후 순차 실행한다.
 - 이 작업은 데이터·지급·복구를 바꾸는 높은 위험의 작업이다. 변경된 경계의 QA/Reviewer를 단계별로 수용하며, 변경 없는 검증/리뷰를 반복하지 않는다.
@@ -192,7 +192,7 @@ assert_eq!(receipt.request.request_id, receipt.result.request_id);
 
 **Gate 결과:** PASS — Task 2 focused 55/55, 전체 Rust `--lib` 295/295, 기존 reset 회귀 1/1, stable rustfmt, `git diff --check` 통과. Reviewer 재검토 CLEAR. Clock regression과 `occurred_at == reset_at`의 old-cycle credit 경계는 각각 RED→GREEN으로 검증했다. 증거: `/private/tmp/shop-import-v2-task2-qa-final-{focused,lib,reset,fmt,diff}.log`, `/private/tmp/shop-import-v2-task2-clock-{red,green2}.log`, `/private/tmp/shop-import-v2-task2-reset-boundary-{red,green}.log`. 독립 Reviewer 보고의 Lead 기록: `/private/tmp/shop-import-v2-task2-reviewer-clear.md`.
 
-**범위 상태:** Tasks 1–2 완료. Task 3 로컬 구현 진행 중이며 해당 체크리스트는 아직 미완료다. Task 4 이후, public RPC 성공 및 공개 장면 E2E는 미착수.
+**범위 상태:** Tasks1–4 gate 완료. 사용자의 최신 지시에 따라 Task4 완료 후 중단한다. Tasks5–10은 진행하지 않았고 public RPC 성공 및 공개 장면 E2E는 미검증이다.
 
 ## Task 3: immutable capture·source relation·raw를 유지하는 game gate
 
@@ -204,7 +204,7 @@ assert_eq!(receipt.request.request_id, receipt.result.request_id);
 
 **실행 경계 기록:** 기존 public `shop_device_contribution`은 자체 transaction을 열므로 capture transaction에서 중첩 호출하지 않는다. `shop_effects.rs`의 기존 canonical SQL/build 부분만 connection-scoped helper로 추출하고 public wrapper의 transaction·raw 조회·commit 순서를 유지한다. 같은 connection의 실제 raw 및 canonical builder를 capture transaction에서 사용하며 기존 출력·hash 동등성 회귀를 확인한다. `shop_import.rs::capture_data`는 visibility만 최소 노출해 재사용한다. 기존 collector는 confirmed bounds와 effect history에 의존하므로 v2에서는 실제 저장된 guest provenance bounds/reset receipt를 읽는 source collector를 사용한다. v1 collector·validator 호출·byte·hash는 보존하고 신규 bounds/reset proof 누락 RED 및 기존 경로 동등성 control을 먼저 확인한다. v2 전용 integrity 검증은 실제 provenance로 확인한 guest bounds를 지원하되 wire의 `effect_cycle_bounds_authoritative=false`, `effect_timeline_state=null`, `effect_history=[]`를 유지한다. 임시 authority=true 또는 flag를 변경한 clone 검증은 수용하지 않으며 위조 proof 거부와 wire flag 회귀를 확인한다. legacy integrity가 불확실하면 `Unverifiable`로 처리한다. core RED→GREEN·API 동결 후 계정/scan/game gate 및 fixture를 연결한다.
 
-- [ ] **RED:** `captures_actual_builder_payload_and_prefix`, `recapture_keeps_id_after_append`, `existing_v1_capture_is_not_upgraded`, `scan_collects_raw_while_games_frozen`.
+- [x] **RED:** `captures_actual_builder_payload_and_prefix`, `recapture_keeps_id_after_append`, `existing_v1_capture_is_not_upgraded`, `scan_collects_raw_while_games_frozen`.
 
 ```rust
 assert_eq!(captured.canonical_payload, actual_builder_payload);
@@ -215,14 +215,14 @@ assert!(raw_after_scan > raw_before_scan);
 assert!(!ledger.guest_import_game_mutations_allowed().unwrap());
 ```
 
-- [ ] cargo test filters `guest_import_v2_capture`, `guest_import_v2_game_gate` 실행.
-- [ ] 실제 canonical builder/journal/provenance/data/ID/target/hash/phase를 같은 SQLite transaction에서 capture한다.
-- [ ] persisted seq/key/version/content로 exact/append/correction/unverifiable 판정. 전체 fingerprint 불일치만으로 판단하지 않는다.
-- [ ] storage-level game/reward gate와 native pending/error 표시 연결. `AppState::scan` raw 수집 유지.
-- [ ] ownership 이동 전에 capture를 얻고 v2 lineage의 legacy cosmetic import 생성·ordinary upload를 선행하지 않는다.
-- [ ] 실제 normal native flow에서 JSON/inc 생성. serialization 후 수선 금지, 기존 raw1m fixture hash 보존.
-- [ ] **GREEN:** current append에도 snapshot0, prefix correction hold, switch/reopen 보존, 모든 game 경로 거부 중 raw 증가, schema1 byte 불변.
-- [ ] QA는 fixture provenance/도달성, Reviewer는 mutation/reward/account 순서를 확인한다.
+- [x] 실제 검증 filter `guest_import_v2` 85/85 및 전체 `--lib` 329/329 실행으로 capture/game gate를 포함해 확인했다.
+- [x] 실제 canonical builder/journal/provenance/data/ID/target/hash/phase를 같은 SQLite transaction에서 capture한다.
+- [x] persisted seq/key/version/content로 exact/append/correction/unverifiable 판정. 전체 fingerprint 불일치만으로 판단하지 않는다.
+- [x] storage-level game/reward gate와 native pending/error 표시 연결. `AppState::scan` raw 수집 유지.
+- [x] ownership 이동 전에 capture를 얻고 v2 lineage의 legacy cosmetic import 생성·ordinary upload를 선행하지 않는다.
+- [x] 실제 normal native flow에서 JSON/inc 생성. serialization 후 수선 금지, 기존 raw1m fixture hash 보존.
+- [x] **GREEN:** current append에도 snapshot0, prefix correction hold, switch/reopen 보존, 모든 game 경로 거부 중 raw 증가, schema1 byte 불변.
+- [x] QA는 fixture provenance/도달성, Reviewer는 mutation/reward/account 순서를 확인한다.
 
 ## Task 4: pure SQL validator와 pinned runner
 
@@ -232,21 +232,21 @@ assert!(!ledger.guest_import_game_mutations_allowed().unwrap());
 
 **Interface:** `private.shop_guest_import_v2_normalize(p_request jsonb,p_now timestamptz) -> jsonb`. invalid/unsupported는 NULL. 정상 결과는 source/prefix identity, bounds/baseline, 독립 canonical/journal/reset/raw credit/ACK/source metadata다. pure/read-only, fixed search_path, client EXECUTE 없음.
 
-- [ ] 실행 전에 Supabase current official changelog/docs와 installed CLI help 확인. 자동 upgrade/install/reset 없음.
-- [ ] `supabase migration new guest_import_first_reset_validation`으로 실제 path 생성·기록.
-- [ ] 기존 race pinning을 재사용해 runner 생성. 새 copy 경로/hash parity/TAP plan·not-ok·cleanup/전후 digest/ROLLBACK 검사.
-- [ ] **RED:** native fixture identity/schema1 hold controls를 먼저 통과시키고 v2 helper 부재의 positive 실패를 별도 확인한다.
+- [x] 실행 전에 Supabase current official changelog/docs와 installed CLI help 확인. 자동 upgrade/install/reset 없음.
+- [x] `supabase migration new guest_import_first_reset_validation`으로 실제 path 생성·기록.
+- [x] 기존 race pinning을 재사용해 runner 생성. 새 copy 경로/hash parity/TAP plan·not-ok·cleanup/전후 digest/ROLLBACK 검사.
+- [x] **RED:** native fixture identity/schema1 hold controls를 먼저 통과시키고 v2 helper 부재의 positive 실패를 별도 확인한다.
 
 ```sql
 select ok(private.shop_guest_import_v2_normalize(v2_request, trusted_now) is not null,
           'native first-reset source is independently reconstructed');
 ```
 
-- [ ] `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_validation.sql` 실행. 승인된 local staging만 사용.
-- [ ] shape/range/hash와 occurrence→cycle/date/activity/canonical/journal/reset/wallet 재구성 구현. growth 양쪽 below5/era empty, journal encoding/schema1 유지.
-- [ ] 의도한 RED와 구현 파일이 준비되면 위 local staging 계약에 따라 `M_VALIDATION`의 실제 local-only 적용 command를 확인·기록·실행한다. signature/ACL/RLS/search_path·schema1 경계·기존 행/receipt 보존을 확인한다. 안전한 incremental 적용을 확정하지 못하면 중단한다.
-- [ ] **GREEN:** 원본 raw1m과 명세17.2의 모든 독립 mutation. 마지막 proof만 invalid이며 앞선 control은 정상일 때 게임 DML0 확인.
-- [ ] QA는 purity/determinism/의도한 실패, Reviewer는 authority/overflow/timezone/hash/permission 확인.
+- [x] `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_validation.sql` 실행. 승인된 local staging만 사용.
+- [x] shape/range/hash와 occurrence→cycle/date/activity/canonical/journal/reset/wallet 재구성 구현. growth 양쪽 below5/era empty, journal encoding/schema1 유지.
+- [x] 의도한 RED와 구현 파일이 준비되면 위 local staging 계약에 따라 `M_VALIDATION`의 실제 local-only 적용 command를 확인·기록·실행한다. signature/ACL/RLS/search_path·schema1 경계·기존 행/receipt 보존을 확인한다. 안전한 incremental 적용을 확정하지 못하면 중단한다.
+- [x] **GREEN:** 원본 raw1m과 명세17.2의 모든 독립 mutation. 마지막 proof만 invalid이며 앞선 control은 정상일 때 게임 DML0 확인.
+- [x] QA는 purity/determinism/의도한 실패, Reviewer는 authority/overflow/timezone/hash/permission 확인.
 
 **Acceptance:** pure v2 positive와 invalid hold. public은 아직 held-only.
 
@@ -431,4 +431,23 @@ Reviewer confirmed immutable capture, raw-preserving gates, ownership ordering a
 
 Actual native fixture is generated by `exports_native_v2_first_reset_fixture_from_durable_capture` without serialized repair. JSON/inc bytes match. Retained raw claim and one reset proof, zero effects/bonus/current, deadline 86400s, authoritative=false. V2 JSON SHA256 `c5bbc955848e86d389c4d4071026b940f1f8837617cb9ed11f138a610d4e3a62`; inc `c6280034c20667e5d9d06ca2746ed7c398bb5ba988aa10c4d69bf80fa00bac5f`. V1 JSON SHA256 `8655804f5f7b4bb4761e3616362cbf519816cfcff3875b5bbe87dea60e42bf0c`; inc `9261df576689250909dac48b4095f5cb2032ca1b00cc60110301fffe5c3077cb`, unchanged.
 
-This is local storage/capture/scan/command acceptance. Task4 pure SQL validation is next; Tasks4–10, public RPC success, native completion/worker and public scene have not been accepted. No hosted/live, deployment, commit or push activity.
+Task3 gate 당시의 기록: local storage/capture/scan/command acceptance만 완료했고 Task4–10 및 public RPC/native completion/worker/public scene은 미검증이었다. 당시 hosted/live·deployment·commit·push는 수행하지 않았다. 이후 실행과 사용자 지시 변경은 아래 Task4 기록에 따른다.
+
+
+## Task 4 execution evidence (2026-10-03)
+
+Task4 PASS: pure schema2 validator와 pinned runner의 독립 QA 및 Reviewer 재검토 CLEAR. 사용자의 최신 지시에 따라 Task4 완료 후 중단한다. Tasks5–10의 writer/public RPC/native completion/worker/public scene은 수행하지 않았으며 승인된 설계의 후속 미구현 범위로 남는다. 완료된 Task마다 commit·non-force push하는 후속 사용자 지시가 기존 push 금지 실행 제약을 대체한다. Tasks1–3 checkpoint는 `63dff1054874a3c7fb64e44eb4c1ca098f37c8b8`으로 기존 `origin/feat/shop-system-revamp`에 push됐다.
+
+CLI 2.118.0이 생성한 migration은 `supabase/migrations/20261003061830_guest_import_first_reset_validation.sql`이다. 설치·upgrade·reset 없이 지정된 local project `token-planet-shop-revamp-test`, Docker `desktop-linux`의 로컬 Unix endpoint, 고정 container/volume 및 host port 55432, `postgres|postgres|5432`를 확인했다. 해당 파일만 `psql -X -v ON_ERROR_STOP=1 --single-transaction`으로 적용했다. 기존 010004 helper의 본문·권한 동등성을 확인했으며 누락된 history 행을 repair하거나 다른 pending migration을 일괄 적용하지 않았다.
+
+정상 native fixture와 schema1 held control을 유지한다. occurrence로 raw aggregate/canonical segment/activity/journal/reset/wallet을 독립 재구성한다. 과거 cycle의 end는 실제 bonus settlement 시각과 일치하며 activation..reset 안에 있어야 한다. 실제 bounds/baseline/journal reset 경계는 그대로 일치시킨다. 0-token segment를 보존하고 activity의 최초 시각은 양수 occurrence에서만 계산한다. 미래 capture와 inner prefix hash mutation은 선행 형식·outer source hash 오류에 가려지지 않도록 수정했다. Reviewer의 P2 세 건을 해소했다.
+
+독립 QA 명령·결과:
+
+- `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_validation.sql`: exit0, 53/53, 명시적 ROLLBACK 및 probe cleanup.
+- `cargo test --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib post_reset_zero_occurrence_is_captured_as_valid_v2_with_empty_daily_totals`: exit0, 1/1 actual native builder/capture parity.
+- `bash -n supabase/tests/run_guest_import_v2.sh`, `git diff --check`: exit0.
+
+QA 증거: `/private/tmp/shop-import-v2-task4-qa-review-{summary,sql,native,before,after}.log`. 수정 전 RED는 `/private/tmp/shop-import-v2-task4-reviewer-p2-red-confirmed.log`의 53개 중 51 PASS/정확한 두 정상 source 실패다. 변경 후 전체 GREEN과 적용 기록은 `/private/tmp/shop-import-v2-task4-reviewer-p2-{green,apply,poststate}.log`다.
+
+Migration SHA256 `d62e939da7a5898b5b584ad48a27edbdbb084a024f54deb5e10142a86714708a`; suite `bfc77efc75acd42552ebd7e7b2cf7b2c6cf6f253364bb442358664670efb6bc2`; runner `79ede74a3ddb3bc57e9cb7cbf6a7c817f4dc3dd5eea0303463e982473e0addd9`. 이전 Task3의 v1/v2 fixture 네 SHA는 불변이다. 설치된 다섯 private 함수는 postgres owner/SECURITY INVOKER/빈 search_path/postgres-only EXECUTE이고 신규 public 함수는 0개다. Normalizer body MD5 `7ec86be52da19ee502d7ecb936374434`. Migration history 26행/max `20261001000208`/digest `953f6733f0fa190faefec5ff83ff022b`와 public/private/auth 보호 데이터 digest `dce33ee61f853986a32dd5fc84600182`가 QA 전후 동일하다. Hosted/live 작업·배포·merge는 수행하지 않았다.
