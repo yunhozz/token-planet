@@ -1,6 +1,6 @@
 # 일반 게스트 첫 reset 가져오기 명세 추가안
 
-상태: written spec 및 실행 계획 승인 완료. Tasks1–4의 로컬 구현·독립 QA·Reviewer gate 완료. 사용자의 최신 지시에 따라 Task4에서 중단한다. Tasks5–10의 writer·public RPC·native completion/worker·공개 장면은 미구현이다.
+상태: written spec 및 실행 계획 승인 완료. Tasks1–4의 로컬 구현·독립 QA·Reviewer gate 완료. 후속 사용자 지시로 Tasks5–10을 순차 재개한다. 기존 disposable 환경이 없어 새 동일 프로젝트 환경 구축을 사용자가 승인했으며, 새 baseline에서 Task5 private writer의 QA/Reviewer gate를 통과했다. Tasks6–10 public/native/API/통합 gate는 아직 완료하지 않았다.
 기준: PR #6, `feat/shop-system-revamp`, `f233b612773b8afda88528040bdd67886f9b0b06`.
 상위 명세: [상점 개편 명세](2026-10-01-shop-system-revamp.md) §8.2–8.4.
 관련 계획: [상점 개편 계획](../plans/2026-10-01-shop-system-revamp.md) Task8B–D.
@@ -278,6 +278,8 @@ source 검증 중 게임 행을 부분 생성하지 않는다. auth user·member
 
 성공 canonical 상태는 profile/new cycle/lifetime/current 0인 planet state, 고정 reward timezone/shop revision, 단일 device/exact contribution/version, old/new adopted baseline/contribution/activity, reset request/settlement/raw wallet credit, journal state/cycles/days, source/ACK/receipt다. item/purchase/removal/positive effect/reward 행은 만들지 않는다.
 
+사용자 승인된 null profile 보완(2026-10-03): 전체 검증을 통과한 `data.profile = null`만 canonical `{nickname: "행성 동기화 대기", avatar: "masculine"}`로 초기화한다. 유효한 비-null profile은 보존하고 malformed profile을 기본값으로 구제하지 않는다. auth metadata를 읽지 않으며 원본 snapshot/payload/fingerprint는 바꾸지 않는다. 저장 profile과 imported PlanetState·receipt 결과가 일치해야 한다. import 시 `shared_visible=false`이고 이 표시값은 명시적 sharing 이후 공개될 수 있다.
+
 import가 world나 membership을 자동 생성하지 않는다. `shared_visible` = false(hidden 정책)를 기존 native-empty와 같이 초기화한다. current 0 자연 objects=[]이며 과거 자연 개체를 현재 장면에 복사하지 않는다.
 
 constraint/INSERT/result 생성/final receipt 실패는 raise 하여 전체 statement(game/success receipt/new lock)를 rollback 한다. import×import와 import×초기 usage/game writer가 공통 account lock→게임 row lock 순서를 사용한다.
@@ -446,3 +448,14 @@ CLI 2.118.0이 생성한 migration은 `supabase/migrations/20261003061830_guest_
 QA 증거: `/private/tmp/shop-import-v2-task4-qa-review-{summary,sql,native,before,after}.log`. 수정 전 RED는 `/private/tmp/shop-import-v2-task4-reviewer-p2-red-confirmed.log`의 53개 중 51 PASS/정확한 두 정상 source 실패다. 변경 후 전체 GREEN과 적용 기록은 `/private/tmp/shop-import-v2-task4-reviewer-p2-{green,apply,poststate}.log`다.
 
 Migration SHA256 `d62e939da7a5898b5b584ad48a27edbdbb084a024f54deb5e10142a86714708a`; suite `bfc77efc75acd42552ebd7e7b2cf7b2c6cf6f253364bb442358664670efb6bc2`; runner `79ede74a3ddb3bc57e9cb7cbf6a7c817f4dc3dd5eea0303463e982473e0addd9`. 이전 Task3의 v1/v2 fixture 네 SHA는 불변이다. 설치된 다섯 private 함수는 postgres owner/SECURITY INVOKER/빈 search_path/postgres-only EXECUTE이고 신규 public 함수는 0개다. Normalizer body MD5 `7ec86be52da19ee502d7ecb936374434`. Migration history 26행/max `20261001000208`/digest `953f6733f0fa190faefec5ff83ff022b`와 public/private/auth 보호 데이터 digest `dce33ee61f853986a32dd5fc84600182`가 QA 전후 동일하다. Hosted/live 작업·배포·merge는 수행하지 않았다.
+
+
+## Task 5 execution evidence (2026-10-03)
+
+Task5 PASS: private atomic writer의 독립 QA 및 Reviewer CLEAR. CLI 생성 `supabase/migrations/20261003122029_guest_import_first_reset_writer.sql`을 신규 승인된 disposable baseline에만 단일 transaction으로 적용했다. 적용 당시 container `5c438ca666762433ccc04c237fd803f268953ac7d608b97394c790ad09651e33`, project/volume/55432/local Unix endpoint/config/identity를 재검증했다. 다른 pending migration이나 hosted/live 적용은 없다. Migration history는 새 baseline 28행/max `20261003061830` 그대로이며 직접 적용 writer의 history repair는 하지 않았다.
+
+Writer는 기존 receipt에 nullable object-checked `normalized_proof`를 추가하고 postgres-only EXECUTE/SECURITY INVOKER/빈 search_path의 private bootstrap을 구현한다. 초기화 side effect가 있는 lock helper 대신 공통 account lock 행을 직접 잠그며, 기존 held/private-empty replay와 conflict를 freshness/정규화보다 먼저 처리한다. 전체 proof 정규화 후 FK 순서 저장·read-only DTO 대조·정확한 ACK·success receipt 마지막 기록을 수행한다. 승인된 null profile 보완·hidden 초기화, reward/item/world/membership 미생성을 확인했다.
+
+RED: `/private/tmp/shop-import-v2-task5-writer-red-final-proof.log`에서 47개 중 validator/control 10 PASS, writer 부재 37개 의도한 실패, 명시적 ROLLBACK 및 digest 동일. GREEN 및 독립 QA: writer 47/47, validator 53/53, 각 exit0/ROLLBACK/cleanup 및 보호 데이터 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 전후 동일/auth 사용자 0. replay/conflict/new-ID active·held/private-empty/orphan success·최종 canonical proof 보류/game DML0·journal/settlement/final receipt 주입 실패의 game/success receipt/new lock 전체 rollback을 확인했다. 기존 journal/device/wallet 테이블은 baseline RLS 미설정이나 anon/authenticated 접근 권한은 차단되어 있으며 이 단계에서 권한을 확대하지 않았다.
+
+명령: `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_writer.sql`, `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_validation.sql`, `git diff --check`. 증거: `/private/tmp/shop-import-v2-task5-writer-{apply,green}.log`, `/private/tmp/shop-import-v2-task5-qa-{writer,validator}.log`. Migration SHA256 `d71501c699ff2c09e74843aca3a75bf94efdd546bb88b8de28878268265f1142`. Public dispatch/race/native completion/worker/API/public scene 및 Tasks6–10은 아직 완료하지 않았다.

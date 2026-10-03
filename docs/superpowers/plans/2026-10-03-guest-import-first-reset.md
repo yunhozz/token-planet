@@ -262,6 +262,7 @@ select ok(private.shop_guest_import_v2_normalize(v2_request, trusted_now) is not
 - [ ] **RED:** validator positive 후 writer 부재의 expected imported 실패. runner writer suite 실행.
 - [ ] auth/envelope→lock→receipt→fresh→전체 normalize→FK writes→persisted DTO equality→success receipt 마지막 저장 구현.
 - [ ] 명세12의 planet/shop/device/contribution/baseline/activity/reset/settlement/wallet/journal/source ACK를 정확히 저장. reward/item/world/membership 없음, shared_visible=false.
+- [ ] 사용자 승인 null profile 보완: 검증된 null만 nickname `행성 동기화 대기`/avatar `masculine`로 canonical 초기화, valid non-null 보존, malformed fallback 없음. auth metadata·immutable payload 수정 없음, 저장값/PlanetState/receipt 동일·replay 불변·hidden 초기화 검사. 기존 계획의 의존 순서와 검증 경로는 동일하다.
 - [ ] 기존 fresh predicate를 보존하고 새 orphan success proof도 fresh에서 제외.
 - [ ] 의도한 RED와 구현 파일이 준비되면 위 local staging 계약에 따라 `M_WRITER`의 실제 local-only 적용 command를 확인·기록·실행한다. signature/ACL/RLS/search_path·schema1 경계·기존 행/receipt 보존을 확인한다. 안전한 incremental 적용을 확정하지 못하면 중단한다.
 - [ ] **GREEN:** replay/conflict/new-ID active, held/private empty 호환, orphan receipt, 마지막 proof DML0.
@@ -451,3 +452,26 @@ CLI 2.118.0이 생성한 migration은 `supabase/migrations/20261003061830_guest_
 QA 증거: `/private/tmp/shop-import-v2-task4-qa-review-{summary,sql,native,before,after}.log`. 수정 전 RED는 `/private/tmp/shop-import-v2-task4-reviewer-p2-red-confirmed.log`의 53개 중 51 PASS/정확한 두 정상 source 실패다. 변경 후 전체 GREEN과 적용 기록은 `/private/tmp/shop-import-v2-task4-reviewer-p2-{green,apply,poststate}.log`다.
 
 Migration SHA256 `d62e939da7a5898b5b584ad48a27edbdbb084a024f54deb5e10142a86714708a`; suite `bfc77efc75acd42552ebd7e7b2cf7b2c6cf6f253364bb442358664670efb6bc2`; runner `79ede74a3ddb3bc57e9cb7cbf6a7c817f4dc3dd5eea0303463e982473e0addd9`. 이전 Task3의 v1/v2 fixture 네 SHA는 불변이다. 설치된 다섯 private 함수는 postgres owner/SECURITY INVOKER/빈 search_path/postgres-only EXECUTE이고 신규 public 함수는 0개다. Normalizer body MD5 `7ec86be52da19ee502d7ecb936374434`. Migration history 26행/max `20261001000208`/digest `953f6733f0fa190faefec5ff83ff022b`와 public/private/auth 보호 데이터 digest `dce33ee61f853986a32dd5fc84600182`가 QA 전후 동일하다. Hosted/live 작업·배포·merge는 수행하지 않았다.
+
+## Tasks 5–10 재개와 새 disposable baseline (2026-10-03)
+
+사용자는 Task5부터 후속 작업 진행, 환경 복구, 기존 환경이 없음을 확인한 뒤 **새 isolated disposable DB 구축**을 명시 승인했다. 위 Task4 중단 기록은 당시 상태이며 재개 지시가 이를 대체한다. 기존 고정 container·volume·config와 해당 백업이 없었으므로 기존 DB의 digest 연속성은 검증하거나 주장하지 않는다.
+
+설치된 CLI 2.118.0과 cached PostgreSQL `17.6.1.171`만 사용했다. 새 workdir/config/project는 본문의 고정 값, Docker는 `desktop-linux`의 로컬 Unix socket, DB container/volume은 `supabase_db_token-planet-shop-revamp-test`, host port는 `55432`다. 포트·container·volume 부재를 확인한 뒤 DB만 시작했으며 ancillary services·seed·자동 migration 적용은 비활성화했다. Identity `postgres|postgres|5432`, 적용 전 public/private 테이블 0·auth 사용자 0을 확인했다. 다른 프로젝트·volume, hosted/live, reset·설치·upgrade는 수행하지 않았다.
+
+Committed HEAD의 migration 28개를 temp copy/hash 확인 후 실제 의존 순서(기존 202609 baseline → shop001/actions → effects002 → 00200–00208 → import004 → v2 validator)로 개별 `psql -X -v ON_ERROR_STOP=1 --single-transaction` 적용했다. 새 history는 실제 적용 파일만 28행/max `20261003061830`/version-name digest `446e2f5d8d72d262fbde82641b1f2f5c`다. 새 public/private 테이블 43, auth 사용자 0, private v2 validator 함수 5를 확인했다.
+
+Validator suite 53/53·exit0·명시적 ROLLBACK/cleanup, 새 보호 데이터 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 전후 동일. 기존 schema1 native held suite는 15/15 assertion과 SQL ROLLBACK이나 v2 runner 완료 marker 누락으로 exit1이며, 성공 실행으로 계산하지 않는다. 이 runner 연결은 Task6에서 보완한다. Task5 writer는 아직 적용하지 않았다.
+
+증거: `/private/tmp/shop-import-v2-new-environment-{start,baseline-apply,baseline-state,validation,schema1-hold}.log`; temp committed copy와 hash/order manifest는 `/private/tmp/token-planet-shop-revamp-test/baseline-{committed,manifest.sha256,order.txt}`. 공통 실행 brief는 `/private/tmp/shop-import-v2-tasks5-10-brief.md`다.
+
+
+## Task 5 execution evidence (2026-10-03)
+
+Task5 PASS: private atomic writer의 독립 QA 및 Reviewer CLEAR. CLI 생성 `supabase/migrations/20261003122029_guest_import_first_reset_writer.sql`을 신규 승인된 disposable baseline에만 단일 transaction으로 적용했다. 적용 당시 container `5c438ca666762433ccc04c237fd803f268953ac7d608b97394c790ad09651e33`, project/volume/55432/local Unix endpoint/config/identity를 재검증했다. 다른 pending migration이나 hosted/live 적용은 없다. Migration history는 새 baseline 28행/max `20261003061830` 그대로이며 직접 적용 writer의 history repair는 하지 않았다.
+
+Writer는 기존 receipt에 nullable object-checked `normalized_proof`를 추가하고 postgres-only EXECUTE/SECURITY INVOKER/빈 search_path의 private bootstrap을 구현한다. 초기화 side effect가 있는 lock helper 대신 공통 account lock 행을 직접 잠그며, 기존 held/private-empty replay와 conflict를 freshness/정규화보다 먼저 처리한다. 전체 proof 정규화 후 FK 순서 저장·read-only DTO 대조·정확한 ACK·success receipt 마지막 기록을 수행한다. 승인된 null profile 보완·hidden 초기화, reward/item/world/membership 미생성을 확인했다.
+
+RED: `/private/tmp/shop-import-v2-task5-writer-red-final-proof.log`에서 47개 중 validator/control 10 PASS, writer 부재 37개 의도한 실패, 명시적 ROLLBACK 및 digest 동일. GREEN 및 독립 QA: writer 47/47, validator 53/53, 각 exit0/ROLLBACK/cleanup 및 보호 데이터 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 전후 동일/auth 사용자 0. replay/conflict/new-ID active·held/private-empty/orphan success·최종 canonical proof 보류/game DML0·journal/settlement/final receipt 주입 실패의 game/success receipt/new lock 전체 rollback을 확인했다. 기존 journal/device/wallet 테이블은 baseline RLS 미설정이나 anon/authenticated 접근 권한은 차단되어 있으며 이 단계에서 권한을 확대하지 않았다.
+
+명령: `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_writer.sql`, `bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_validation.sql`, `git diff --check`. 증거: `/private/tmp/shop-import-v2-task5-writer-{apply,green}.log`, `/private/tmp/shop-import-v2-task5-qa-{writer,validator}.log`. Migration SHA256 `d71501c699ff2c09e74843aca3a75bf94efdd546bb88b8de28878268265f1142`. Public dispatch/race/native completion/worker/API/public scene 및 Tasks6–10은 아직 완료하지 않았다.
