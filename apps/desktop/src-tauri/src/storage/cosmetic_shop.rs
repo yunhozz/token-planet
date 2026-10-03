@@ -9,9 +9,13 @@ use crate::domain::cosmetic_shop::{
     LandscapeInstance, LandscapePlacement, QuoteTarget, ShopActionResult, ShopActionStatus,
     ShopCategory, ShopQuote, ShopRequest, ShopState,
 };
+use crate::domain::guest_shop_import::{
+    GuestFirstResetReceipt, GuestFirstResetRequest, GuestFirstResetRequestKind,
+    GuestFirstResetResult, GuestFirstResetStatus,
+};
 use crate::domain::landscape_geometry::{terrain_bounds, validate_placement, LandscapePoint};
 use crate::domain::planet::{PlanetObject, PlanetWalletCredit};
-use crate::domain::shop_effects::{capped_effects, discounted_price};
+use crate::domain::shop_effects::{capped_effects, discounted_price, weighted_growth};
 use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
@@ -624,6 +628,23 @@ impl Ledger {
         if account_id.starts_with("account:") || request_id.trim().is_empty() {
             return Err(ScanError::InvalidShopState);
         }
+        let eligible_guest_lineage: bool = self.connection.query_row(
+            "SELECT EXISTS(SELECT 1 FROM guest_provenance_lineage
+             WHERE singleton=1 AND eligible=1)",
+            [],
+            |row| row.get(0),
+        )?;
+        let now = if eligible_guest_lineage {
+            chrono::DateTime::from_timestamp_micros(now.timestamp_micros())
+                .ok_or(ScanError::InvalidShopState)?
+        } else {
+            now
+        };
+        let now_utc = if eligible_guest_lineage {
+            now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+        } else {
+            now.to_rfc3339()
+        };
         let payload_json =
             serde_json::to_string(request).map_err(|_| ScanError::InvalidShopState)?;
         if let Some(result) =
@@ -647,14 +668,6 @@ impl Ledger {
             return Err(ScanError::ResetCooldown);
         }
 
-        self.settle_guest_rewards(now)?;
-        self.settle_guest_cycle_tokens(cycle_id, now)?;
-        let state_before_reset = self.shop_state()?;
-        let current_tokens = self.current_guest_cycle_tokens(cycle_id)?;
-        let reset_bps = state_before_reset.effects.reset_cooldown_bps.min(2_500);
-        let cooldown_seconds = (86_400_i64 * i64::from(10_000 - reset_bps)) / 10_000;
-        let reset_available_at = now + chrono::Duration::seconds(cooldown_seconds.max(64_800));
-
         let transaction = self
             .connection
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -675,7 +688,7 @@ impl Ledger {
             transaction.execute(
                 "INSERT INTO shop_action_request(account_id,request_id,payload_json,result_json,created_at_utc)
                  VALUES (?1,?2,?3,?4,?5)",
-                params![account_id,request_id,payload_json,result_json,now.to_rfc3339()],
+                params![account_id,request_id,payload_json,result_json,now_utc],
             )?;
             transaction.commit()?;
             return Ok(result);
@@ -683,36 +696,60 @@ impl Ledger {
         if reset_available_at_from(&transaction)?.is_some_and(|available| now < available) {
             return Err(ScanError::ResetCooldown);
         }
+        Ledger::prepare_guest_import_source_in_transaction(&transaction, now)?;
+        let current_tokens = current_guest_cycle_tokens_in_connection(&transaction, cycle_id)?;
+        let frozen_deadline_before = reset_available_at_from(&transaction)?;
+        let state_before_reset = guest_shop_state(&transaction)?;
+        let record_zero_baseline = guest_first_reset_can_keep_zero_baseline(
+            &transaction,
+            &account_id,
+            cycle_id,
+            &state_before_reset,
+            current_tokens,
+            request_id,
+            frozen_deadline_before.is_none(),
+            now,
+        )?;
+        let reset_bps = state_before_reset.effects.reset_cooldown_bps.min(2_500);
+        let cooldown_seconds = (86_400_i64 * i64::from(10_000 - reset_bps)) / 10_000;
+        let reset_available_at = now + chrono::Duration::seconds(cooldown_seconds.max(64_800));
+        let reset_available_at_utc = if eligible_guest_lineage {
+            reset_available_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+        } else {
+            reset_available_at.to_rfc3339()
+        };
 
         let new_cycle_id = uuid::Uuid::new_v4().to_string();
         transaction.execute(
             "INSERT OR IGNORE INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
              VALUES (?1,?2,?3)",
-            params![cycle_id, to_i64(current_tokens)?, now.to_rfc3339()],
-        )?;
-        transaction.execute(
-            "UPDATE shop_effect_history SET ended_at_utc=?3
-             WHERE account_id=?1 AND cycle_id=?2 AND ended_at_utc IS NULL",
-            params![account_id, cycle_id, now.to_rfc3339()],
+            params![cycle_id, to_i64(current_tokens)?, now_utc.as_str()],
         )?;
         let next_effect_revision: i64 = transaction.query_row(
             "SELECT coalesce(max(revision),0)+1 FROM shop_effect_history WHERE account_id=?1",
             [&account_id],
             |row| row.get(0),
         )?;
-        let baseline_effects =
-            serde_json::to_string(&ActiveEffects::default()).map_err(|_| ScanError::Database)?;
-        transaction.execute(
-            "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
-             active_instance_ids_json,effects_json) VALUES (?1,?2,?3,?4,'[]',?5)",
-            params![
-                account_id,
-                new_cycle_id,
-                next_effect_revision,
-                now.to_rfc3339(),
-                baseline_effects
-            ],
-        )?;
+        if !record_zero_baseline {
+            transaction.execute(
+                "UPDATE shop_effect_history SET ended_at_utc=?3
+                 WHERE account_id=?1 AND cycle_id=?2 AND ended_at_utc IS NULL",
+                params![account_id, cycle_id, now_utc.as_str()],
+            )?;
+            let baseline_effects = serde_json::to_string(&ActiveEffects::default())
+                .map_err(|_| ScanError::Database)?;
+            transaction.execute(
+                "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+                 active_instance_ids_json,effects_json) VALUES (?1,?2,?3,?4,'[]',?5)",
+                params![
+                    account_id,
+                    new_cycle_id,
+                    next_effect_revision,
+                    now_utc.as_str(),
+                    baseline_effects
+                ],
+            )?;
+        }
         transaction.execute(
             "INSERT OR IGNORE INTO shop_landscape_edit_version(account_id,instance_id,version)
              SELECT account_id,instance_id,0 FROM shop_landscape_placement
@@ -736,12 +773,12 @@ impl Ledger {
             params![account_id, cycle_id],
         )?;
         for (key, value) in [
-            ("planet_last_reset_at_utc", now.to_rfc3339()),
+            ("planet_last_reset_at_utc", now_utc.clone()),
             (
                 "planet_reset_available_at_utc",
-                reset_available_at.to_rfc3339(),
+                reset_available_at_utc.clone(),
             ),
-            ("planet_cycle_started_at_utc", now.to_rfc3339()),
+            ("planet_cycle_started_at_utc", now_utc.clone()),
             ("planet_current_cycle_id", new_cycle_id),
         ] {
             transaction.execute(
@@ -756,6 +793,7 @@ impl Ledger {
             [],
         )?;
         increment_state_revision(&transaction, &account_id)?;
+        Ledger::prepare_growth_journal_in_transaction(&transaction)?;
         let state = guest_shop_state(&transaction)?;
         let result = ShopActionResult {
             status: ShopActionStatus::Reset,
@@ -767,19 +805,42 @@ impl Ledger {
         transaction.execute(
             "INSERT INTO shop_action_request(account_id,request_id,payload_json,result_json,created_at_utc)
              VALUES (?1,?2,?3,?4,?5)",
-            params![account_id,request_id,payload_json,result_json,now.to_rfc3339()],
+            params![account_id,request_id,payload_json,result_json,now_utc.as_str()],
+        )?;
+        let reset_receipt = GuestFirstResetReceipt {
+            request: GuestFirstResetRequest {
+                kind: GuestFirstResetRequestKind::ResetPlanet,
+                request_id: request_id.clone(),
+                cycle_id: cycle_id.clone(),
+            },
+            result: GuestFirstResetResult {
+                status: GuestFirstResetStatus::Reset,
+                request_id: request_id.clone(),
+                previous_cycle_id: cycle_id.clone(),
+                new_cycle_id: result.state.current_cycle_id.clone(),
+                reset_at_utc: now_utc.clone(),
+                final_effect_revision: if record_zero_baseline {
+                    0
+                } else {
+                    u64::try_from(next_effect_revision).map_err(|_| ScanError::InvalidCount)?
+                },
+                final_active_instance_ids: Vec::new(),
+                final_effects: result.state.effects.clone(),
+                frozen_deadline_before_reset_utc: frozen_deadline_before
+                    .map(|deadline| deadline.to_rfc3339_opts(chrono::SecondsFormat::Micros, true)),
+                reset_available_at_utc: reset_available_at_utc.clone(),
+                raw_tokens: current_tokens,
+                bonus_tokens: 0,
+                credited_tokens: current_tokens,
+                shop_state_revision: result.state.state_revision,
+            },
+        };
+        super::guest_provenance::record_guest_first_reset_in_transaction(
+            &transaction,
+            &reset_receipt,
         )?;
         transaction.commit()?;
         Ok(result)
-    }
-
-    fn current_guest_cycle_tokens(&self, cycle_id: &str) -> Result<u64, ScanError> {
-        let (_, local_tokens, _) = self.planet_usage_totals()?;
-        Ok(self
-            .synced_planet_metrics()?
-            .filter(|(remote_cycle, _, _, _)| remote_cycle == cycle_id)
-            .map(|(_, remote_tokens, _, _)| local_tokens.max(remote_tokens))
-            .unwrap_or(local_tokens))
     }
 
     fn record_guest_reset_status(
@@ -817,6 +878,7 @@ impl Ledger {
         request: &ShopRequest,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<ShopActionResult, ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         if active_account_id(&self.connection)?.starts_with("account:") {
             return Err(ScanError::InvalidShopState);
         }
@@ -932,6 +994,7 @@ impl Ledger {
     }
 
     pub fn store_confirmed_shop_state(&mut self, state: &ShopState) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let transaction = self.connection.transaction()?;
         store_confirmed_shop_state_in_transaction(&transaction, state)?;
         transaction.commit()?;
@@ -963,6 +1026,9 @@ impl Ledger {
     /// The legacy cosmetic importer is only a partial migration, so its
     /// imported marker does not stand in for the newer shop ownership state.
     pub fn has_unimported_guest_shop_state(&self) -> Result<bool, ScanError> {
+        if !self.guest_import_game_mutations_allowed()? {
+            return Ok(true);
+        }
         let account_id = active_account_id(&self.connection)?;
         if !account_id.starts_with("account:") {
             return Ok(false);
@@ -977,6 +1043,9 @@ impl Ledger {
     /// Checks guest shop ownership while the active planet account is still
     /// local, before first login can move local planet data to a signed account.
     pub fn has_local_guest_shop_state(&self) -> Result<bool, ScanError> {
+        if !self.guest_import_game_mutations_allowed()? {
+            return Ok(true);
+        }
         let has_local_shop_rows: bool = self.connection.query_row(
             "SELECT EXISTS(
                  SELECT 1 FROM shop_account_state WHERE account_id='local' AND state_revision>0
@@ -1024,6 +1093,7 @@ impl Ledger {
         &mut self,
         state: &CosmeticShopState,
     ) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let account_id = active_account_id(&self.connection)?;
         if !account_id.starts_with("account:") {
             return Err(ScanError::InvalidProfile);
@@ -1049,6 +1119,7 @@ impl Ledger {
         sku: &str,
         catalog_revision: u32,
     ) -> Result<String, ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let account_id = active_account_id(&self.connection)?;
         if !account_id.starts_with("account:")
             || !legacy_cosmetic_products()
@@ -1081,6 +1152,7 @@ impl Ledger {
     }
 
     pub fn cancel_cosmetic_purchase_request(&mut self, purchase_id: &str) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let account_id = active_account_id(&self.connection)?;
         self.connection.execute(
             "DELETE FROM cosmetic_pending_purchase WHERE account_id=?1 AND purchase_id=?2",
@@ -1093,6 +1165,7 @@ impl Ledger {
         &mut self,
         result: &CosmeticPurchaseResult,
     ) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let account_id = active_account_id(&self.connection)?;
         if !account_id.starts_with("account:") {
             return Err(ScanError::InvalidProfile);
@@ -1153,6 +1226,7 @@ impl Ledger {
         &mut self,
         result: &CosmeticEquipResult,
     ) -> Result<CosmeticShopState, ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let mut state = self.cosmetic_shop_state()?;
         if state.current_cycle_id != result.cycle_id {
             state.current_cycle_id = result.cycle_id.clone();
@@ -1179,6 +1253,7 @@ impl Ledger {
         import_id: &str,
         state: &CosmeticShopState,
     ) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let account_id = active_account_id(&self.connection)?;
         let transaction = self.connection.transaction()?;
         transaction.execute(
@@ -1206,6 +1281,9 @@ impl Ledger {
     pub fn planet_wallet_credits_for_server_upload(
         &self,
     ) -> Result<Vec<PlanetWalletCredit>, ScanError> {
+        if !self.guest_import_game_mutations_allowed()? {
+            return Ok(Vec::new());
+        }
         let Some(pending) = self.pending_guest_cosmetic_import()? else {
             return self.planet_wallet_credits();
         };
@@ -1226,6 +1304,7 @@ impl Ledger {
         purchase_id: &str,
         sku: &str,
     ) -> Result<CosmeticPurchaseResult, ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let transaction = self.connection.transaction()?;
         let result = purchase_in_transaction(&transaction, purchase_id, sku)?;
         transaction.commit()?;
@@ -1237,6 +1316,7 @@ impl Ledger {
         slot_id: &str,
         sku: Option<&str>,
     ) -> Result<u64, ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         if !cosmetic_slots().iter().any(|slot| slot.slot_id == slot_id) {
             return Err(ScanError::InvalidProfile);
         }
@@ -1508,6 +1588,326 @@ fn replayed_guest_shop_action(
             .map_err(|_| ScanError::Database)?;
     result.state = guest_shop_state(connection)?;
     Ok(Some(result))
+}
+
+fn guest_first_reset_can_keep_zero_baseline(
+    connection: &Connection,
+    account_id: &str,
+    cycle_id: &str,
+    state: &ShopState,
+    current_tokens: u64,
+    request_id: &str,
+    no_prior_deadline: bool,
+    reset_at: chrono::DateTime<Utc>,
+) -> Result<bool, ScanError> {
+    let lineage: Option<(String, String, String)> = connection
+        .query_row(
+            "SELECT lineage_id,device_id,activated_at_utc
+             FROM guest_provenance_lineage WHERE singleton=1 AND eligible=1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((lineage_id, device_id, activated_at)) = lineage else {
+        return Ok(false);
+    };
+    let baseline: Option<(String, Option<String>, i64, String, String)> = connection
+        .query_row(
+            "SELECT started_at_utc,ended_at_utc,baseline_revision,
+                    active_instance_ids_json,effects_json
+             FROM guest_provenance_cycle WHERE cycle_id=?1 AND lineage_id=?2",
+            params![cycle_id, lineage_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .optional()?;
+    let Some((started_at, ended_at, revision, active_ids, effects_json)) = baseline else {
+        return Ok(false);
+    };
+    let expected_effects =
+        serde_json::to_string(&ActiveEffects::default()).map_err(|_| ScanError::Database)?;
+    let active_cycle = active_cycle_id(connection)?;
+    let current_device: String = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_device_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    let cycle_started = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_cycle_started_at_utc'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    let activation_setting = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_activation_at_utc'",
+        [],
+        |row| row.get::<_, String>(0),
+    )?;
+    let prior_reset: Option<String> = connection
+        .query_row(
+            "SELECT value FROM setting WHERE key='planet_last_reset_at_utc'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let prior_receipt: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM guest_provenance_reset_receipt WHERE lineage_id=?1)",
+        [&lineage_id],
+        |row| row.get(0),
+    )?;
+    if !super::guest_provenance::reset_time_covers_guest_occurrences(
+        connection,
+        &lineage_id,
+        cycle_id,
+        reset_at,
+    )? {
+        return Ok(false);
+    }
+    if ended_at.is_some()
+        || revision != 0
+        || active_ids != "[]"
+        || effects_json != expected_effects
+        || active_cycle != cycle_id
+        || started_at != activated_at
+        || cycle_started != started_at
+        || activation_setting != started_at
+        || prior_reset.is_some()
+        || prior_receipt
+        || !no_prior_deadline
+        || device_id != current_device
+        || uuid::Uuid::parse_str(&device_id).map_or(true, |value| value.is_nil())
+        || uuid::Uuid::parse_str(request_id).map_or(true, |value| {
+            value.is_nil() || value.to_string() != request_id
+        })
+        || account_id != "local"
+        || state.account_id != account_id
+        || state.current_cycle_id != cycle_id
+        || current_tokens == 0
+        || state.effects != ActiveEffects::default()
+        || state.available_balance != 0
+        || !state.landscape_instances.is_empty()
+        || !state.placements.is_empty()
+        || !state.removed_natural_keys.is_empty()
+        || !state.avatar_owned_skus.is_empty()
+        || state.avatar_equipment.head.sku.is_some()
+        || state.avatar_equipment.outfit.sku.is_some()
+        || state.avatar_equipment.face.sku.is_some()
+        || state.avatar_equipment.back.sku.is_some()
+        || state.reward_state.settled_cycle_tokens != 0
+        || state.reward_state.era_reward_tokens != 0
+        || state.reward_state.streak_reward_tokens != 0
+    {
+        return Ok(false);
+    }
+
+    let unsupported_state: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM shop_effect_history WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_effect_cycle_bound WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_effect_cycle_bounds_state WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_effect_timeline_state WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM cosmetic_purchase WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM cosmetic_purchase_request WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_purchase WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_action_request WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_landscape_instance WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_landscape_placement WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_avatar_owned WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_avatar_equipment WHERE account_id=?1 AND sku IS NOT NULL)
+           OR EXISTS(SELECT 1 FROM cosmetic_equipment WHERE account_id=?1 AND sku IS NOT NULL)
+           OR EXISTS(SELECT 1 FROM shop_natural_removal WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_natural_removal_debit WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_game_reward WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_wallet_credit WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_era_progress WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM cosmetic_pending_purchase WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM cosmetic_guest_import WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM cosmetic_shop_remote_state WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM shop_remote_state WHERE account_id=?1)
+           OR EXISTS(SELECT 1 FROM planet_object)
+           OR EXISTS(SELECT 1 FROM planet_wallet_credit)
+           OR EXISTS(SELECT 1 FROM shop_cycle_settlement
+                     WHERE account_id=?1 AND amount<>0)",
+        [account_id],
+        |row| row.get(0),
+    )?;
+    let remote_state: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM setting WHERE key IN
+          ('planet_remote_cycle_id','planet_remote_current_tokens',
+           'planet_remote_growth_credit','planet_remote_incomplete'))",
+        [],
+        |row| row.get(0),
+    )?;
+    if unsupported_state || remote_state {
+        return Ok(false);
+    }
+
+    let mut statement = connection.prepare(
+        "SELECT date,tokens,growth_bps,wallet_bps FROM shop_effect_contribution
+         WHERE account_id=?1 AND cycle_id=?2 ORDER BY date,device_id,effect_revision",
+    )?;
+    let rows = statement.query_map(params![account_id, cycle_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+        ))
+    })?;
+    let mut last_date = None;
+    let mut date_total = 0_u64;
+    let mut growth = 0.0_f64;
+    for row in rows {
+        let (date, tokens, growth_bps, wallet_bps) = row?;
+        if growth_bps != 0 || wallet_bps != 0 || tokens < 0 {
+            return Ok(false);
+        }
+        if last_date
+            .as_deref()
+            .is_some_and(|previous| previous != date)
+        {
+            growth += weighted_growth(date_total, &[]).map_err(|_| ScanError::InvalidShopState)?;
+            if growth >= crate::growth::STAGE_THRESHOLDS[0] {
+                return Ok(false);
+            }
+            date_total = 0;
+        }
+        date_total = date_total
+            .checked_add(u64::try_from(tokens).map_err(|_| ScanError::InvalidCount)?)
+            .ok_or(ScanError::InvalidCount)?;
+        last_date = Some(date);
+    }
+    if last_date.is_some() {
+        growth += weighted_growth(date_total, &[]).map_err(|_| ScanError::InvalidShopState)?;
+    }
+    Ok(growth < crate::growth::STAGE_THRESHOLDS[0])
+}
+
+fn current_guest_cycle_tokens_in_connection(
+    connection: &Connection,
+    cycle_id: &str,
+) -> Result<u64, ScanError> {
+    let account_id = active_account_id(connection)?;
+    let activation: String = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_activation_at_utc'",
+        [],
+        |row| row.get(0),
+    )?;
+    let last_reset: Option<String> = connection
+        .query_row(
+            "SELECT value FROM setting WHERE key='planet_last_reset_at_utc'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let activation_time = chrono::DateTime::parse_from_rfc3339(&activation)
+        .map_err(|_| ScanError::Database)?
+        .with_timezone(&Utc);
+    let cycle_start = last_reset
+        .as_deref()
+        .map(chrono::DateTime::parse_from_rfc3339)
+        .transpose()
+        .map_err(|_| ScanError::Database)?
+        .map(|value| value.with_timezone(&Utc))
+        .unwrap_or(activation_time)
+        .max(activation_time);
+    let inclusive_cycle_boundary: bool = connection.query_row(
+        "SELECT EXISTS(
+           SELECT 1 FROM guest_provenance_lineage l
+           JOIN guest_provenance_cycle b ON b.lineage_id=l.lineage_id
+           WHERE l.singleton=1 AND l.eligible=1 AND l.device_id=(
+             SELECT value FROM setting WHERE key='planet_device_id'
+           ) AND b.cycle_id=(SELECT value FROM setting WHERE key='planet_current_cycle_id')
+             AND b.started_at_utc=(SELECT value FROM setting WHERE key='planet_cycle_started_at_utc')
+             AND (SELECT value FROM setting WHERE key='planet_account_id')='local'
+         )",
+        [],
+        |row| row.get(0),
+    )?;
+    let codex_enabled: Option<String> = connection
+        .query_row(
+            "SELECT value FROM setting WHERE key='codex_enabled'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let claude_enabled: Option<String> = connection
+        .query_row(
+            "SELECT value FROM setting WHERE key='claude_code_enabled'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let mut statement = connection.prepare(
+        "SELECT r.occurred_at_utc,r.total_tokens FROM usage_record r
+         WHERE r.total_tokens IS NOT NULL
+           AND (r.occurred_at_utc>?1 OR (?2 AND substr(r.occurred_at_utc,1,19)=substr(?1,1,19)))
+           AND ((r.agent='codex' AND ?3) OR (r.agent='claude_code' AND ?4))
+           AND EXISTS(SELECT 1 FROM planet_usage_owner o
+                      WHERE o.event_key=r.event_key AND o.account_id=?5)
+           AND (r.kind='response' OR NOT EXISTS(
+             SELECT 1 FROM usage_record other
+             WHERE other.source_id=r.source_id AND other.kind='response' AND other.agent=r.agent
+               AND EXISTS(SELECT 1 FROM planet_usage_owner o
+                          WHERE o.event_key=other.event_key AND o.account_id=?5)
+           ))
+         ORDER BY r.occurred_at_utc",
+    )?;
+    let rows = statement.query_map(
+        params![
+            activation,
+            inclusive_cycle_boundary,
+            codex_enabled.as_deref() != Some("false"),
+            claude_enabled.as_deref() != Some("false"),
+            account_id,
+        ],
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
+    )?;
+    let mut local_tokens = 0_u64;
+    for row in rows {
+        let (occurred_at, tokens) = row?;
+        let occurred_at = chrono::DateTime::parse_from_rfc3339(&occurred_at)
+            .map_err(|_| ScanError::Database)?
+            .with_timezone(&Utc);
+        if occurred_at < activation_time
+            || (!inclusive_cycle_boundary && occurred_at == activation_time)
+        {
+            continue;
+        }
+        let in_cycle = if inclusive_cycle_boundary {
+            occurred_at >= cycle_start
+        } else {
+            occurred_at > cycle_start
+        };
+        if !in_cycle {
+            continue;
+        }
+        local_tokens = local_tokens
+            .checked_add(u64::try_from(tokens).map_err(|_| ScanError::InvalidCount)?)
+            .ok_or(ScanError::InvalidCount)?;
+    }
+    let remote_cycle: Option<String> = connection
+        .query_row(
+            "SELECT value FROM setting WHERE key='planet_remote_cycle_id'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if remote_cycle.as_deref() == Some(cycle_id) {
+        let remote_tokens: String = connection.query_row(
+            "SELECT value FROM setting WHERE key='planet_remote_current_tokens'",
+            [],
+            |row| row.get(0),
+        )?;
+        let remote_tokens = remote_tokens.parse().map_err(|_| ScanError::Database)?;
+        return Ok(local_tokens.max(remote_tokens));
+    }
+    Ok(local_tokens)
 }
 
 fn reset_available_at_from(
@@ -3265,6 +3665,61 @@ mod tests {
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-02T00:00:00Z")
             .unwrap()
             .with_timezone(&chrono::Utc);
+        for table in [
+            "shop_cycle_settlement",
+            "shop_game_reward",
+            "shop_effect_contribution",
+            "shop_activity_day",
+            "growth_journal_cycle",
+            "growth_journal_entry",
+        ] {
+            let count: i64 = ledger
+                .connection
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE account_id=?1"),
+                    [&account],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "fixture starts without {table} rows");
+        }
+        let initial_receipt_count: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_reset_receipt",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(initial_receipt_count, 0);
+        let initial_provenance: (i64, i64, i64, Option<String>, i64) = ledger
+            .connection
+            .query_row(
+                "SELECT l.eligible,l.last_mutation_seq,l.occurrence_count,b.ended_at_utc,
+                        b.baseline_revision
+                 FROM guest_provenance_lineage l
+                 JOIN guest_provenance_cycle b ON b.lineage_id=l.lineage_id
+                 WHERE l.singleton=1 AND b.cycle_id=?1",
+                [&old_cycle],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        let initial_journal_generation: (i64, Option<String>) = ledger
+            .connection
+            .query_row(
+                "SELECT generation,deleted_at_utc FROM growth_journal_state WHERE account_id=?1",
+                [&account],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
         ledger
             .connection
             .execute_batch(
@@ -3299,27 +3754,73 @@ mod tests {
                 .unwrap(),
             0
         );
+        for table in [
+            "shop_cycle_settlement",
+            "shop_game_reward",
+            "shop_effect_contribution",
+            "shop_activity_day",
+            "growth_journal_cycle",
+            "growth_journal_entry",
+        ] {
+            let count: i64 = ledger
+                .connection
+                .query_row(
+                    &format!("SELECT count(*) FROM {table} WHERE account_id=?1"),
+                    [&account],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0, "failed reset rolled back {table}");
+        }
+        let provenance_after_failure: (i64, i64, i64, Option<String>, i64) = ledger
+            .connection
+            .query_row(
+                "SELECT l.eligible,l.last_mutation_seq,l.occurrence_count,b.ended_at_utc,
+                        b.baseline_revision
+                 FROM guest_provenance_lineage l
+                 JOIN guest_provenance_cycle b ON b.lineage_id=l.lineage_id
+                 WHERE l.singleton=1 AND b.cycle_id=?1",
+                [&old_cycle],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(provenance_after_failure, initial_provenance);
         assert_eq!(
             ledger
                 .connection
-                .query_row::<i64, _, _>(
-                    "SELECT amount FROM shop_cycle_settlement WHERE account_id=?1 AND cycle_id=?2",
-                    rusqlite::params![account, old_cycle],
-                    |row| row.get(0),
+                .query_row(
+                    "SELECT count(*) FROM guest_provenance_reset_receipt",
+                    [],
+                    |row| row.get::<_, i64>(0),
                 )
                 .unwrap(),
-            1
+            initial_receipt_count
         );
-        assert_eq!(ledger.connection.query_row::<i64,_,_>(
-            "SELECT count(*) FROM shop_game_reward WHERE account_id=?1 AND kind='cycle_token' AND amount=1",
-            [&account],|row|row.get(0),
-        ).unwrap(),1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT generation,deleted_at_utc FROM growth_journal_state WHERE account_id=?1",
+                    [&account],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )
+                .unwrap(),
+            initial_journal_generation
+        );
         ledger
             .connection
             .execute_batch("DROP TRIGGER fail_guest_reset_wallet;")
             .unwrap();
 
-        // Pre-reset reward settlement survives the failed reset, and the same request can safely retry.
+        // Preparation rolled back with the reset; retry commits it exactly once.
         let result = ledger
             .reset_guest_planet("reset-cycle-one", &old_cycle, now)
             .unwrap();
@@ -3382,6 +3883,21 @@ mod tests {
             "SELECT count(*) FROM shop_cycle_settlement WHERE account_id=?1 AND cycle_id=?2 AND amount=1",
             rusqlite::params![account,old_cycle], |row| row.get::<_, i64>(0),
         ).unwrap(), 1);
+        assert_eq!(ledger.connection.query_row::<i64,_,_>(
+            "SELECT count(*) FROM shop_game_reward WHERE account_id=?1 AND kind='cycle_token' AND amount=1",
+            [&account],|row|row.get(0),
+        ).unwrap(),1);
+        let journal_cycle: (Option<String>, Option<i64>) = ledger
+            .connection
+            .query_row(
+                "SELECT ended_at_utc,wallet_credit FROM growth_journal_cycle
+                 WHERE account_id=?1 AND cycle_id=?2",
+                rusqlite::params![account, old_cycle],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(journal_cycle.0.as_deref(), Some(now.to_rfc3339().as_str()));
+        assert_eq!(journal_cycle.1, Some(100));
         assert_eq!(
             ledger
                 .connection

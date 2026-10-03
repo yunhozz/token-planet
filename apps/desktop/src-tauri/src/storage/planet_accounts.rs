@@ -63,6 +63,13 @@ impl Ledger {
         if current == account_id {
             return Ok(false);
         }
+        if self.guest_shop_import_v2_target()?.is_some() {
+            return Err(ScanError::InvalidShopState);
+        }
+        if current == "local" && self.has_guest_shop_import_v2_candidate()? {
+            self.capture_guest_shop_import_request(&account_id)?;
+            return Err(ScanError::InvalidShopState);
+        }
         if current == "local" {
             let reward_timezone: String = self.connection.query_row(
                 "SELECT value FROM setting WHERE key='planet_timezone'",

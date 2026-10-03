@@ -18,9 +18,17 @@ use crate::domain::cosmetic_shop::{
     GuestUnverifiedWalletClaim, GuestUsageAggregate,
 };
 use crate::domain::cosmetic_shop::{ShopActionResult, ShopActionStatus, ShopCategory, ShopRequest};
+use crate::domain::guest_shop_import::GuestImportSourceRelation;
+use crate::domain::guest_shop_import::GuestShopImportV2Status;
 use crate::domain::landscape_geometry::{terrain_bounds, validate_placement, LandscapePoint};
 use crate::domain::planet::PlanetObject;
 use crate::storage::ledger::{Ledger, ScanError};
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum PendingGuestShopImport {
+    Legacy(GuestShopImportStatus),
+    V2(GuestShopImportV2Status),
+}
 
 #[derive(Serialize)]
 struct FingerprintInput<'a> {
@@ -29,6 +37,64 @@ struct FingerprintInput<'a> {
 }
 
 impl Ledger {
+    /// Returns false while an immutable v2 import request or correction hold freezes gameplay.
+    pub fn guest_import_game_mutations_allowed(&self) -> Result<bool, ScanError> {
+        super::guest_shop_import_v2::guest_import_game_mutations_allowed(self)
+    }
+
+    pub(crate) fn has_guest_shop_import_v2_candidate(&self) -> Result<bool, ScanError> {
+        super::guest_shop_import_v2::has_guest_shop_import_v2_candidate(self)
+    }
+
+    pub(crate) fn guest_shop_import_v2_target(&self) -> Result<Option<String>, ScanError> {
+        super::guest_shop_import_v2::guest_shop_import_v2_target(self)
+    }
+
+    pub(crate) fn require_guest_import_game_mutations_allowed(&self) -> Result<(), ScanError> {
+        if self.guest_import_game_mutations_allowed()? {
+            Ok(())
+        } else {
+            Err(ScanError::InvalidShopState)
+        }
+    }
+
+    /// Captures the current import request, retaining the legacy DTO when one already exists.
+    pub fn capture_guest_shop_import_request(
+        &mut self,
+        target_account_id: &str,
+    ) -> Result<PendingGuestShopImport, ScanError> {
+        if let Some(status) =
+            super::guest_shop_import_v2::capture_guest_shop_import_request(self, target_account_id)?
+        {
+            return Ok(PendingGuestShopImport::V2(status));
+        }
+        self.capture_guest_shop_import(target_account_id)
+            .map(PendingGuestShopImport::Legacy)
+    }
+
+    /// Reads the immutable pending capture, preferring the versioned request when present.
+    pub fn pending_guest_shop_import_request(
+        &self,
+        target_account_id: &str,
+    ) -> Result<Option<PendingGuestShopImport>, ScanError> {
+        validate_target_account(target_account_id)?;
+        if let Some(status) =
+            super::guest_shop_import_v2::pending_guest_shop_import_request(self, target_account_id)?
+        {
+            return Ok(Some(PendingGuestShopImport::V2(status)));
+        }
+        self.pending_guest_shop_import(target_account_id)
+            .map(|status| status.map(PendingGuestShopImport::Legacy))
+    }
+
+    /// Classifies the current local source relative to its immutable v2 request.
+    pub fn guest_import_source_relation(
+        &self,
+        import_id: uuid::Uuid,
+    ) -> Result<GuestImportSourceRelation, ScanError> {
+        super::guest_shop_import_v2::guest_import_source_relation(self, import_id)
+    }
+
     /// Captures local guest data durably for one target account. It never switches ownership
     /// and does not make the snapshot eligible for server credit or import.
     pub fn capture_guest_shop_import(
@@ -144,7 +210,7 @@ impl Ledger {
     }
 }
 
-fn validate_target_account(target_account_id: &str) -> Result<(), ScanError> {
+pub(super) fn validate_target_account(target_account_id: &str) -> Result<(), ScanError> {
     let raw = target_account_id
         .strip_prefix("account:")
         .ok_or(ScanError::InvalidShopState)?;
@@ -153,6 +219,21 @@ fn validate_target_account(target_account_id: &str) -> Result<(), ScanError> {
         return Err(ScanError::InvalidShopState);
     }
     Ok(())
+}
+
+pub(super) fn has_legacy_capture(
+    connection: &Connection,
+    target_account_id: &str,
+) -> Result<bool, ScanError> {
+    connection
+        .query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM guest_shop_import_capture WHERE target_account_id=?1
+             )",
+            [target_account_id],
+            |row| row.get(0),
+        )
+        .map_err(Into::into)
 }
 
 fn active_account_id(connection: &Connection) -> Result<String, ScanError> {
@@ -251,8 +332,22 @@ fn validate_snapshot_payload(
     Ok(())
 }
 
-fn disposition(data: &GuestShopImportData) -> GuestShopImportDisposition {
-    if !data.unverified_planet_wallet_claims.is_empty()
+pub(super) fn disposition(data: &GuestShopImportData) -> GuestShopImportDisposition {
+    disposition_with_verified_reset_claim(data, false)
+}
+
+pub(super) fn disposition_v2(
+    data: &GuestShopImportData,
+    verified_reset_claim: bool,
+) -> GuestShopImportDisposition {
+    disposition_with_verified_reset_claim(data, verified_reset_claim)
+}
+
+fn disposition_with_verified_reset_claim(
+    data: &GuestShopImportData,
+    verified_reset_claim: bool,
+) -> GuestShopImportDisposition {
+    if (!data.unverified_planet_wallet_claims.is_empty() && !verified_reset_claim)
         || data.reset_receipts_unverifiable
         || data.legacy_partial_import_pending
         || !data.integrity_issues.is_empty()
@@ -272,7 +367,7 @@ fn disposition(data: &GuestShopImportData) -> GuestShopImportDisposition {
     }
 }
 
-fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanError> {
+pub(super) fn capture_data(connection: &Connection) -> Result<GuestShopImportData, ScanError> {
     if active_account_id(connection)? != "local" {
         return Err(ScanError::InvalidShopState);
     }
@@ -1271,7 +1366,38 @@ fn same_instance_capture(
         && source.variation_version == captured.variation_version
 }
 
-fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIntegrityIssue> {
+pub(super) fn validate_local_integrity(
+    data: &GuestShopImportData,
+) -> Vec<GuestShopImportIntegrityIssue> {
+    validate_local_integrity_with_provenance_bounds(data, false)
+}
+
+pub(super) fn validate_local_integrity_for_guest_provenance(
+    data: &GuestShopImportData,
+    provenance: &crate::domain::guest_shop_import::GuestProvenanceV1,
+) -> Vec<GuestShopImportIntegrityIssue> {
+    let expected_bounds = provenance
+        .cycle_bounds
+        .iter()
+        .map(|bound| crate::domain::cosmetic_shop::ShopCycleBound {
+            cycle_id: bound.cycle_id.clone(),
+            started_at_utc: bound.started_at_utc.clone(),
+            ended_at_utc: bound.ended_at_utc.clone(),
+        })
+        .collect::<Vec<_>>();
+    let provenance_bounds_verified = !data.effect_cycle_bounds_authoritative
+        && data.effect_timeline_state.is_none()
+        && data.effect_history.is_empty()
+        && data.effect_cycle_bounds == expected_bounds
+        && crate::domain::guest_shop_import::prefix_fingerprint(provenance)
+            .is_ok_and(|fingerprint| fingerprint == provenance.prefix_fingerprint);
+    validate_local_integrity_with_provenance_bounds(data, provenance_bounds_verified)
+}
+
+fn validate_local_integrity_with_provenance_bounds(
+    data: &GuestShopImportData,
+    guest_provenance_bounds_verified: bool,
+) -> Vec<GuestShopImportIntegrityIssue> {
     use crate::domain::cosmetic_shop::{shop_products, AvatarSlot, ShopCategory};
 
     let products = shop_products();
@@ -1865,6 +1991,7 @@ fn validate_local_integrity(data: &GuestShopImportData) -> Vec<GuestShopImportIn
         }
     }
     if !data.effect_cycle_bounds_authoritative
+        && !guest_provenance_bounds_verified
         && (!data.effect_cycle_bounds.is_empty() || !data.effect_history.is_empty())
     {
         issues.push(GuestShopImportIntegrityIssue::InvalidEffectTimeline {

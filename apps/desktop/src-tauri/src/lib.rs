@@ -460,7 +460,7 @@ mod account_switch_tests {
     use crate::domain::planet::PlanetAvatar;
     use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
     use crate::storage::ledger::Ledger;
-    use chrono::{DateTime, Utc};
+    use chrono::{DateTime, Duration, Utc};
     use std::{
         path::Path,
         sync::{atomic::AtomicBool, Mutex},
@@ -518,6 +518,249 @@ mod account_switch_tests {
                 [],
             )
             .unwrap();
+    }
+
+    fn prepared_first_reset_ledger() -> Ledger {
+        let mut ledger = Ledger::open(Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let occurred_at = Utc::now();
+        ledger
+            .insert(&ParsedRecord {
+                agent: Agent::Codex,
+                kind: RecordKind::Response,
+                event_key: "account-switch-v2-source".into(),
+                occurred_at_utc: occurred_at,
+                usage: TokenUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_tokens: Some(1_000_000),
+                    coverage: UsageCoverage::Complete,
+                },
+            })
+            .unwrap();
+        ledger.rebuild_shop_contributions().unwrap();
+        ledger
+            .settle_guest_rewards(occurred_at + Duration::milliseconds(1))
+            .unwrap();
+        let old_cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger
+            .settle_guest_cycle_tokens(&old_cycle_id, occurred_at + Duration::milliseconds(2))
+            .unwrap();
+        ledger.prepare_growth_journal().unwrap();
+        let reset_at = occurred_at + Duration::milliseconds(250);
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        if Utc::now() < reset_at {
+            std::thread::sleep((reset_at - Utc::now()).to_std().unwrap());
+        }
+        ledger.prepare_growth_journal().unwrap();
+        ledger
+    }
+
+    #[test]
+    fn first_login_persists_v2_capture_before_holding_account_switch() {
+        let state = test_state(prepared_first_reset_ledger());
+
+        assert_eq!(
+            state.switch_planet_account(USER_ID),
+            Err(PlanetAccountSwitchError::GuestShopImportPending)
+        );
+
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(ledger.cosmetic_account_id().unwrap(), "local");
+        let capture_table: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type='table' AND name='guest_shop_import_v2_capture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let capture_rows = if capture_table == 0 {
+            0
+        } else {
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM guest_shop_import_v2_capture
+                     WHERE target_account_id=?1",
+                    [format!("account:{USER_ID}")],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            capture_rows, 1,
+            "the stable v2 request must be durable before account switch is held"
+        );
+        let legacy_table: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master
+                 WHERE type='table' AND name='guest_shop_import_capture'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let legacy_rows = if legacy_table == 0 {
+            0
+        } else {
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM guest_shop_import_capture
+                     WHERE target_account_id=?1",
+                    [format!("account:{USER_ID}")],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(legacy_rows, 0, "v2 capture must not create a v1 request");
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM cosmetic_guest_import WHERE account_id=?1",
+                    [format!("account:{USER_ID}")],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            0,
+            "v2 capture must precede legacy cosmetic import creation"
+        );
+    }
+
+    #[test]
+    fn app_scan_ingests_raw_usage_without_mutating_frozen_game_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let codex_root = temp.path().join("codex");
+        let claude_root = temp.path().join("claude");
+        std::fs::create_dir(&codex_root).unwrap();
+        std::fs::create_dir(&claude_root).unwrap();
+
+        let mut ledger = prepared_first_reset_ledger();
+        ledger
+            .capture_guest_shop_import_request(&format!("account:{USER_ID}"))
+            .unwrap();
+        let state = test_state(ledger);
+        *state.config.lock().unwrap() = SourceConfig {
+            codex_root: codex_root.clone(),
+            claude_root,
+            timezone: chrono_tz::UTC,
+        };
+        let source_timestamp = Utc::now().to_rfc3339();
+        let source_row = serde_json::json!({
+            "timestamp": source_timestamp,
+            "type": "token_usage_record",
+            "payload": {
+                "session_id": "frozen-v2-scan",
+                "response_id": "append-1",
+                "usage": {"total_tokens": 3_200_000}
+            }
+        });
+        std::fs::write(codex_root.join("session.jsonl"), format!("{source_row}\n")).unwrap();
+
+        let ledger = state.ledger.lock().unwrap();
+        let capture_before: String = ledger
+            .connection
+            .query_row(
+                "SELECT request_json FROM guest_shop_import_v2_capture
+                 WHERE target_account_id=?1",
+                [format!("account:{USER_ID}")],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let journal_before: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM growth_journal_entry WHERE account_id='local'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let contribution_before: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM shop_effect_contribution WHERE account_id='local'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let reward_before: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM shop_game_reward WHERE account_id='local'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let objects_before = ledger.planet_objects().unwrap();
+        drop(ledger);
+
+        let snapshot = state.scan().unwrap();
+
+        let ledger = state.ledger.lock().unwrap();
+        assert_eq!(snapshot.usage.codex.total_tokens, Some(4_200_000));
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM usage_record
+                     WHERE event_key='codex:response:frozen-v2-scan:append-1'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            1,
+            "raw source usage must be stored during a pending capture"
+        );
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM growth_journal_entry WHERE account_id='local'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            journal_before
+        );
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM shop_effect_contribution WHERE account_id='local'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            contribution_before
+        );
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<i64, _, _>(
+                    "SELECT count(*) FROM shop_game_reward WHERE account_id='local'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            reward_before
+        );
+        assert_eq!(ledger.planet_objects().unwrap(), objects_before);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row::<String, _, _>(
+                    "SELECT request_json FROM guest_shop_import_v2_capture
+                     WHERE target_account_id=?1",
+                    [format!("account:{USER_ID}")],
+                    |row| row.get(0),
+                )
+                .unwrap(),
+            capture_before
+        );
     }
 
     #[test]
@@ -669,11 +912,39 @@ impl AppState {
             PlanetAccountSwitchError::Other("행성 계정을 확인할 수 없습니다".into())
         })?;
         let target_account = format!("account:{user_id}");
-        if current_account != target_account
-            && sync::worker::guest_shop_import_pending(&ledger)
+        if current_account != target_account {
+            if ledger
+                .guest_shop_import_v2_target()
+                .map_err(|_| {
+                    PlanetAccountSwitchError::Other(
+                        "게스트 상점 가져오기 상태를 확인할 수 없습니다".into(),
+                    )
+                })?
+                .is_some()
+            {
+                return Err(PlanetAccountSwitchError::GuestShopImportPending);
+            }
+            if current_account == "local"
+                && ledger.has_guest_shop_import_v2_candidate().map_err(|_| {
+                    PlanetAccountSwitchError::Other(
+                        "게스트 상점 가져오기 원본을 확인할 수 없습니다".into(),
+                    )
+                })?
+            {
+                ledger
+                    .capture_guest_shop_import_request(&target_account)
+                    .map_err(|_| {
+                        PlanetAccountSwitchError::Other(
+                            "게스트 상점 가져오기 요청을 저장할 수 없습니다".into(),
+                        )
+                    })?;
+                return Err(PlanetAccountSwitchError::GuestShopImportPending);
+            }
+            if sync::worker::guest_shop_import_pending(&ledger)
                 .map_err(PlanetAccountSwitchError::Other)?
-        {
-            return Err(PlanetAccountSwitchError::GuestShopImportPending);
+            {
+                return Err(PlanetAccountSwitchError::GuestShopImportPending);
+            }
         }
         let changed = ledger.ensure_planet_account(user_id).map_err(|_| {
             PlanetAccountSwitchError::Other("행성 계정을 변경할 수 없습니다".into())

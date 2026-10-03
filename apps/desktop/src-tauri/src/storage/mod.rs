@@ -1,7 +1,10 @@
 pub mod cosmetic_shop;
 pub mod growth_journal;
+pub mod guest_provenance;
+pub mod guest_shop_import_v2;
 pub mod ledger;
 pub mod outbox;
 mod planet_accounts;
 pub mod shop_effects;
 mod shop_import;
+pub use shop_import::PendingGuestShopImport;

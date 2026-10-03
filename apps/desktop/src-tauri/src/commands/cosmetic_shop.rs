@@ -15,6 +15,9 @@ use std::sync::Mutex;
 
 type ShopRpcFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, SyncError>> + Send + 'a>>;
 
+const GUEST_SHOP_IMPORT_PENDING_REASON: &str =
+    "게스트 상점 가져오기가 완료될 때까지 상점 변경이 제한됩니다";
+
 trait ShopRpc: Send + Sync {
     fn get_state<'a>(&'a self, access_token: &'a str) -> ShopRpcFuture<'a, ShopState>;
     fn quote_action<'a>(
@@ -78,12 +81,17 @@ fn offline_shop_action(
     request: &ShopRequest,
     reason: &str,
 ) -> Result<ShopActionResult, String> {
+    let ledger = ledger.lock().map_err(|_| "상점 저장소 오류")?;
     let mut shop = ledger
-        .lock()
-        .map_err(|_| "상점 저장소 오류")?
         .shop_state()
         .map_err(|_| "상점 상태를 읽을 수 없습니다")?;
-    shop.action_unavailable_reason = Some(reason.to_owned());
+    if guest_shop_v2_import_pending(&ledger)? {
+        shop.guest_import_pending = true;
+        shop.guest_import_error = Some(GUEST_SHOP_IMPORT_PENDING_REASON.to_owned());
+        shop.action_unavailable_reason = Some(GUEST_SHOP_IMPORT_PENDING_REASON.to_owned());
+    } else {
+        shop.action_unavailable_reason = Some(reason.to_owned());
+    }
     Ok(ShopActionResult {
         status: ShopActionStatus::Unavailable,
         request_id: request_id(request).to_owned(),
@@ -96,15 +104,35 @@ fn canonical_local_shop_state(
     ledger: &Mutex<Ledger>,
     reason: Option<&str>,
 ) -> Result<ShopState, String> {
+    let ledger = ledger.lock().map_err(|_| "상점 저장소 오류")?;
     let mut shop = ledger
-        .lock()
-        .map_err(|_| "상점 저장소 오류")?
         .shop_state()
         .map_err(|_| "상점 상태를 읽을 수 없습니다")?;
+    let reason = if guest_shop_v2_import_pending(&ledger)? {
+        shop.guest_import_pending = true;
+        shop.guest_import_error = Some(GUEST_SHOP_IMPORT_PENDING_REASON.to_owned());
+        Some(GUEST_SHOP_IMPORT_PENDING_REASON)
+    } else {
+        reason
+    };
     if let Some(reason) = reason {
         shop.action_unavailable_reason = Some(reason.to_owned());
     }
     Ok(shop)
+}
+
+fn guest_shop_v2_import_pending(ledger: &Ledger) -> Result<bool, String> {
+    let has_capture = ledger
+        .guest_shop_import_v2_target()
+        .map_err(|_| "게스트 상점 가져오기 상태를 확인할 수 없습니다")?
+        .is_some();
+    if !has_capture {
+        return Ok(false);
+    }
+    ledger
+        .guest_import_game_mutations_allowed()
+        .map(|allowed| !allowed)
+        .map_err(|_| "게스트 상점 가져오기 상태를 확인할 수 없습니다".into())
 }
 
 fn ensure_shop_context(
@@ -377,12 +405,18 @@ enum ShopSession {
 }
 
 async fn shop_session(state: &AppState) -> Result<ShopSession, String> {
-    let account_id = state
-        .ledger
-        .lock()
-        .map_err(|_| "상점 저장소 오류")?
-        .cosmetic_account_id()
-        .map_err(|_| "상점 계정 정보를 읽을 수 없습니다")?;
+    let (account_id, guest_import_pending) = {
+        let ledger = state.ledger.lock().map_err(|_| "상점 저장소 오류")?;
+        (
+            ledger
+                .cosmetic_account_id()
+                .map_err(|_| "상점 계정 정보를 읽을 수 없습니다")?,
+            guest_shop_v2_import_pending(&ledger)?,
+        )
+    };
+    if guest_import_pending {
+        return Ok(ShopSession::Unavailable(GUEST_SHOP_IMPORT_PENDING_REASON));
+    }
     let Some(config) = AuthConfig::from_env() else {
         return Ok(if account_id.starts_with("account:") {
             ShopSession::Unavailable("로그인 계정의 상점은 서버 연결 후 이용할 수 있습니다")
@@ -414,12 +448,17 @@ async fn shop_session(state: &AppState) -> Result<ShopSession, String> {
 }
 
 fn local_shop_state(state: &AppState, reason: Option<&str>) -> Result<CosmeticShopState, String> {
-    let mut shop = state
-        .ledger
-        .lock()
-        .map_err(|_| "상점 저장소 오류")?
+    let ledger = state.ledger.lock().map_err(|_| "상점 저장소 오류")?;
+    let mut shop = ledger
         .cosmetic_shop_state()
         .map_err(|_| "상점 상태를 읽을 수 없습니다")?;
+    let reason = if guest_shop_v2_import_pending(&ledger)? {
+        shop.guest_import_pending = true;
+        shop.guest_import_error = Some(GUEST_SHOP_IMPORT_PENDING_REASON.to_owned());
+        Some(GUEST_SHOP_IMPORT_PENDING_REASON)
+    } else {
+        reason
+    };
     if shop.guest_import_pending {
         shop.guest_import_error = reason.map(str::to_owned);
     }
@@ -858,16 +897,21 @@ mod tests {
 
     use super::{
         apply_shop_request_for_session, get_shop_state_for_session, quote_shop_action_for_session,
-        stale_equip_result, CanonicalShopSession, ShopRpc, ShopRpcFuture,
+        shop_session, stale_equip_result, CanonicalShopSession, ShopRpc, ShopRpcFuture,
+        ShopSession, GUEST_SHOP_IMPORT_PENDING_REASON,
     };
+    use crate::collectors::discovery::SourceConfig;
+    use crate::collectors::{ParsedRecord, RecordKind};
     use crate::domain::cosmetic_shop::{
         ActiveEffects, AvatarEquipment, AvatarEquipmentItem, CosmeticEquipStatus,
         CosmeticShopState, CosmeticSlot, EquippedCosmetic, NaturalObjectKey, QuoteTarget,
         RewardState, ShopActionResult, ShopActionStatus, ShopQuote, ShopRequest, ShopState,
     };
+    use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
     use crate::storage::ledger::Ledger;
     use crate::sync::client::SyncError;
-    use std::sync::{mpsc, Arc, Mutex};
+    use crate::{AppState, WindowMode};
+    use std::sync::{atomic::AtomicBool, mpsc, Arc, Mutex};
     use std::time::Duration;
 
     #[derive(Default)]
@@ -948,6 +992,69 @@ mod tests {
         let ledger =
             Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
         (directory, Mutex::new(ledger))
+    }
+
+    fn prepared_v2_pending_ledger() -> (tempfile::TempDir, Mutex<Ledger>) {
+        let directory = tempfile::tempdir().unwrap();
+        let mut ledger =
+            Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
+        let occurred_at = chrono::Utc::now();
+        ledger
+            .insert(&ParsedRecord {
+                agent: Agent::Codex,
+                kind: RecordKind::Response,
+                event_key: "command-v2-source".into(),
+                occurred_at_utc: occurred_at,
+                usage: TokenUsage {
+                    input_tokens: None,
+                    output_tokens: None,
+                    cache_read_tokens: None,
+                    cache_write_tokens: None,
+                    total_tokens: Some(1_000_000),
+                    coverage: UsageCoverage::Complete,
+                },
+            })
+            .unwrap();
+        ledger.rebuild_shop_contributions().unwrap();
+        ledger
+            .settle_guest_rewards(occurred_at + chrono::Duration::milliseconds(1))
+            .unwrap();
+        let old_cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger
+            .settle_guest_cycle_tokens(
+                &old_cycle_id,
+                occurred_at + chrono::Duration::milliseconds(2),
+            )
+            .unwrap();
+        ledger.prepare_growth_journal().unwrap();
+        let reset_at = occurred_at + chrono::Duration::milliseconds(250);
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        if chrono::Utc::now() < reset_at {
+            std::thread::sleep((reset_at - chrono::Utc::now()).to_std().unwrap());
+        }
+        ledger.prepare_growth_journal().unwrap();
+        ledger
+            .capture_guest_shop_import_request("account:00000000-0000-4000-a000-000000000071")
+            .unwrap();
+        (directory, Mutex::new(ledger))
+    }
+
+    fn test_state(ledger: Mutex<Ledger>) -> AppState {
+        AppState {
+            config: Mutex::new(SourceConfig {
+                codex_root: std::path::PathBuf::from("/private/tmp/shop-command-codex"),
+                claude_root: std::path::PathBuf::from("/private/tmp/shop-command-claude"),
+                timezone: chrono_tz::UTC,
+            }),
+            ledger,
+            latest: Mutex::new(None),
+            usage_scan_failed: AtomicBool::new(false),
+            sync_failed: Mutex::new(false),
+            sync_gate: tokio::sync::Mutex::new(()),
+            window_mode: Mutex::new(WindowMode::Popup),
+            mode_transitioning: AtomicBool::new(false),
+            tray_press_pending: AtomicBool::new(false),
+        }
     }
 
     fn canonical_state(account_id: &str, cycle_id: &str, revision: u64) -> ShopState {
@@ -1044,6 +1151,45 @@ mod tests {
             ledger.lock().unwrap().shop_state().unwrap().state_revision,
             4
         );
+    }
+
+    #[test]
+    fn guest_getter_surfaces_pending_v2_import_error() {
+        let (_directory, ledger) = prepared_v2_pending_ledger();
+
+        let state = tauri::async_runtime::block_on(get_shop_state_for_session(
+            &ledger,
+            CanonicalShopSession::Guest,
+            None,
+        ))
+        .unwrap();
+
+        assert!(state.guest_import_pending);
+        let reason = "게스트 상점 가져오기가 완료될 때까지 상점 변경이 제한됩니다";
+        assert_eq!(state.guest_import_error.as_deref(), Some(reason));
+        assert_eq!(state.action_unavailable_reason.as_deref(), Some(reason));
+    }
+
+    #[test]
+    fn v2_pending_shop_session_skips_remote_shop_calls() {
+        let (_directory, ledger) = prepared_v2_pending_ledger();
+        let state = test_state(ledger);
+
+        let session = tauri::async_runtime::block_on(shop_session(&state)).unwrap();
+        let ShopSession::Unavailable(reason) = session else {
+            panic!("v2 pending must stop shop session routing before auth or RPC");
+        };
+        assert_eq!(reason, GUEST_SHOP_IMPORT_PENDING_REASON);
+
+        let rpc = TestShopRpc::default();
+        let shop = tauri::async_runtime::block_on(get_shop_state_for_session(
+            &state.ledger,
+            CanonicalShopSession::Unavailable(reason.to_owned()),
+            Some(&rpc),
+        ))
+        .unwrap();
+        assert!(shop.guest_import_pending);
+        assert!(rpc.get_calls.lock().unwrap().is_empty());
     }
 
     #[test]

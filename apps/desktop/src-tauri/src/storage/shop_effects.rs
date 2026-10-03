@@ -2,14 +2,14 @@ use std::collections::BTreeMap;
 
 use chrono::{DateTime, NaiveDate, Utc};
 use chrono_tz::Tz;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use super::ledger::{Ledger, ScanError};
 use crate::domain::cosmetic_shop::{
     ActiveEffects, EffectContribution, RewardState, ShopEffectTimeline,
 };
 use crate::domain::planet::{
-    PlanetActivityDayContribution, PlanetDeviceContributionSnapshot,
+    PlanetActivityDayContribution, PlanetDeviceContribution, PlanetDeviceContributionSnapshot,
     PlanetEffectContributionSegment,
 };
 use crate::domain::shop_effects::{cycle_token_bonus, weighted_growth};
@@ -29,6 +29,14 @@ struct CycleBound {
     cycle_id: String,
     started_at: DateTime<Utc>,
     ended_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone)]
+struct GuestProvenanceBound {
+    cycle_id: String,
+    started_at: DateTime<Utc>,
+    ended_at: Option<DateTime<Utc>>,
+    revision: u64,
 }
 
 #[derive(Clone)]
@@ -539,14 +547,15 @@ fn validate_timeline_successor(
 }
 
 impl Ledger {
-    pub(super) fn confirmed_current_cycle_start(&self) -> Result<Option<DateTime<Utc>>, ScanError> {
-        let account_id = current_account_id(&self.connection)?;
+    pub(super) fn confirmed_current_cycle_start_in_connection(
+        connection: &Connection,
+    ) -> Result<Option<DateTime<Utc>>, ScanError> {
+        let account_id = current_account_id(connection)?;
         if !account_id.starts_with("account:") {
             return Ok(None);
         }
-        let cycle_id = current_cycle_id(&self.connection)?;
-        let started_at: Option<String> = self
-            .connection
+        let cycle_id = current_cycle_id(connection)?;
+        let started_at: Option<String> = connection
             .query_row(
                 "SELECT b.started_at_utc
                  FROM shop_effect_cycle_bounds_state initialized
@@ -563,6 +572,7 @@ impl Ledger {
     }
 
     pub fn rebuild_shop_contributions(&mut self) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let transaction = self.connection.transaction()?;
         rebuild_shop_contributions_in_transaction(&transaction)?;
         transaction.commit()?;
@@ -577,6 +587,7 @@ impl Ledger {
         expected_account_id: &str,
         expected_cycle_id: &str,
     ) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let transaction = self.connection.transaction()?;
         apply_confirmed_shop_effect_timeline_in_transaction(
             &transaction,
@@ -596,76 +607,46 @@ impl Ledger {
     ) -> Result<PlanetDeviceContributionSnapshot, ScanError> {
         let transaction = self.connection.unchecked_transaction()?;
         let raw = self.planet_device_contribution(incomplete)?;
-        let account_id = current_account_id(&transaction)?;
-        let stored_version: Option<i64> = transaction
-            .query_row(
-                "SELECT canonical_version FROM shop_contribution_state WHERE account_id=?1",
-                [&account_id],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let canonical_version = to_u64(stored_version.unwrap_or(0))?;
-        let device_id = raw.device_id.clone();
-        let segments = {
-            let mut statement = transaction.prepare(
-                "SELECT cycle_id,date,effect_revision,tokens FROM shop_effect_contribution
-                 WHERE account_id=?1 AND device_id=?2
-                 ORDER BY cycle_id,date,effect_revision",
-            )?;
-            let rows = statement
-                .query_map(params![account_id, device_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, i64>(2)?,
-                        row.get::<_, i64>(3)?,
-                    ))
-                })?
-                .collect::<Result<Vec<_>, _>>()?;
-            rows
-        };
-        let daily_segments = segments
-            .into_iter()
-            .map(|(cycle_id, date, revision, tokens)| {
-                Ok(PlanetEffectContributionSegment {
-                    cycle_id,
-                    date,
-                    effect_revision: to_u64(revision)?,
-                    tokens: to_u64(tokens)?,
-                })
-            })
-            .collect::<Result<Vec<_>, ScanError>>()?;
-        let activity_days = activity_snapshot(&transaction, &account_id)?
-            .into_iter()
-            .map(|activity| PlanetActivityDayContribution {
-                reward_date: activity.reward_date,
-                cycle_id: activity.cycle_id,
-                first_occurred_at_utc: activity.first_occurred_at_utc,
-                tokens: activity.tokens,
-            })
-            .collect();
+        let snapshot = shop_device_contribution_from_connection(&transaction, raw)?;
         transaction.commit()?;
-        Ok(PlanetDeviceContributionSnapshot {
-            raw,
-            canonical_version,
-            daily_segments,
-            activity_days,
-        })
+        Ok(snapshot)
     }
 
     pub fn settle_guest_rewards(
         &mut self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<(), ScanError> {
-        self.rebuild_shop_contributions()?;
-        let account_id = current_account_id(&self.connection)?;
+        if !self.guest_import_game_mutations_allowed()? {
+            return Ok(());
+        }
+        let transaction = self.connection.transaction()?;
+        Self::settle_guest_rewards_in_transaction(&transaction, now)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn prepare_guest_import_source_in_transaction(
+        transaction: &Transaction<'_>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ScanError> {
+        Self::settle_guest_rewards_in_transaction(transaction, now)?;
+        let current_cycle = current_cycle_id(transaction)?;
+        Self::settle_guest_cycle_tokens_in_transaction(transaction, &current_cycle, now)?;
+        Ok(())
+    }
+
+    pub(crate) fn settle_guest_rewards_in_transaction(
+        transaction: &Transaction<'_>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<(), ScanError> {
+        rebuild_shop_contributions_in_transaction(transaction)?;
+        let account_id = current_account_id(transaction)?;
         if account_id.starts_with("account:") {
             return Ok(());
         }
-        let current_cycle = current_cycle_id(&self.connection)?;
-        let occurrences = canonical_occurrences(&self.connection)?;
-        let histories = effect_histories(&self.connection, &account_id)?;
-        let transaction = self.connection.transaction()?;
+        let current_cycle = current_cycle_id(transaction)?;
+        let occurrences = canonical_occurrences(transaction)?;
+        let histories = effect_histories(transaction, &account_id)?;
 
         let mut current_date: Option<&str> = None;
         let mut day_tokens = 0_u64;
@@ -686,7 +667,7 @@ impl Ledger {
                 .checked_add(occurrence.tokens)
                 .ok_or(ScanError::InvalidCount)?;
             day_segments.push(EffectContribution {
-                device_id: setting(&transaction, "planet_device_id")?.ok_or(ScanError::Database)?,
+                device_id: setting(transaction, "planet_device_id")?.ok_or(ScanError::Database)?,
                 cycle_id: occurrence.cycle_id.clone(),
                 date: occurrence.growth_date.clone(),
                 effect_revision: occurrence.effect_revision,
@@ -703,9 +684,9 @@ impl Ledger {
                     break;
                 }
                 let trigger_key = format!("era:{}:{stage}", occurrence.cycle_id);
-                let existed = transaction.query_row(
+                let existed: bool = transaction.query_row(
                     "SELECT EXISTS(SELECT 1 FROM shop_era_progress WHERE account_id=?1 AND cycle_id=?2 AND stage=?3)",
-                    params![account_id,occurrence.cycle_id,stage],|row|row.get::<_,bool>(0),
+                    params![account_id,occurrence.cycle_id,stage],|row|row.get(0),
                 )?;
                 if existed {
                     continue;
@@ -730,7 +711,7 @@ impl Ledger {
                 let amount = occurrence.effects.era_reward_tokens.min(10_000_000);
                 if amount > 0 {
                     record_game_reward(
-                        &transaction,
+                        transaction,
                         &account_id,
                         &trigger_key,
                         "era",
@@ -743,7 +724,7 @@ impl Ledger {
             }
         }
 
-        let days = activity_snapshot(&transaction, &account_id)?;
+        let days = activity_snapshot(transaction, &account_id)?;
         let active_dates = days
             .iter()
             .map(|day| day.reward_date.clone())
@@ -770,7 +751,7 @@ impl Ledger {
             }
             let trigger_key = format!("streak:{}", day.reward_date);
             record_game_reward(
-                &transaction,
+                transaction,
                 &account_id,
                 &trigger_key,
                 "streak",
@@ -780,7 +761,6 @@ impl Ledger {
                 now,
             )?;
         }
-        transaction.commit()?;
         Ok(())
     }
 
@@ -788,6 +768,17 @@ impl Ledger {
         &self,
     ) -> Result<std::collections::BTreeMap<String, f64>, ScanError> {
         let (daily, _, _) = self.planet_usage_totals()?;
+        if !self.guest_import_game_mutations_allowed()? {
+            return daily
+                .into_iter()
+                .map(|(date, tokens)| {
+                    Ok((
+                        date,
+                        weighted_growth(tokens, &[]).map_err(|_| ScanError::InvalidShopState)?,
+                    ))
+                })
+                .collect();
+        }
         let account_id = current_account_id(&self.connection)?;
         if account_id.starts_with("account:") {
             return daily
@@ -840,12 +831,23 @@ impl Ledger {
         cycle_id: &str,
         now: chrono::DateTime<chrono::Utc>,
     ) -> Result<u64, ScanError> {
-        self.rebuild_shop_contributions()?;
-        let account_id = current_account_id(&self.connection)?;
+        self.require_guest_import_game_mutations_allowed()?;
+        let transaction = self.connection.transaction()?;
+        let amount = Self::settle_guest_cycle_tokens_in_transaction(&transaction, cycle_id, now)?;
+        transaction.commit()?;
+        Ok(amount)
+    }
+
+    pub(crate) fn settle_guest_cycle_tokens_in_transaction(
+        transaction: &Transaction<'_>,
+        cycle_id: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<u64, ScanError> {
+        rebuild_shop_contributions_in_transaction(transaction)?;
+        let account_id = current_account_id(transaction)?;
         if account_id.starts_with("account:") {
             return Ok(0);
         }
-        let transaction = self.connection.transaction()?;
         let prior: Option<i64> = transaction
             .query_row(
                 "SELECT amount FROM shop_cycle_settlement WHERE account_id=?1 AND cycle_id=?2",
@@ -885,7 +887,7 @@ impl Ledger {
         if amount > 0 {
             let effects = ActiveEffects::default();
             record_game_reward(
-                &transaction,
+                transaction,
                 &account_id,
                 &format!("cycle-token:{cycle_id}"),
                 "cycle_token",
@@ -895,7 +897,6 @@ impl Ledger {
                 now,
             )?;
         }
-        transaction.commit()?;
         Ok(amount)
     }
 
@@ -1007,6 +1008,74 @@ impl Ledger {
     ) -> Result<RewardState, ScanError> {
         load_shop_reward_state(&self.connection, account_id, cycle_id)
     }
+}
+
+pub(crate) fn shop_device_contribution_from_connection(
+    connection: &Connection,
+    raw: PlanetDeviceContribution,
+) -> Result<PlanetDeviceContributionSnapshot, ScanError> {
+    let account_id = current_account_id(connection)?;
+    let stored_version: Option<i64> = connection
+        .query_row(
+            "SELECT canonical_version FROM shop_contribution_state WHERE account_id=?1",
+            [&account_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let canonical_version = to_u64(stored_version.unwrap_or(0))?;
+    let device_id = raw.device_id.clone();
+    let segments = {
+        let mut statement = connection.prepare(
+            "SELECT cycle_id,date,effect_revision,tokens FROM shop_effect_contribution
+             WHERE account_id=?1 AND device_id=?2
+             ORDER BY cycle_id,date,effect_revision",
+        )?;
+        let rows = statement
+            .query_map(params![account_id, device_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows
+    };
+    let daily_segments = segments
+        .into_iter()
+        .map(|(cycle_id, date, revision, tokens)| {
+            Ok(PlanetEffectContributionSegment {
+                cycle_id,
+                date,
+                effect_revision: to_u64(revision)?,
+                tokens: to_u64(tokens)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ScanError>>()?;
+    let activity_days = activity_snapshot(connection, &account_id)?
+        .into_iter()
+        .map(|activity| PlanetActivityDayContribution {
+            reward_date: activity.reward_date,
+            cycle_id: activity.cycle_id,
+            first_occurred_at_utc: activity.first_occurred_at_utc,
+            tokens: activity.tokens,
+        })
+        .collect();
+    Ok(PlanetDeviceContributionSnapshot {
+        raw,
+        canonical_version,
+        daily_segments,
+        activity_days,
+    })
+}
+
+pub(crate) fn capture_shop_device_contribution_from_connection(
+    connection: &Connection,
+    raw: PlanetDeviceContribution,
+) -> Result<PlanetDeviceContributionSnapshot, ScanError> {
+    rebuild_shop_contributions_in_transaction(connection)?;
+    shop_device_contribution_from_connection(connection, raw)
 }
 
 pub(crate) fn load_shop_reward_state(
@@ -1171,6 +1240,42 @@ fn canonical_occurrences(connection: &Connection) -> Result<Vec<CanonicalOccurre
         legacy_histories = effect_histories(connection, &account_id)?;
         (legacy_histories.as_slice(), &[][..])
     };
+    let eligible_lineage: Option<String> = connection
+        .query_row(
+            "SELECT lineage_id FROM guest_provenance_lineage
+             WHERE singleton=1 AND eligible=1
+               AND device_id=(SELECT value FROM setting WHERE key='planet_device_id')
+               AND (SELECT value FROM setting WHERE key='planet_account_id')='local'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let guest_provenance_bounds = if let Some(lineage_id) = eligible_lineage {
+        let mut statement = connection.prepare(
+            "SELECT cycle_id,started_at_utc,ended_at_utc,baseline_revision
+             FROM guest_provenance_cycle WHERE lineage_id=?1 ORDER BY started_at_utc",
+        )?;
+        let rows = statement.query_map([lineage_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, i64>(3)?,
+            ))
+        })?;
+        rows.map(|row| {
+            let (cycle_id, started_at, ended_at, revision) = row?;
+            Ok(GuestProvenanceBound {
+                cycle_id,
+                started_at: parse_utc(&started_at)?,
+                ended_at: ended_at.as_deref().map(parse_utc).transpose()?,
+                revision: to_u64(revision)?,
+            })
+        })
+        .collect::<Result<Vec<_>, ScanError>>()?
+    } else {
+        Vec::new()
+    };
     let mut statement = connection.prepare(
         "SELECT r.event_key,r.occurred_at_utc,r.total_tokens
          FROM usage_record r
@@ -1200,7 +1305,7 @@ fn canonical_occurrences(connection: &Connection) -> Result<Vec<CanonicalOccurre
         let occurred_at = DateTime::parse_from_rfc3339(&timestamp)
             .map_err(|_| ScanError::Database)?
             .with_timezone(&Utc);
-        if occurred_at <= activation {
+        if occurred_at < activation {
             continue;
         }
         let tokens = to_u64(tokens)?;
@@ -1215,6 +1320,16 @@ fn canonical_occurrences(connection: &Connection) -> Result<Vec<CanonicalOccurre
                     && history.ended_at.is_none_or(|ended| occurred_at < ended)
             })
             .max_by_key(|history| (history.started_at, history.revision));
+        let guest_bound = guest_provenance_bounds
+            .iter()
+            .filter(|bound| {
+                bound.started_at <= occurred_at
+                    && bound.ended_at.is_none_or(|ended| occurred_at < ended)
+            })
+            .max_by_key(|bound| bound.started_at);
+        if occurred_at == activation && guest_bound.is_none() {
+            continue;
+        }
         let (cycle_id, effect_revision, effects) = match history {
             Some(history) => (
                 history.cycle_id.clone(),
@@ -1225,6 +1340,14 @@ fn canonical_occurrences(connection: &Connection) -> Result<Vec<CanonicalOccurre
                 Some(bound) => (bound.cycle_id.clone(), 0, ActiveEffects::default()),
                 None => continue,
             },
+            None if guest_bound.is_some() => {
+                let bound = guest_bound.expect("checked guest provenance bound");
+                (
+                    bound.cycle_id.clone(),
+                    bound.revision,
+                    ActiveEffects::default(),
+                )
+            }
             None if occurred_at > cycle_started => {
                 (current_cycle.clone(), 0, ActiveEffects::default())
             }
@@ -1559,6 +1682,32 @@ mod tests {
         let account_id = "00000000-0000-0000-0000-000000000031";
         ledger.ensure_planet_account(account_id).unwrap();
         (account_id.into(), ledger.planet_cycle_id().unwrap())
+    }
+
+    // Model a database that was already signed in before this fixture's guest
+    // provenance was established. Calling ensure_planet_account here would
+    // exercise the ownership transition, which intentionally captures and
+    // holds an eligible first-reset guest instead.
+    fn mark_existing_signed_owner_for_test(ledger: &mut Ledger, user_id: &str) {
+        let account_id = format!("account:{user_id}");
+        let tx = ledger.connection.transaction().unwrap();
+        tx.execute(
+            "UPDATE planet_usage_owner SET account_id=?1 WHERE account_id='local'",
+            [&account_id],
+        )
+        .unwrap();
+        tx.execute(
+            "UPDATE setting SET value=?1 WHERE key='planet_account_id'",
+            [&account_id],
+        )
+        .unwrap();
+        tx.execute(
+            "INSERT OR IGNORE INTO shop_account_state(account_id,state_revision,reward_timezone)
+             VALUES (?1,0,(SELECT value FROM setting WHERE key='planet_timezone'))",
+            [&account_id],
+        )
+        .unwrap();
+        tx.commit().unwrap();
     }
 
     fn one_interval_timeline(
@@ -2787,6 +2936,161 @@ mod tests {
                 .unwrap(),
             0
         );
+    }
+
+    #[test]
+    fn guest_import_v2_bounds_signed_account_uses_normal_baseline_fallback() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        let activation = ledger.planet_activation_at().unwrap();
+        let old_guest_cycle = ledger.planet_cycle_id().unwrap();
+        add_event(
+            &mut ledger,
+            "guest-activation-equality-after-sign-in",
+            &activation.to_rfc3339(),
+            10,
+        );
+
+        let guest_event_at = Utc::now();
+        assert!(guest_event_at > activation);
+        add_event(
+            &mut ledger,
+            "guest-old-cycle-after-sign-in",
+            &guest_event_at.to_rfc3339(),
+            23,
+        );
+        ledger
+            .reset_planet(guest_event_at + chrono::Duration::seconds(1))
+            .unwrap();
+        let signed_cycle = ledger.planet_cycle_id().unwrap();
+        mark_existing_signed_owner_for_test(&mut ledger, "00000000-0000-0000-0000-000000000091");
+
+        let occurrences = super::canonical_occurrences(&ledger.connection).unwrap();
+        let retained = occurrences
+            .iter()
+            .find(|item| item.event_key == "guest-old-cycle-after-sign-in")
+            .expect("signed raw usage after activation remains canonical");
+        assert_eq!(
+            (retained.cycle_id.as_str(), retained.tokens),
+            ("baseline", 23)
+        );
+        assert_ne!(retained.cycle_id, old_guest_cycle);
+        assert_eq!(ledger.planet_cycle_id().unwrap(), signed_cycle);
+        assert!(occurrences
+            .iter()
+            .all(|item| item.event_key != "guest-activation-equality-after-sign-in"));
+    }
+
+    #[test]
+    fn guest_import_v2_bounds_require_a_matching_device_for_local_cycles() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        let activation = ledger.planet_activation_at().unwrap();
+        let old_guest_cycle = ledger.planet_cycle_id().unwrap();
+        let guest_event_at = Utc::now();
+        assert!(guest_event_at > activation);
+        add_event(
+            &mut ledger,
+            "guest-device-bound-event",
+            &guest_event_at.to_rfc3339(),
+            31,
+        );
+        ledger
+            .reset_planet(guest_event_at + chrono::Duration::seconds(1))
+            .unwrap();
+
+        let before_mismatch = super::canonical_occurrences(&ledger.connection).unwrap();
+        let before_mismatch = before_mismatch
+            .iter()
+            .find(|item| item.event_key == "guest-device-bound-event")
+            .unwrap();
+        assert_eq!(before_mismatch.cycle_id, old_guest_cycle);
+
+        let lineage_state: (i64, String) = ledger
+            .connection
+            .query_row(
+                "SELECT eligible,device_id FROM guest_provenance_lineage WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(lineage_state.0, 1);
+        let changed_device = "device-mismatch-fixture";
+        assert_ne!(lineage_state.1, changed_device);
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value=?1 WHERE key='planet_device_id'",
+                [changed_device],
+            )
+            .unwrap();
+
+        let after_mismatch = super::canonical_occurrences(&ledger.connection).unwrap();
+        let after_mismatch = after_mismatch
+            .iter()
+            .find(|item| item.event_key == "guest-device-bound-event")
+            .unwrap();
+        assert_eq!(after_mismatch.cycle_id, "baseline");
+        assert_ne!(after_mismatch.cycle_id, old_guest_cycle);
+    }
+
+    #[test]
+    fn guest_import_v2_bounds_confirmed_timeline_uses_server_cycle_over_guest_cycle() {
+        let mut ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
+        let activation = ledger.planet_activation_at().unwrap();
+        let old_guest_cycle = ledger.planet_cycle_id().unwrap();
+        let guest_event_at = Utc::now();
+        assert!(guest_event_at > activation);
+        add_event(
+            &mut ledger,
+            "guest-timeline-bound-event",
+            &guest_event_at.to_rfc3339(),
+            47,
+        );
+        let reset_at = guest_event_at + chrono::Duration::seconds(1);
+        ledger.reset_planet(reset_at).unwrap();
+        let current_cycle = ledger.planet_cycle_id().unwrap();
+        assert_ne!(current_cycle, old_guest_cycle);
+
+        let before_sign_in = super::canonical_occurrences(&ledger.connection).unwrap();
+        let before_sign_in = before_sign_in
+            .iter()
+            .find(|item| item.event_key == "guest-timeline-bound-event")
+            .unwrap();
+        assert_eq!(before_sign_in.cycle_id, old_guest_cycle);
+
+        let account_id = "00000000-0000-0000-0000-000000000092";
+        mark_existing_signed_owner_for_test(&mut ledger, account_id);
+        let timeline = ShopEffectTimeline {
+            account_id: account_id.into(),
+            current_cycle_id: current_cycle.clone(),
+            effect_revision: 0,
+            server_time_utc: (reset_at + chrono::Duration::seconds(1)).to_rfc3339(),
+            reward_timezone: "UTC".into(),
+            cycle_bounds: vec![
+                ShopCycleBound {
+                    cycle_id: "server-confirmed-history".into(),
+                    started_at_utc: activation.to_rfc3339(),
+                    ended_at_utc: Some(reset_at.to_rfc3339()),
+                },
+                ShopCycleBound {
+                    cycle_id: current_cycle.clone(),
+                    started_at_utc: reset_at.to_rfc3339(),
+                    ended_at_utc: None,
+                },
+            ],
+            intervals: vec![],
+        };
+        ledger
+            .apply_confirmed_shop_effect_timeline(&timeline, account_id, &current_cycle)
+            .unwrap();
+
+        let after_timeline = super::canonical_occurrences(&ledger.connection).unwrap();
+        let occurrence = after_timeline
+            .iter()
+            .find(|item| item.event_key == "guest-timeline-bound-event")
+            .unwrap();
+        assert_eq!(occurrence.cycle_id, "server-confirmed-history");
+        assert_eq!(occurrence.effect_revision, 0);
+        assert_eq!(occurrence.effects, ActiveEffects::default());
     }
 
     #[test]
