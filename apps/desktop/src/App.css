@@ -600,6 +600,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .shop-selected-preview b { color: var(--gold); font-size: 14px; }
 .shop-selected-preview small { color: var(--muted); font-size: 12px; line-height: 1.35; }
 .shop-selected-preview button { grid-column: 1 / -1; min-height: 44px; padding: 6px 10px; border: 1px solid var(--gold); color: var(--gold); background: transparent; font-weight: 700; }
+.shop-reward-timezone { margin-top: 8px !important; color: var(--water) !important; }
+.shop-effects-summary { margin: 10px 0 16px; padding: 12px; border: 1px solid #536173; background: #182136; }
+.shop-effects-summary-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.shop-effects-summary h2 { margin: 0; color: var(--paper); font-size: 18px; }
+.shop-effects-summary button { min-height: 42px; padding: 6px 12px; border: 1px solid var(--gold); color: var(--gold); background: #202a40; font-weight: 700; }
+.shop-effects-summary dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr)); gap: 8px; margin: 12px 0 0; }
+.shop-effects-summary dl > div { display: flex; justify-content: space-between; gap: 8px; padding: 8px; border: 1px solid #35445a; background: #202a40; }
+.shop-effects-summary dt { color: var(--muted); }
+.shop-effects-summary dd { margin: 0; color: var(--water); font-weight: 750; white-space: nowrap; }
+.shop-effects-summary > p { margin: 10px 0 0; color: var(--muted); font-size: 14px; }
 .cosmetic-item[data-cosmetic-previewing="true"] { border-left-color: var(--gold); background: #30374a; box-shadow: inset 3px 0 var(--gold); }
 .cosmetic-item[data-cosmetic-previewing="true"] .cosmetic-item-copy > strong { color: var(--gold); }
 .planet-svg[data-preview-style="star_cluster"] [data-cosmetic="star_cluster"],

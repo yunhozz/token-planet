@@ -112,7 +112,6 @@ impl SessionStore {
             .set_password(&value)
             .map_err(|_| AuthError::CredentialStore)
     }
-
 }
 
 pub struct SupabaseAuthClient {
@@ -181,7 +180,6 @@ impl SupabaseAuthClient {
         store.save(&refreshed)?;
         Ok(refreshed)
     }
-
 }
 
 #[cfg(test)]

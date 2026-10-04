@@ -1,15 +1,27 @@
 use std::{collections::BTreeMap, fmt, path::Path};
 
-use chrono::{DateTime, Duration, Utc};
+use chrono::{DateTime, Duration, SecondsFormat, Utc};
 use chrono_tz::Tz;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
 use crate::collectors::{ParsedRecord, RecordKind};
+use crate::domain::cosmetic_shop::{
+    ResetShopResult, ShopActionStatus, ShopEffectTimeline, ShopRequest,
+};
 use crate::domain::planet::{
     PlanetAvatar, PlanetDeviceContribution, PlanetObject, PlanetProfile, PlanetState,
     PlanetWalletCredit,
 };
 use crate::domain::usage::{Agent, TokenUsage, UsageCoverage};
+
+use super::cosmetic_shop::store_confirmed_shop_state_in_transaction;
+use super::guest_provenance::{
+    initialize_guest_provenance_in_transaction, initialize_guest_provenance_schema,
+    record_guest_occurrence_in_connection,
+};
+use super::shop_effects::{
+    apply_confirmed_shop_effect_timeline_in_transaction, validate_reset_timeline_current_bound,
+};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ScanError {
@@ -20,6 +32,7 @@ pub enum ScanError {
     TimezoneMismatch,
     ResetCooldown,
     InvalidProfile,
+    InvalidShopState,
 }
 
 impl fmt::Display for ScanError {
@@ -35,6 +48,7 @@ impl fmt::Display for ScanError {
                 Self::TimezoneMismatch => "world timezone differs from saved ledger",
                 Self::ResetCooldown => "planet reset is available 24 hours after the last reset",
                 Self::InvalidProfile => "planet profile is invalid",
+                Self::InvalidShopState => "shop state is invalid",
             }
         )
     }
@@ -52,6 +66,13 @@ pub struct Ledger {
     pub(crate) connection: Connection,
     pub timezone: Tz,
     pub(super) growth_journal_signature: Option<(u64, u64)>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SignedResetIntent {
+    pub account_id: String,
+    pub request_id: uuid::Uuid,
+    pub expected_old_cycle_id: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -187,6 +208,14 @@ impl Ledger {
 
     pub fn open(path: &Path, timezone: Tz) -> Result<Self, ScanError> {
         let connection = Connection::open(path)?;
+        let has_existing_schema: bool = connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM sqlite_master
+                WHERE type='table' AND name NOT LIKE 'sqlite_%'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
         connection.execute_batch(
             "\
             PRAGMA foreign_keys = ON;
@@ -227,6 +256,7 @@ impl Ledger {
                 created_at_utc TEXT NOT NULL
             );",
         )?;
+        initialize_guest_provenance_schema(&connection, !has_existing_schema)?;
         let saved: Option<String> = connection
             .query_row(
                 "SELECT value FROM setting WHERE key='world_timezone'",
@@ -248,7 +278,7 @@ impl Ledger {
             set_setting_value(
                 &connection,
                 "planet_activation_at_utc",
-                &Utc::now().to_rfc3339(),
+                &Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
             )?;
         }
         if setting_value(&connection, "planet_current_cycle_id")?.is_none() {
@@ -281,6 +311,12 @@ impl Ledger {
         ledger.initialize_planet_accounts()?;
         ledger.initialize_growth_journal()?;
         ledger.initialize_cosmetic_shop()?;
+        ledger.initialize_shop_effect_storage()?;
+        if !has_existing_schema {
+            let transaction = ledger.connection.transaction()?;
+            initialize_guest_provenance_in_transaction(&transaction, Utc::now())?;
+            transaction.commit()?;
+        }
         Ok(ledger)
     }
 
@@ -393,12 +429,51 @@ impl Ledger {
     }
 
     pub fn planet_usage_totals(&self) -> Result<(BTreeMap<String, u64>, u64, u64), ScanError> {
-        let activation = self.planet_activation_at()?;
-        let planet_timezone = self.planet_timezone()?;
-        let cycle_start = self.last_reset_at()?.unwrap_or(activation).max(activation);
-        let mut statement = self.connection.prepare(
+        Self::planet_usage_totals_from_connection(&self.connection)
+    }
+
+    pub(crate) fn planet_usage_totals_from_connection(
+        connection: &Connection,
+    ) -> Result<(BTreeMap<String, u64>, u64, u64), ScanError> {
+        let activation = parse_utc_setting(connection, "planet_activation_at_utc")?;
+        let planet_timezone: Tz = setting_value(connection, "planet_timezone")?
+            .ok_or(ScanError::Database)?
+            .parse()
+            .map_err(|_| ScanError::TimezoneMismatch)?;
+        let local_cycle_start = setting_value(connection, "planet_last_reset_at_utc")?
+            .map(|value| {
+                DateTime::parse_from_rfc3339(&value)
+                    .map(|date| date.with_timezone(&Utc))
+                    .map_err(|_| ScanError::Database)
+            })
+            .transpose()?
+            .unwrap_or(activation)
+            .max(activation);
+        let confirmed_cycle_start = Self::confirmed_current_cycle_start_in_connection(connection)?;
+        let server_cycle_bound_is_known = confirmed_cycle_start.is_some();
+        let cycle_start = confirmed_cycle_start.unwrap_or(local_cycle_start);
+        let local_guest_cycle_bound_is_known: bool = connection.query_row(
+            "SELECT EXISTS(
+               SELECT 1 FROM guest_provenance_lineage l
+               JOIN guest_provenance_cycle b ON b.lineage_id=l.lineage_id
+               WHERE l.singleton=1 AND l.eligible=1 AND l.device_id=(
+                 SELECT value FROM setting WHERE key='planet_device_id'
+               ) AND b.cycle_id=(SELECT value FROM setting WHERE key='planet_current_cycle_id')
+                 AND b.started_at_utc=(SELECT value FROM setting WHERE key='planet_cycle_started_at_utc')
+                 AND (SELECT value FROM setting WHERE key='planet_account_id')='local'
+             )",
+            [],
+            |row| row.get(0),
+        )?;
+        let inclusive_cycle_boundary =
+            server_cycle_bound_is_known || local_guest_cycle_bound_is_known;
+        let codex_enabled = Self::agent_enabled_from_connection(connection, Agent::Codex)?;
+        let claude_code_enabled =
+            Self::agent_enabled_from_connection(connection, Agent::ClaudeCode)?;
+        let mut statement = connection.prepare(
             "SELECT r.occurred_at_utc,r.total_tokens FROM usage_record r
-             WHERE r.total_tokens IS NOT NULL AND r.occurred_at_utc > ?1
+             WHERE r.total_tokens IS NOT NULL
+               AND (r.occurred_at_utc > ?1 OR (?4 AND substr(r.occurred_at_utc,1,19)=substr(?1,1,19)))
                AND ((r.agent='codex' AND ?2) OR (r.agent='claude_code' AND ?3))
                AND EXISTS (SELECT 1 FROM planet_usage_owner o WHERE o.event_key=r.event_key
                  AND o.account_id=(SELECT value FROM setting WHERE key='planet_account_id'))
@@ -413,8 +488,9 @@ impl Ledger {
         let rows = statement.query_map(
             params![
                 activation.to_rfc3339(),
-                self.agent_enabled(Agent::Codex)?,
-                self.agent_enabled(Agent::ClaudeCode)?,
+                codex_enabled,
+                claude_code_enabled,
+                local_guest_cycle_bound_is_known,
             ],
             |row| Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?)),
         )?;
@@ -430,17 +506,37 @@ impl Ledger {
             let timestamp = DateTime::parse_from_rfc3339(&occurred_at)
                 .map_err(|_| ScanError::Database)?
                 .with_timezone(&Utc);
-            if timestamp > cycle_start {
+            if timestamp < activation
+                || (!local_guest_cycle_bound_is_known && timestamp == activation)
+            {
+                continue;
+            }
+            let belongs_to_current_cycle = if inclusive_cycle_boundary {
+                timestamp >= cycle_start
+            } else {
+                timestamp > cycle_start
+            };
+            if belongs_to_current_cycle {
                 current = current.checked_add(tokens).ok_or(ScanError::InvalidCount)?;
-                let date = timestamp
-                    .with_timezone(&planet_timezone)
-                    .format("%Y-%m-%d")
-                    .to_string();
-                let total = daily.entry(date).or_insert(0_u64);
-                *total = total.checked_add(tokens).ok_or(ScanError::InvalidCount)?;
+                if tokens > 0 {
+                    let date = timestamp
+                        .with_timezone(&planet_timezone)
+                        .format("%Y-%m-%d")
+                        .to_string();
+                    let total = daily.entry(date).or_insert(0_u64);
+                    *total = total.checked_add(tokens).ok_or(ScanError::InvalidCount)?;
+                }
             }
         }
         Ok((daily, current, lifetime))
+    }
+
+    fn agent_enabled_from_connection(
+        connection: &Connection,
+        agent: Agent,
+    ) -> Result<bool, ScanError> {
+        let key = format!("{}_enabled", agent_name(agent));
+        Ok(setting_value(connection, &key)?.as_deref() != Some("false"))
     }
 
     pub fn planet_timezone(&self) -> Result<Tz, ScanError> {
@@ -452,6 +548,7 @@ impl Ledger {
 
     pub fn set_planet_timezone(&self, timezone: &str) -> Result<(), ScanError> {
         let _: Tz = timezone.parse().map_err(|_| ScanError::TimezoneMismatch)?;
+        self.require_guest_import_game_mutations_allowed()?;
         set_setting_value(&self.connection, "planet_timezone", timezone)
     }
 
@@ -459,11 +556,19 @@ impl Ledger {
         &self,
         incomplete: bool,
     ) -> Result<PlanetDeviceContribution, ScanError> {
-        let (daily_tokens, current_planet_tokens, lifetime_tokens) = self.planet_usage_totals()?;
+        Self::planet_device_contribution_from_connection(&self.connection, incomplete)
+    }
+
+    pub(crate) fn planet_device_contribution_from_connection(
+        connection: &Connection,
+        incomplete: bool,
+    ) -> Result<PlanetDeviceContribution, ScanError> {
+        let (daily_tokens, current_planet_tokens, lifetime_tokens) =
+            Self::planet_usage_totals_from_connection(connection)?;
         Ok(PlanetDeviceContribution {
-            device_id: setting_value(&self.connection, "planet_device_id")?
+            device_id: setting_value(connection, "planet_device_id")?.ok_or(ScanError::Database)?,
+            current_cycle_id: setting_value(connection, "planet_current_cycle_id")?
                 .ok_or(ScanError::Database)?,
-            current_cycle_id: self.planet_cycle_id()?,
             lifetime_tokens,
             current_planet_tokens,
             daily_tokens,
@@ -497,6 +602,7 @@ impl Ledger {
         if nickname.is_empty() || nickname.chars().count() > 24 {
             return Err(ScanError::InvalidProfile);
         }
+        self.require_guest_import_game_mutations_allowed()?;
         let avatar = match avatar {
             PlanetAvatar::Masculine => "masculine",
             PlanetAvatar::Feminine => "feminine",
@@ -537,6 +643,15 @@ impl Ledger {
         }
     }
 
+    pub fn reset_available_at(&self) -> Result<Option<DateTime<Utc>>, ScanError> {
+        if let Some(value) = setting_value(&self.connection, "planet_reset_available_at_utc")? {
+            return DateTime::parse_from_rfc3339(&value)
+                .map(|date| Some(date.with_timezone(&Utc)))
+                .map_err(|_| ScanError::Database);
+        }
+        Ok(self.last_reset_at()?.map(|last| last + Duration::hours(24)))
+    }
+
     pub fn planet_wallet_credits(&self) -> Result<Vec<PlanetWalletCredit>, ScanError> {
         let mut statement = self.connection.prepare(
             "SELECT previous_cycle_id,amount,created_at_utc FROM planet_wallet_credit
@@ -561,9 +676,10 @@ impl Ledger {
     }
 
     pub fn reset_planet(&mut self, now: DateTime<Utc>) -> Result<u64, ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         if self
-            .last_reset_at()?
-            .is_some_and(|last| now < last + Duration::hours(24))
+            .reset_available_at()?
+            .is_some_and(|available| now < available)
         {
             return Err(ScanError::ResetCooldown);
         }
@@ -574,34 +690,27 @@ impl Ledger {
             .filter(|(cycle_id, _, _, _)| cycle_id == &previous_cycle_id)
             .map(|(_, remote_tokens, _, _)| local_current_tokens.max(remote_tokens))
             .unwrap_or(local_current_tokens);
-        let new_cycle_id = uuid::Uuid::new_v4().to_string();
-        let tx = self.connection.transaction()?;
-        tx.execute(
-            "INSERT OR IGNORE INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
-             VALUES (?1,?2,?3)",
-            params![previous_cycle_id, as_i64(current_tokens)?, now.to_rfc3339()],
+        let eligible_guest_lineage: bool = self.connection.query_row(
+            "SELECT EXISTS(
+                SELECT 1 FROM guest_provenance_lineage
+                WHERE singleton=1 AND eligible=1
+             )",
+            [],
+            |row| row.get(0),
         )?;
-        for (key, value) in [
-            ("planet_last_reset_at_utc", now.to_rfc3339()),
-            ("planet_cycle_started_at_utc", now.to_rfc3339()),
-            ("planet_current_cycle_id", new_cycle_id),
-        ] {
-            tx.execute(
-                "INSERT INTO setting(key,value) VALUES (?1,?2)
-                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-                params![key, value],
-            )?;
+        let request_id = if eligible_guest_lineage {
+            uuid::Uuid::new_v4().to_string()
+        } else {
+            format!("legacy-reset:{previous_cycle_id}")
+        };
+        let reset = self.reset_guest_planet(&request_id, &previous_cycle_id, now)?;
+        match reset.status {
+            crate::domain::cosmetic_shop::ShopActionStatus::Reset => Ok(current_tokens),
+            crate::domain::cosmetic_shop::ShopActionStatus::CycleMismatch => {
+                Err(ScanError::ResetCooldown)
+            }
+            _ => Err(ScanError::InvalidShopState),
         }
-        tx.execute("DELETE FROM setting WHERE key IN ('planet_remote_cycle_id','planet_remote_current_tokens','planet_remote_growth_credit','planet_remote_incomplete')", [])?;
-        tx.execute("DELETE FROM planet_object", [])?;
-        tx.execute(
-            "DELETE FROM cosmetic_equipment
-             WHERE account_id=(SELECT value FROM setting WHERE key='planet_account_id')
-               AND cycle_id=?1",
-            [&previous_cycle_id],
-        )?;
-        tx.commit()?;
-        Ok(current_tokens)
     }
 
     pub fn synced_planet_metrics(&self) -> Result<Option<(String, u64, f64, bool)>, ScanError> {
@@ -666,6 +775,9 @@ impl Ledger {
         y: u8,
         seed: u64,
     ) -> Result<(), ScanError> {
+        if !self.guest_import_game_mutations_allowed()? {
+            return Ok(());
+        }
         self.connection.execute(
             "INSERT OR IGNORE INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed)
              VALUES (?1,?2,?3,?4,?5,?6,?7)",
@@ -683,6 +795,7 @@ impl Ledger {
     }
 
     pub fn merge_remote_planet_state(&mut self, remote: &PlanetState) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
         let first_remote_sync =
             setting_value(&self.connection, "planet_remote_cycle_id")?.is_none();
         let had_local_reset = self.last_reset_at()?.is_some();
@@ -768,6 +881,18 @@ impl Ledger {
             ] {
                 set_setting_value(&self.connection, key, &value)?;
             }
+            if let Some(reset_available_at) = &remote.reset_available_at_utc {
+                set_setting_value(
+                    &self.connection,
+                    "planet_reset_available_at_utc",
+                    reset_available_at,
+                )?;
+            } else {
+                self.connection.execute(
+                    "DELETE FROM setting WHERE key='planet_reset_available_at_utc'",
+                    [],
+                )?;
+            }
             for object in &remote.objects {
                 self.ensure_planet_object(
                     object.stage,
@@ -785,6 +910,295 @@ impl Ledger {
             }
         }
         self.set_planet_timezone(&remote.timezone)?;
+        Ok(())
+    }
+
+    /// Atomically applies a server-confirmed signed reset to the cached planet,
+    /// shop state, and effect timeline. No reset reward is settled locally.
+    pub fn apply_confirmed_reset_result(
+        &mut self,
+        result: &ResetShopResult,
+        timeline: &ShopEffectTimeline,
+        expected_account_id: &str,
+        expected_old_cycle_id: &str,
+    ) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
+        self.apply_confirmed_reset_result_inner(
+            result,
+            timeline,
+            expected_account_id,
+            expected_old_cycle_id,
+            None,
+        )
+    }
+
+    pub fn prepare_signed_reset_intent(
+        &mut self,
+        request_id: uuid::Uuid,
+        expected_old_cycle_id: &str,
+    ) -> Result<SignedResetIntent, ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let active_account: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_account_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let active_cycle: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_current_cycle_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let (account_id, account_scope) = signed_account_scope(&active_account)?;
+        if active_account != account_scope
+            || active_cycle != expected_old_cycle_id
+            || expected_old_cycle_id.trim().is_empty()
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+
+        let intent = SignedResetIntent {
+            account_id,
+            request_id,
+            expected_old_cycle_id: expected_old_cycle_id.to_owned(),
+        };
+        if let Some(pending) = pending_signed_reset_intent_in(&transaction, &account_scope)? {
+            if pending == intent {
+                return Ok(intent);
+            }
+            return Err(ScanError::InvalidShopState);
+        }
+        let request_id_text = request_id.to_string();
+        let existing: Option<i64> = transaction
+            .query_row(
+                "SELECT 1 FROM shop_action_request WHERE account_id=?1 AND request_id=?2",
+                rusqlite::params![account_scope, request_id_text],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if existing.is_some() {
+            return Err(ScanError::InvalidShopState);
+        }
+        let payload_json = serde_json::to_string(&ShopRequest::ResetPlanet {
+            request_id: request_id_text.clone(),
+            cycle_id: expected_old_cycle_id.to_owned(),
+        })
+        .map_err(|_| ScanError::InvalidShopState)?;
+        transaction.execute(
+            "INSERT INTO shop_action_request(account_id,request_id,payload_json,result_json,created_at_utc)
+             VALUES (?1,?2,?3,NULL,?4)",
+            rusqlite::params![
+                account_scope,
+                request_id_text,
+                payload_json,
+                Utc::now().to_rfc3339(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(intent)
+    }
+
+    pub fn pending_signed_reset_intent(
+        &self,
+        account_id: &str,
+    ) -> Result<Option<SignedResetIntent>, ScanError> {
+        let (_, account_scope) = signed_account_scope(account_id)?;
+        pending_signed_reset_intent_in(&self.connection, &account_scope)
+    }
+
+    pub fn apply_confirmed_signed_reset_result(
+        &mut self,
+        result: &ResetShopResult,
+        timeline: &ShopEffectTimeline,
+        intent: &SignedResetIntent,
+    ) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
+        self.apply_confirmed_reset_result_inner(
+            result,
+            timeline,
+            &intent.account_id,
+            &intent.expected_old_cycle_id,
+            Some(intent),
+        )
+    }
+
+    pub fn record_rejected_signed_reset_result(
+        &mut self,
+        result: &ResetShopResult,
+        intent: &SignedResetIntent,
+    ) -> Result<(), ScanError> {
+        self.require_guest_import_game_mutations_allowed()?;
+        if result.action.status == ShopActionStatus::Reset
+            || result.action.request_id != intent.request_id.to_string()
+            || result.action.state.account_id != format!("account:{}", intent.account_id)
+            || result.action.state.current_cycle_id != result.planet_state.current_cycle_id
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        let receipt = serde_json::to_string(result).map_err(|_| ScanError::InvalidShopState)?;
+        self.finish_signed_reset_intent_without_cache_change(intent, &receipt)
+    }
+
+    fn finish_signed_reset_intent_without_cache_change(
+        &mut self,
+        intent: &SignedResetIntent,
+        receipt_json: &str,
+    ) -> Result<(), ScanError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let account_id: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_account_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let cycle_id: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_current_cycle_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        if account_id != format!("account:{}", intent.account_id)
+            || cycle_id != intent.expected_old_cycle_id
+            || pending_signed_reset_intent_in(&transaction, &account_id)?.as_ref() != Some(intent)
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        let payload_json = serde_json::to_string(&ShopRequest::ResetPlanet {
+            request_id: intent.request_id.to_string(),
+            cycle_id: intent.expected_old_cycle_id.clone(),
+        })
+        .map_err(|_| ScanError::InvalidShopState)?;
+        let completed = transaction.execute(
+            "UPDATE shop_action_request SET result_json=?4
+             WHERE account_id=?1 AND request_id=?2 AND payload_json=?3 AND result_json IS NULL",
+            rusqlite::params![
+                account_id,
+                intent.request_id.to_string(),
+                payload_json,
+                receipt_json,
+            ],
+        )?;
+        if completed != 1 {
+            return Err(ScanError::InvalidShopState);
+        }
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn apply_confirmed_reset_result_inner(
+        &mut self,
+        result: &ResetShopResult,
+        timeline: &ShopEffectTimeline,
+        expected_account_id: &str,
+        expected_old_cycle_id: &str,
+        intent: Option<&SignedResetIntent>,
+    ) -> Result<(), ScanError> {
+        let transaction = self
+            .connection
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let account_id: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_account_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let expected_account_id = expected_account_id
+            .strip_prefix("account:")
+            .unwrap_or(expected_account_id);
+        let expected_account_uuid =
+            uuid::Uuid::parse_str(expected_account_id).map_err(|_| ScanError::InvalidShopState)?;
+        let actual_account_uuid = account_id
+            .strip_prefix("account:")
+            .and_then(|id| uuid::Uuid::parse_str(id).ok());
+        let actual_cycle_id: String = transaction.query_row(
+            "SELECT value FROM setting WHERE key='planet_current_cycle_id'",
+            [],
+            |row| row.get(0),
+        )?;
+        let reset_state = &result.planet_state;
+        let new_cycle_id = &reset_state.current_cycle_id;
+        if !account_id.starts_with("account:")
+            || actual_account_uuid != Some(expected_account_uuid)
+            || actual_cycle_id != expected_old_cycle_id
+            || expected_old_cycle_id.trim().is_empty()
+            || new_cycle_id.trim().is_empty()
+            || new_cycle_id == expected_old_cycle_id
+            || result.action.status != ShopActionStatus::Reset
+            || result.action.request_id.trim().is_empty()
+            || result.action.state.account_id != account_id
+            || result.action.state.current_cycle_id != *new_cycle_id
+            || timeline.current_cycle_id != *new_cycle_id
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        if let Some(intent) = intent {
+            let expected_scope = format!("account:{}", intent.account_id);
+            if account_id != expected_scope
+                || result.action.request_id != intent.request_id.to_string()
+                || intent.expected_old_cycle_id != expected_old_cycle_id
+                || pending_signed_reset_intent_in(&transaction, &account_id)?.as_ref()
+                    != Some(intent)
+            {
+                return Err(ScanError::InvalidShopState);
+            }
+        }
+
+        let cycle_started_at = DateTime::parse_from_rfc3339(&reset_state.cycle_started_at_utc)
+            .map_err(|_| ScanError::InvalidShopState)?
+            .with_timezone(&Utc);
+        let reset_at = reset_state
+            .last_reset_at_utc
+            .as_deref()
+            .ok_or(ScanError::InvalidShopState)?;
+        let reset_at = DateTime::parse_from_rfc3339(reset_at)
+            .map_err(|_| ScanError::InvalidShopState)?
+            .with_timezone(&Utc);
+        if cycle_started_at != reset_at {
+            return Err(ScanError::InvalidShopState);
+        }
+        validate_reset_timeline_current_bound(
+            timeline,
+            new_cycle_id,
+            &reset_state.cycle_started_at_utc,
+        )?;
+
+        apply_confirmed_reset_planet_state_in_transaction(
+            &transaction,
+            reset_state,
+            &account_id,
+            expected_old_cycle_id,
+        )?;
+        store_confirmed_shop_state_in_transaction(&transaction, &result.action.state)?;
+        apply_confirmed_shop_effect_timeline_in_transaction(
+            &transaction,
+            timeline,
+            &expected_account_uuid.to_string(),
+            new_cycle_id,
+        )?;
+        if let Some(intent) = intent {
+            let payload_json = serde_json::to_string(&ShopRequest::ResetPlanet {
+                request_id: intent.request_id.to_string(),
+                cycle_id: intent.expected_old_cycle_id.clone(),
+            })
+            .map_err(|_| ScanError::InvalidShopState)?;
+            let result_json =
+                serde_json::to_string(result).map_err(|_| ScanError::InvalidShopState)?;
+            let completed = transaction.execute(
+                "UPDATE shop_action_request SET result_json=?4
+                 WHERE account_id=?1 AND request_id=?2 AND payload_json=?3 AND result_json IS NULL",
+                rusqlite::params![
+                    account_id,
+                    intent.request_id.to_string(),
+                    payload_json,
+                    result_json,
+                ],
+            )?;
+            if completed != 1 {
+                return Err(ScanError::InvalidShopState);
+            }
+        }
+        transaction.commit()?;
         Ok(())
     }
 
@@ -833,6 +1247,54 @@ impl Ledger {
     }
 }
 
+fn signed_account_scope(account_id: &str) -> Result<(String, String), ScanError> {
+    let user_id = account_id.strip_prefix("account:").unwrap_or(account_id);
+    let user_id = uuid::Uuid::parse_str(user_id)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .to_string();
+    Ok((user_id.clone(), format!("account:{user_id}")))
+}
+
+fn pending_signed_reset_intent_in(
+    connection: &Connection,
+    account_scope: &str,
+) -> Result<Option<SignedResetIntent>, ScanError> {
+    let (_, account_scope) = signed_account_scope(account_scope)?;
+    let mut statement = connection.prepare(
+        "SELECT request_id,payload_json FROM shop_action_request
+         WHERE account_id=?1 AND result_json IS NULL ORDER BY created_at_utc,request_id",
+    )?;
+    let mut rows = statement.query([account_scope.as_str()])?;
+    let mut pending = None;
+    while let Some(row) = rows.next()? {
+        let request_id: String = row.get(0)?;
+        let payload_json: String = row.get(1)?;
+        let request: ShopRequest =
+            serde_json::from_str(&payload_json).map_err(|_| ScanError::InvalidShopState)?;
+        let ShopRequest::ResetPlanet {
+            request_id: payload_request_id,
+            cycle_id,
+        } = request
+        else {
+            return Err(ScanError::InvalidShopState);
+        };
+        let parsed_request_id =
+            uuid::Uuid::parse_str(&payload_request_id).map_err(|_| ScanError::InvalidShopState)?;
+        if parsed_request_id.to_string() != request_id || cycle_id.trim().is_empty() {
+            return Err(ScanError::InvalidShopState);
+        }
+        let intent = SignedResetIntent {
+            account_id: signed_account_scope(&account_scope)?.0,
+            request_id: parsed_request_id,
+            expected_old_cycle_id: cycle_id,
+        };
+        if pending.replace(intent).is_some() {
+            return Err(ScanError::InvalidShopState);
+        }
+    }
+    Ok(pending)
+}
+
 fn setting_value(connection: &Connection, key: &str) -> Result<Option<String>, ScanError> {
     connection
         .query_row("SELECT value FROM setting WHERE key=?1", [key], |row| {
@@ -840,6 +1302,164 @@ fn setting_value(connection: &Connection, key: &str) -> Result<Option<String>, S
         })
         .optional()
         .map_err(Into::into)
+}
+
+fn apply_confirmed_reset_planet_state_in_transaction(
+    connection: &Connection,
+    state: &PlanetState,
+    account_id: &str,
+    expected_old_cycle_id: &str,
+) -> Result<(), ScanError> {
+    let active_cycle: String = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_current_cycle_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if active_cycle != expected_old_cycle_id
+        || state.current_cycle_id.trim().is_empty()
+        || state.current_cycle_id == expected_old_cycle_id
+        || state.current_planet_tokens != 0
+        || !state.growth_credit.is_finite()
+        || state.growth_credit < 0.0
+        || !state.progress_to_next.is_finite()
+    {
+        return Err(ScanError::InvalidShopState);
+    }
+
+    let cycle_started = DateTime::parse_from_rfc3339(&state.cycle_started_at_utc)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .with_timezone(&Utc);
+    let last_reset = state
+        .last_reset_at_utc
+        .as_deref()
+        .ok_or(ScanError::InvalidShopState)?;
+    let last_reset = DateTime::parse_from_rfc3339(last_reset)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .with_timezone(&Utc);
+    let reset_available = state
+        .reset_available_at_utc
+        .as_deref()
+        .ok_or(ScanError::InvalidShopState)?;
+    let reset_available = DateTime::parse_from_rfc3339(reset_available)
+        .map_err(|_| ScanError::InvalidShopState)?
+        .with_timezone(&Utc);
+    if cycle_started != last_reset || reset_available <= last_reset {
+        return Err(ScanError::InvalidShopState);
+    }
+    let _: Tz = state
+        .timezone
+        .parse()
+        .map_err(|_| ScanError::TimezoneMismatch)?;
+
+    let current_nickname = setting_value(connection, "planet_nickname")?;
+    let current_avatar = setting_value(connection, "planet_avatar")?;
+    match (current_nickname, current_avatar) {
+        (Some(_), Some(_)) => {}
+        (None, None) => {
+            if let Some(profile) = &state.profile {
+                let nickname = profile.nickname.trim();
+                if nickname.is_empty() || nickname.chars().count() > 24 {
+                    return Err(ScanError::InvalidProfile);
+                }
+                let avatar = match profile.avatar {
+                    PlanetAvatar::Masculine => "masculine",
+                    PlanetAvatar::Feminine => "feminine",
+                };
+                set_setting_value(connection, "planet_nickname", nickname)?;
+                set_setting_value(connection, "planet_avatar", avatar)?;
+            }
+        }
+        _ => return Err(ScanError::InvalidProfile),
+    }
+
+    let mut seen_cycles = std::collections::HashSet::new();
+    for credit in &state.wallet_credits {
+        if credit.previous_cycle_id.trim().is_empty()
+            || !seen_cycles.insert(&credit.previous_cycle_id)
+        {
+            return Err(ScanError::InvalidShopState);
+        }
+        DateTime::parse_from_rfc3339(&credit.created_at_utc)
+            .map_err(|_| ScanError::InvalidShopState)?;
+        as_i64(credit.amount)?;
+    }
+    let mut seen_objects = std::collections::HashSet::new();
+    for object in &state.objects {
+        if !seen_objects.insert((object.stage, object.ordinal)) {
+            return Err(ScanError::InvalidShopState);
+        }
+    }
+
+    for (key, value) in [
+        ("planet_current_cycle_id", state.current_cycle_id.as_str()),
+        (
+            "planet_cycle_started_at_utc",
+            state.cycle_started_at_utc.as_str(),
+        ),
+        ("planet_last_reset_at_utc", last_reset.to_rfc3339().as_str()),
+        (
+            "planet_reset_available_at_utc",
+            reset_available.to_rfc3339().as_str(),
+        ),
+        ("planet_timezone", state.timezone.as_str()),
+        ("planet_remote_cycle_id", state.current_cycle_id.as_str()),
+        (
+            "planet_remote_current_tokens",
+            &state.current_planet_tokens.to_string(),
+        ),
+        (
+            "planet_remote_lifetime_tokens",
+            &state.lifetime_tokens.to_string(),
+        ),
+        (
+            "planet_remote_growth_credit",
+            &state.growth_credit.to_string(),
+        ),
+        ("planet_remote_incomplete", &state.incomplete.to_string()),
+    ] {
+        set_setting_value(connection, key, value)?;
+    }
+
+    connection.execute("DELETE FROM planet_object", [])?;
+    for object in &state.objects {
+        connection.execute(
+            "INSERT INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed)
+             VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            params![
+                state.current_cycle_id,
+                object.stage,
+                object.ordinal,
+                object.kind,
+                object.x,
+                object.y,
+                object.seed.to_string(),
+            ],
+        )?;
+    }
+
+    connection.execute("DELETE FROM planet_wallet_credit", [])?;
+    for credit in &state.wallet_credits {
+        connection.execute(
+            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES (?1,?2,?3)",
+            params![
+                credit.previous_cycle_id,
+                as_i64(credit.amount)?,
+                credit.created_at_utc
+            ],
+        )?;
+    }
+
+    // Ensure the reset result remains scoped to the same authenticated planet.
+    let active_account: String = connection.query_row(
+        "SELECT value FROM setting WHERE key='planet_account_id'",
+        [],
+        |row| row.get(0),
+    )?;
+    if active_account != account_id {
+        return Err(ScanError::InvalidShopState);
+    }
+    Ok(())
 }
 
 fn set_setting_value(connection: &Connection, key: &str, value: &str) -> Result<(), ScanError> {
@@ -938,6 +1558,9 @@ pub(crate) fn insert_record(
         optional_i64(record.usage.cache_read_tokens)?, optional_i64(record.usage.cache_write_tokens)?,
         optional_i64(record.usage.total_tokens)?, coverage_name(record.usage.coverage), version,
     ])?;
+    let mut provenance_record = record.clone();
+    provenance_record.event_key = event_key.clone();
+    record_guest_occurrence_in_connection(connection, &provenance_record, Utc::now())?;
     connection.execute(
         "INSERT OR IGNORE INTO planet_usage_owner(event_key,account_id)
          VALUES (?1,(SELECT value FROM setting WHERE key='planet_account_id'))",
@@ -1022,6 +1645,195 @@ mod tests {
         }
     }
 
+    fn remote_planet_state(
+        cycle_id: &str,
+        cycle_started_at_utc: &str,
+        last_reset_at_utc: &str,
+        reset_available_at_utc: Option<&str>,
+    ) -> crate::domain::planet::PlanetState {
+        crate::domain::planet::PlanetState {
+            version: 1,
+            profile: None,
+            timezone: "UTC".into(),
+            current_cycle_id: cycle_id.into(),
+            cycle_started_at_utc: cycle_started_at_utc.into(),
+            last_reset_at_utc: Some(last_reset_at_utc.into()),
+            wallet_balance: 0,
+            wallet_credits: vec![],
+            current_planet_tokens: 0,
+            lifetime_tokens: 0,
+            growth_credit: 0.0,
+            stage: 0,
+            progress_to_next: 0.0,
+            incomplete: false,
+            can_reset: false,
+            reset_available_at_utc: reset_available_at_utc.map(str::to_owned),
+            objects: vec![],
+            removed_natural_keys: vec![],
+        }
+    }
+
+    fn reset_deadline_snapshot(ledger: &Ledger) -> Option<chrono::DateTime<chrono::Utc>> {
+        let unavailable_usage = crate::domain::usage::TokenUsage {
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            coverage: crate::domain::usage::UsageCoverage::Unavailable,
+        };
+        let summary = crate::collectors::discovery::ScanSummary {
+            codex: unavailable_usage.clone(),
+            claude_code: unavailable_usage,
+            codex_source: crate::collectors::discovery::SourceHealth::UsageUnavailable,
+            claude_code_source: crate::collectors::discovery::SourceHealth::UsageUnavailable,
+            confirmed_subtotal: None,
+            complete_total: None,
+            scanned_at_utc: chrono::Utc::now(),
+        };
+        let value = crate::growth::world_snapshot(ledger, summary)
+            .unwrap()
+            .planet
+            .reset_available_at_utc;
+        value.map(|value| {
+            chrono::DateTime::parse_from_rfc3339(&value)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        })
+    }
+
+    #[test]
+    fn remote_reset_deadline_tracks_only_the_accepted_current_cycle() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        ledger.ensure_planet_account("reset-deadline-user").unwrap();
+        ledger
+            .connection
+            .execute_batch(
+                "INSERT INTO setting(key,value) VALUES
+               ('planet_cycle_started_at_utc','2026-10-02T00:00:00Z'),
+               ('planet_last_reset_at_utc','2026-10-02T00:00:00Z'),
+               ('planet_current_cycle_id','cycle-current'),
+               ('planet_remote_cycle_id','cycle-current'),
+               ('planet_reset_available_at_utc','2026-10-03T00:00:00Z')
+             ON CONFLICT(key) DO UPDATE SET value=excluded.value;",
+            )
+            .unwrap();
+
+        ledger
+            .merge_remote_planet_state(&remote_planet_state(
+                "cycle-current",
+                "2026-10-02T00:00:00Z",
+                "2026-10-02T00:00:00Z",
+                Some("2026-10-02T18:00:00Z"),
+            ))
+            .unwrap();
+        assert_eq!(
+            reset_deadline_snapshot(&ledger),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-02T18:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            ),
+            "the canonical server deadline should replace the old 24-hour fallback",
+        );
+
+        ledger
+            .merge_remote_planet_state(&remote_planet_state(
+                "cycle-current",
+                "2026-10-02T00:00:00Z",
+                "2026-10-02T00:00:00Z",
+                None,
+            ))
+            .unwrap();
+        assert_eq!(
+            reset_deadline_snapshot(&ledger),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-03T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            ),
+            "a canonical None removes the override and returns to the legacy fallback",
+        );
+
+        ledger
+            .merge_remote_planet_state(&remote_planet_state(
+                "cycle-next",
+                "2026-10-03T00:00:00Z",
+                "2026-10-03T00:00:00Z",
+                Some("2026-10-03T18:00:00Z"),
+            ))
+            .unwrap();
+        assert_eq!(
+            reset_deadline_snapshot(&ledger),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-03T18:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            ),
+            "an accepted new cycle uses its own canonical deadline",
+        );
+
+        ledger.connection.execute(
+            "UPDATE setting SET value='2026-10-04T00:00:00Z' WHERE key='planet_reset_available_at_utc'",
+            [],
+        ).unwrap();
+        ledger
+            .merge_remote_planet_state(&remote_planet_state(
+                "cycle-stale",
+                "2026-10-02T00:00:00Z",
+                "2026-10-02T00:00:00Z",
+                Some("2026-10-02T18:00:00Z"),
+            ))
+            .unwrap();
+        assert_eq!(
+            reset_deadline_snapshot(&ledger),
+            Some(
+                chrono::DateTime::parse_from_rfc3339("2026-10-04T00:00:00Z")
+                    .unwrap()
+                    .with_timezone(&chrono::Utc)
+            ),
+            "a rejected stale cycle must not overwrite the active deadline",
+        );
+    }
+
+    #[test]
+    fn signed_reset_intent_survives_reopen_and_cannot_change_request_or_old_cycle() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let account_id = "00000000-0000-0000-0000-000000000041";
+        let request_id = uuid::Uuid::parse_str("90000000-0000-0000-0000-000000000041").unwrap();
+        let original_cycle;
+        {
+            let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+            ledger.ensure_planet_account(account_id).unwrap();
+            original_cycle = ledger.planet_cycle_id().unwrap();
+            let intent = ledger
+                .prepare_signed_reset_intent(request_id, &original_cycle)
+                .unwrap();
+            assert_eq!(intent.request_id, request_id);
+            assert_eq!(intent.expected_old_cycle_id, original_cycle);
+        }
+
+        let mut reopened = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let intent = reopened
+            .pending_signed_reset_intent(account_id)
+            .unwrap()
+            .expect("uncertain reset intent remains available after restart");
+        assert_eq!(intent.request_id, request_id);
+        assert_eq!(intent.expected_old_cycle_id, original_cycle);
+        assert!(
+            reopened
+                .prepare_signed_reset_intent(uuid::Uuid::new_v4(), &original_cycle)
+                .is_err(),
+            "a pending reset cannot be replaced by a new request id"
+        );
+        assert!(
+            reopened
+                .prepare_signed_reset_intent(request_id, "different-old-cycle")
+                .is_err(),
+            "the persisted request id cannot be rebound to another cycle"
+        );
+    }
+
     #[test]
     fn planet_accounts_restore_profile_wallet_objects_and_owned_usage_after_restart() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -1041,7 +1853,22 @@ mod tests {
                 .lifetime_tokens,
             42
         );
-        ledger.reset_planet(chrono::Utc::now()).unwrap();
+        let alice_cycle_before_reset = ledger.planet_cycle_id().unwrap();
+        assert!(matches!(
+            ledger.reset_planet(chrono::Utc::now()),
+            Err(crate::storage::ledger::ScanError::InvalidShopState),
+        ));
+        assert_eq!(ledger.planet_cycle_id().unwrap(), alice_cycle_before_reset);
+        assert!(ledger.planet_wallet_credits().unwrap().is_empty());
+        // Model a server-confirmed wallet snapshot while testing account persistence.
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES (?1,42,'2026-10-01T00:00:00Z')",
+                [&alice_cycle_before_reset],
+            )
+            .unwrap();
         ledger
             .ensure_planet_object(0, 0, "tree", 20, 30, 12)
             .unwrap();
@@ -1266,5 +2093,1927 @@ mod tests {
             shared[0].coverage,
             crate::domain::usage::UsageCoverage::Partial
         );
+    }
+}
+
+#[cfg(test)]
+mod guest_import_v2_provenance_tests {
+    use rusqlite::OptionalExtension;
+
+    use super::Ledger;
+
+    fn response(tokens: u64) -> crate::collectors::ParsedRecord {
+        response_for("r1", tokens)
+    }
+
+    fn response_for(response_id: &str, tokens: u64) -> crate::collectors::ParsedRecord {
+        let occurred_at = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        let line = format!(
+            r#"{{"timestamp":"{occurred_at}","type":"token_usage_record","payload":{{"session_id":"s1","response_id":"{response_id}","usage":{{"total_tokens":{tokens}}}}}}}"#
+        );
+        crate::collectors::codex::parse_line(&line)
+            .unwrap()
+            .unwrap()
+    }
+
+    fn snapshot(tokens: u64) -> crate::collectors::ParsedRecord {
+        crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::CumulativeSnapshot,
+            event_key: "snapshot-1".into(),
+            occurred_at_utc: chrono::Utc::now(),
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(tokens),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }
+    }
+
+    fn provenance_schema_present(ledger: &Ledger) -> bool {
+        let count: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name IN
+                 ('guest_provenance_lineage','guest_provenance_occurrence_key',
+                  'guest_provenance_occurrence_version','guest_provenance_mutation')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        count == 4
+    }
+
+    fn lineage_eligible(ledger: &Ledger) -> i64 {
+        ledger
+            .connection
+            .query_row(
+                "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn mutation_count(ledger: &Ledger, kind: &str) -> i64 {
+        ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_mutation WHERE mutation_kind=?1",
+                [kind],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn occurrence(ledger: &Ledger, event_key: &str) -> Option<(String, i64, i64, i64, i64)> {
+        if !provenance_schema_present(ledger) {
+            return None;
+        }
+        ledger
+            .connection
+            .query_row(
+                "SELECT k.occurrence_id,k.current_record_version,k.ingest_seq,
+                        l.ingest_watermark,l.occurrence_count
+                 FROM guest_provenance_occurrence_key k
+                 JOIN guest_provenance_lineage l ON l.singleton=1
+                 WHERE k.event_key=?1",
+                [event_key],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .unwrap()
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_new_empty_lineage_records_version_one_occurrence() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&response(42)).unwrap();
+
+        assert!(
+            provenance_schema_present(&ledger),
+            "a fresh local usage insertion has durable provenance storage"
+        );
+        let first =
+            occurrence(&ledger, "codex:response:s1:r1").expect("fresh usage has one occurrence");
+        assert_eq!(first.1, 1);
+        assert_eq!(first.2, 1);
+        assert_eq!(first.3, 1);
+        assert_eq!(first.4, 1);
+        assert_eq!(lineage_eligible(&ledger), 1);
+        let (occurred_at, ingested_at): (String, String) = ledger
+            .connection
+            .query_row(
+                "SELECT occurred_at_utc,ingested_at_utc
+                 FROM guest_provenance_occurrence_version WHERE occurrence_id=?1",
+                [&first.0],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        for timestamp in [&occurred_at, &ingested_at] {
+            assert_eq!(timestamp.len(), 27);
+            let parsed = chrono::DateTime::parse_from_rfc3339(timestamp).unwrap();
+            assert_eq!(
+                parsed.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+                *timestamp
+            );
+        }
+        assert_eq!(
+            uuid::Uuid::parse_str(&first.0).unwrap().to_string(),
+            first.0
+        );
+
+        let reopened = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        assert_eq!(occurrence(&reopened, "codex:response:s1:r1"), Some(first));
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_duplicate_scan_keeps_uuid_and_watermark() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let record = response(42);
+        ledger.insert(&record).unwrap();
+        assert!(
+            provenance_schema_present(&ledger),
+            "provenance schema is initialized"
+        );
+        let before = occurrence(&ledger, "codex:response:s1:r1");
+        ledger.insert(&record).unwrap();
+        let after_duplicate = occurrence(&ledger, "codex:response:s1:r1");
+
+        assert_eq!(before, after_duplicate);
+        assert_eq!(after_duplicate.as_ref().unwrap().2, 1);
+        assert_eq!(after_duplicate.as_ref().unwrap().3, 1);
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_changed_key_records_correction_without_double_count() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&response(42)).unwrap();
+        assert!(
+            provenance_schema_present(&ledger),
+            "provenance schema is initialized"
+        );
+        let before =
+            occurrence(&ledger, "codex:response:s1:r1").expect("initial source occurrence");
+        ledger.insert(&response(7)).unwrap();
+        let corrected =
+            occurrence(&ledger, "codex:response:s1:r1").expect("corrected source occurrence");
+
+        assert_eq!(corrected.0, before.0);
+        assert_eq!(corrected.1, 2);
+        assert_eq!(corrected.2, before.2);
+        let bucket = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &bucket)
+                .unwrap(),
+            Some(7)
+        );
+        let corrections: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_mutation
+                 WHERE mutation_kind='content_correction' AND event_key='codex:response:s1:r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(corrections, 1);
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_legacy_database_never_becomes_new_lineage() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let legacy = rusqlite::Connection::open(file.path()).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE setting(key TEXT PRIMARY KEY,value TEXT NOT NULL);
+                 CREATE TABLE source_checkpoint(source_id TEXT PRIMARY KEY,file_fingerprint TEXT NOT NULL,
+                   byte_offset INTEGER NOT NULL,parser_version INTEGER NOT NULL,last_snapshot_total INTEGER,
+                   status TEXT NOT NULL DEFAULT 'complete');
+                 CREATE TABLE usage_record(event_key TEXT PRIMARY KEY,source_id TEXT NOT NULL,agent TEXT NOT NULL,
+                   kind TEXT NOT NULL,bucket_date TEXT NOT NULL,occurred_at_utc TEXT NOT NULL,input_tokens INTEGER,
+                   output_tokens INTEGER,cache_read_tokens INTEGER,cache_write_tokens INTEGER,total_tokens INTEGER,
+                   coverage TEXT NOT NULL,parser_version INTEGER NOT NULL);
+                 CREATE TABLE planet_object(cycle_id TEXT NOT NULL,stage INTEGER NOT NULL,ordinal INTEGER NOT NULL,
+                   kind TEXT NOT NULL,x INTEGER NOT NULL,y INTEGER NOT NULL,seed TEXT NOT NULL,
+                   PRIMARY KEY(cycle_id,stage,ordinal));
+                 CREATE TABLE planet_wallet_credit(previous_cycle_id TEXT PRIMARY KEY,amount INTEGER NOT NULL,
+                   created_at_utc TEXT NOT NULL);
+                 INSERT INTO setting(key,value) VALUES
+                   ('world_timezone','UTC'),
+                   ('planet_account_id','local'),
+                   ('planet_device_id','11111111-1111-4111-8111-111111111111'),
+                   ('planet_activation_at_utc','2026-09-01T00:00:00.000000Z'),
+                   ('planet_current_cycle_id','22222222-2222-4222-8222-222222222222');
+                 INSERT INTO source_checkpoint(source_id,file_fingerprint,byte_offset,parser_version,
+                   last_snapshot_total,status)
+                 VALUES ('codex:/legacy/session.jsonl','legacy-fingerprint',128,1,NULL,'complete');
+                 INSERT INTO usage_record(event_key,source_id,agent,kind,bucket_date,occurred_at_utc,
+                   input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens,coverage,parser_version)
+                 VALUES ('codex:response:legacy:old','codex:/legacy/session.jsonl','codex','response',
+                   '2026-09-24','2026-09-24T12:00:00.000000Z',NULL,NULL,NULL,NULL,5,'complete',1);
+                 INSERT INTO planet_object(cycle_id,stage,ordinal,kind,x,y,seed)
+                 VALUES ('22222222-2222-4222-8222-222222222222',1,0,'tree',3,4,'legacy-seed');
+                 INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+                 VALUES ('33333333-3333-4333-8333-333333333333',17,'2026-09-01T00:00:00.000000Z');",
+            )
+            .unwrap();
+        drop(legacy);
+
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&response(42)).unwrap();
+        let lineage_count: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='guest_provenance_lineage'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            lineage_count, 1,
+            "legacy stores receive additive provenance schema"
+        );
+        let lineage_rows: i64 = ledger
+            .connection
+            .query_row("SELECT count(*) FROM guest_provenance_lineage", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            lineage_rows, 0,
+            "legacy data is not promoted by schema upgrade"
+        );
+        let mappings: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_occurrence_key",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mappings, 0,
+            "new scans in a legacy database gain no synthetic provenance"
+        );
+        drop(ledger);
+
+        let reopened = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let lineage_rows: i64 = reopened
+            .connection
+            .query_row("SELECT count(*) FROM guest_provenance_lineage", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let mappings: i64 = reopened
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_occurrence_key",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(lineage_rows, 0, "reopening legacy data never seeds lineage");
+        assert_eq!(mappings, 0, "reopening legacy data never maps old keys");
+        let preserved_source: (String, i64, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT file_fingerprint,byte_offset,parser_version FROM source_checkpoint
+                 WHERE source_id='codex:/legacy/session.jsonl'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved_source, ("legacy-fingerprint".into(), 128, 1));
+        let preserved_raw: (String, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT source_id,total_tokens FROM usage_record
+                 WHERE event_key='codex:response:legacy:old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved_raw, ("codex:/legacy/session.jsonl".into(), 5));
+        let preserved_game: (i64, i64) = reopened
+            .connection
+            .query_row(
+                "SELECT (SELECT count(*) FROM planet_object),
+                        (SELECT amount FROM planet_wallet_credit
+                         WHERE previous_cycle_id='33333333-3333-4333-8333-333333333333')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(preserved_game, (1, 17));
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_recursive_triggers_keep_duplicate_and_correction_single() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger
+            .connection
+            .execute_batch("PRAGMA recursive_triggers=ON;")
+            .unwrap();
+        let record = response(42);
+        ledger.insert(&record).unwrap();
+        let first = occurrence(&ledger, "codex:response:s1:r1");
+
+        ledger.insert(&record).unwrap();
+
+        assert_eq!(occurrence(&ledger, "codex:response:s1:r1"), first);
+        let after_duplicate: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_mutation",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after_duplicate, 1,
+            "recursive triggers keep duplicate a no-op"
+        );
+
+        ledger.insert(&response(17)).unwrap();
+
+        assert_eq!(
+            occurrence(&ledger, "codex:response:s1:r1")
+                .as_ref()
+                .map(|value| value.1),
+            Some(2)
+        );
+        assert_eq!(mutation_count(&ledger, "content_correction"), 1);
+        let after_correction: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_mutation",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after_correction, 2,
+            "recursive triggers record one correction"
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_source_replacement_delete_records_correction() {
+        use crate::collectors::discovery::{scan_sources, SourceConfig};
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let codex = temp.path().join("codex");
+        fs::create_dir(&codex).unwrap();
+        let source = codex.join("session.jsonl");
+        let line = |tokens: &str| {
+            let occurred_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+            serde_json::json!({
+                "timestamp": occurred_at,
+                "type": "token_usage_record",
+                "payload": {
+                    "session_id": "s1",
+                    "response_id": "r1",
+                    "usage": {"total_tokens": tokens.parse::<u64>().unwrap()}
+                }
+            })
+            .to_string()
+                + "\n"
+        };
+        fs::write(&source, line("42")).unwrap();
+        let mut ledger = Ledger::open(&temp.path().join("ledger.db"), chrono_tz::UTC).unwrap();
+        let config = SourceConfig {
+            codex_root: codex,
+            claude_root: temp.path().join("missing"),
+            timezone: chrono_tz::UTC,
+        };
+        scan_sources(&config, &mut ledger).unwrap();
+        assert!(
+            provenance_schema_present(&ledger),
+            "fresh source has provenance storage"
+        );
+
+        fs::write(&source, line("19")).unwrap();
+        scan_sources(&config, &mut ledger).unwrap();
+
+        let version: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT current_record_version FROM guest_provenance_occurrence_key
+                 WHERE event_key='codex:response:s1:r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let deletes: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_mutation
+                 WHERE mutation_kind='delete' AND event_key='codex:response:s1:r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 2);
+        assert_eq!(deletes, 1);
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            Some(19)
+        );
+
+        fs::write(&source, "").unwrap();
+        scan_sources(&config, &mut ledger).unwrap();
+        let after_delete: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_mutation
+                 WHERE mutation_kind='delete' AND event_key='codex:response:s1:r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after_delete, 2,
+            "a delete-only replacement keeps correction evidence"
+        );
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_failed_source_replacement_rolls_back_delete_and_raw() {
+        use crate::collectors::discovery::{scan_sources, SourceConfig};
+        use std::fs;
+
+        let temp = tempfile::tempdir().unwrap();
+        let codex = temp.path().join("codex");
+        fs::create_dir(&codex).unwrap();
+        let source = codex.join("session.jsonl");
+        let line = |tokens: &str| {
+            let occurred_at =
+                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+            serde_json::json!({
+                "timestamp": occurred_at,
+                "type": "token_usage_record",
+                "payload": {
+                    "session_id": "s1",
+                    "response_id": "r1",
+                    "usage": {"total_tokens": tokens.parse::<u64>().unwrap()}
+                }
+            })
+            .to_string()
+                + "\n"
+        };
+        fs::write(&source, line("42")).unwrap();
+        let mut ledger = Ledger::open(&temp.path().join("ledger.db"), chrono_tz::UTC).unwrap();
+        let config = SourceConfig {
+            codex_root: codex,
+            claude_root: temp.path().join("missing"),
+            timezone: chrono_tz::UTC,
+        };
+        scan_sources(&config, &mut ledger).unwrap();
+        assert!(
+            provenance_schema_present(&ledger),
+            "fresh source has provenance storage"
+        );
+        let mutation_count: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_mutation",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let original = occurrence(&ledger, "codex:response:s1:r1").unwrap();
+
+        fs::write(&source, line("9223372036854775808")).unwrap();
+        let error = scan_sources(&config, &mut ledger).unwrap_err();
+        assert_eq!(error, super::ScanError::InvalidCount);
+
+        let after_mutations: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_mutation",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            after_mutations, mutation_count,
+            "savepoint rollback removes its delete evidence"
+        );
+        assert_eq!(occurrence(&ledger, "codex:response:s1:r1"), Some(original));
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_clock_regression_holds_but_keeps_raw() {
+        use crate::storage::guest_provenance::record_guest_occurrence_in_transaction;
+
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let record = response(42);
+        ledger.insert(&record).unwrap();
+        let last_ingested: String = ledger
+            .connection
+            .query_row(
+                "SELECT last_ingested_at_utc FROM guest_provenance_lineage WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let regressed_time = chrono::DateTime::parse_from_rfc3339(&last_ingested)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            - chrono::Duration::seconds(1);
+        let transaction = ledger.connection.transaction().unwrap();
+        record_guest_occurrence_in_transaction(&transaction, &record, regressed_time).unwrap();
+        transaction.commit().unwrap();
+
+        assert_eq!(lineage_eligible(&ledger), 0);
+        assert_eq!(mutation_count(&ledger, "clock_regression"), 1);
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_pre_activation_occurrence_holds_but_keeps_raw() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let mut record = response(12);
+        let activation: String = ledger
+            .connection
+            .query_row(
+                "SELECT activated_at_utc FROM guest_provenance_lineage WHERE singleton=1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        record.occurred_at_utc = chrono::DateTime::parse_from_rfc3339(&activation)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            - chrono::Duration::seconds(1);
+        ledger.insert(&record).unwrap();
+
+        assert_eq!(lineage_eligible(&ledger), 0);
+        assert_eq!(mutation_count(&ledger, "before_activation"), 1);
+        let date = record.occurred_at_utc.format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            Some(12)
+        );
+        let stored_total: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT total_tokens FROM usage_record WHERE event_key=?1",
+                [&record.event_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored_total, 12,
+            "provenance holds do not discard raw input"
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_device_change_holds_but_keeps_raw() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&response(42)).unwrap();
+        let replacement_device = uuid::Uuid::new_v4().to_string();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value=?1 WHERE key='planet_device_id'",
+                [&replacement_device],
+            )
+            .unwrap();
+        ledger.insert(&response_for("r2", 11)).unwrap();
+
+        assert_eq!(lineage_eligible(&ledger), 0);
+        assert_eq!(mutation_count(&ledger, "device_mismatch"), 1);
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            Some(53)
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_response_replaces_snapshot_without_double_count() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&snapshot(7)).unwrap();
+        ledger.insert(&response(42)).unwrap();
+
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            Some(42)
+        );
+        let snapshot_effective: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT effective FROM guest_provenance_occurrence_key
+                 WHERE event_key=':snapshot-1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(snapshot_effective, 0);
+        assert_eq!(lineage_eligible(&ledger), 0);
+        assert_eq!(mutation_count(&ledger, "effective_record_replaced"), 1);
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_sequence_overflow_holds_without_dropping_raw() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&response(42)).unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE guest_provenance_lineage SET ingest_watermark=9223372036854775807",
+                [],
+            )
+            .unwrap();
+        ledger.insert(&response_for("r2", 9)).unwrap();
+
+        assert_eq!(lineage_eligible(&ledger), 0);
+        assert_eq!(mutation_count(&ledger, "ingest_sequence_overflow"), 1);
+        assert!(occurrence(&ledger, "codex:response:s1:r2").is_none());
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            Some(51)
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_unique_occurrence_uuid_and_sequence_are_enforced() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&response(42)).unwrap();
+        let first = occurrence(&ledger, "codex:response:s1:r1").unwrap();
+        let duplicate_uuid = ledger.connection.execute(
+            "INSERT INTO guest_provenance_occurrence_key(
+                event_key,occurrence_id,ingest_seq,current_record_version,content_fingerprint,effective
+             ) VALUES ('duplicate-id',?1,2,1,'digest',1)",
+            [&first.0],
+        );
+        assert!(duplicate_uuid.is_err());
+        let duplicate_sequence = ledger.connection.execute(
+            "INSERT INTO guest_provenance_occurrence_key(
+                event_key,occurrence_id,ingest_seq,current_record_version,content_fingerprint,effective
+             ) VALUES ('duplicate-seq',?1,1,1,'digest',1)",
+            [uuid::Uuid::new_v4().to_string()],
+        );
+        assert!(duplicate_sequence.is_err());
+        assert_eq!(occurrence(&ledger, "codex:response:s1:r1"), Some(first));
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_token_overflow_does_not_commit_raw_or_provenance() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let error = ledger.insert(&response(u64::MAX)).unwrap_err();
+
+        assert_eq!(error, super::ScanError::InvalidCount);
+        let raw_count: i64 = ledger
+            .connection
+            .query_row("SELECT count(*) FROM usage_record", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(raw_count, 0);
+        assert_eq!(occurrence(&ledger, "codex:response:s1:r1"), None);
+        assert_eq!(lineage_eligible(&ledger), 1);
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_record_version_overflow_holds_and_keeps_raw() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&response(42)).unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE guest_provenance_occurrence_key
+                 SET current_record_version=9223372036854775807
+                 WHERE event_key='codex:response:s1:r1'",
+                [],
+            )
+            .unwrap();
+
+        ledger.insert(&response(17)).unwrap();
+
+        assert_eq!(lineage_eligible(&ledger), 0);
+        assert_eq!(mutation_count(&ledger, "record_version_overflow"), 1);
+        let current_version: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT current_record_version FROM guest_provenance_occurrence_key
+                 WHERE event_key='codex:response:s1:r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(current_version, i64::MAX);
+        let raw_total: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT total_tokens FROM usage_record WHERE event_key='codex:response:s1:r1'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(raw_total, 17);
+        let immutable_versions: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM guest_provenance_occurrence_version
+                 WHERE occurrence_id=(SELECT occurrence_id FROM guest_provenance_occurrence_key
+                                      WHERE event_key='codex:response:s1:r1')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(immutable_versions, 1);
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_mutation_sequence_overflow_holds_and_keeps_raw() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger.insert(&response(42)).unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE guest_provenance_lineage SET last_mutation_seq=9223372036854775807",
+                [],
+            )
+            .unwrap();
+
+        ledger.insert(&response_for("r2", 9)).unwrap();
+
+        assert_eq!(lineage_eligible(&ledger), 0);
+        assert!(occurrence(&ledger, "codex:response:s1:r2").is_none());
+        let (watermark, occurrence_count, last_mutation_seq): (i64, i64, i64) = ledger
+            .connection
+            .query_row(
+                "SELECT ingest_watermark,occurrence_count,last_mutation_seq
+                 FROM guest_provenance_lineage WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            (watermark, occurrence_count, last_mutation_seq),
+            (1, 1, i64::MAX)
+        );
+        let raw_count: i64 = ledger
+            .connection
+            .query_row("SELECT count(*) FROM usage_record", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(raw_count, 2);
+        let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
+        assert_eq!(
+            ledger
+                .daily_total(crate::domain::usage::Agent::Codex, &date)
+                .unwrap(),
+            Some(51)
+        );
+    }
+
+    #[test]
+    fn guest_import_v2_provenance_future_occurrence_holds_and_keeps_raw() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let mut record = response(23);
+        record.occurred_at_utc = chrono::Utc::now() + chrono::Duration::minutes(5);
+        ledger.insert(&record).unwrap();
+
+        assert_eq!(lineage_eligible(&ledger), 0);
+        assert_eq!(mutation_count(&ledger, "occurrence_after_ingestion"), 1);
+        assert!(occurrence(&ledger, &record.event_key).is_some());
+        let stored_total: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT total_tokens FROM usage_record WHERE event_key=?1",
+                [&record.event_key],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_total, 23);
+    }
+}
+
+#[cfg(test)]
+mod guest_import_v2_reset_tests {
+    use super::Ledger;
+
+    fn raw_one_date_record(
+        occurred_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::collectors::ParsedRecord {
+        raw_record("guest-reset-one-date-raw-1m", occurred_at)
+    }
+
+    fn raw_record(
+        event_key: &str,
+        occurred_at: chrono::DateTime<chrono::Utc>,
+    ) -> crate::collectors::ParsedRecord {
+        raw_record_with_tokens(event_key, occurred_at, 1_000_000)
+    }
+
+    fn raw_record_with_tokens(
+        event_key: &str,
+        occurred_at: chrono::DateTime<chrono::Utc>,
+        tokens: u64,
+    ) -> crate::collectors::ParsedRecord {
+        crate::collectors::ParsedRecord {
+            agent: crate::domain::usage::Agent::Codex,
+            kind: crate::collectors::RecordKind::Response,
+            event_key: event_key.into(),
+            occurred_at_utc: occurred_at,
+            usage: crate::domain::usage::TokenUsage {
+                input_tokens: None,
+                output_tokens: None,
+                cache_read_tokens: None,
+                cache_write_tokens: None,
+                total_tokens: Some(tokens),
+                coverage: crate::domain::usage::UsageCoverage::Complete,
+            },
+        }
+    }
+
+    #[test]
+    fn zero_current_cycle_usage_omits_daily_entry_and_positive_usage_remains_aggregated() {
+        let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+        let activation = ledger.planet_activation_at().unwrap();
+        let date = (activation + chrono::Duration::microseconds(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        ledger
+            .insert(&raw_record_with_tokens(
+                "zero-current-cycle-usage",
+                activation + chrono::Duration::microseconds(1),
+                0,
+            ))
+            .unwrap();
+
+        let zero = ledger.planet_device_contribution(false).unwrap();
+        assert_eq!(zero.current_planet_tokens, 0);
+        assert!(zero.daily_tokens.is_empty());
+
+        ledger
+            .insert(&raw_record_with_tokens(
+                "positive-current-cycle-usage",
+                activation + chrono::Duration::microseconds(2),
+                37,
+            ))
+            .unwrap();
+        let positive = ledger.planet_device_contribution(false).unwrap();
+        assert_eq!(positive.current_planet_tokens, 37);
+        assert_eq!(positive.daily_tokens.len(), 1);
+        assert_eq!(positive.daily_tokens.get(&date), Some(&37));
+    }
+
+    fn table_exists(ledger: &Ledger, table: &str) -> bool {
+        ledger
+            .connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+                [table],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    fn table_count(ledger: &Ledger, table: &str) -> i64 {
+        if !table_exists(ledger, table) {
+            return 0;
+        }
+        ledger
+            .connection
+            .query_row(&format!("SELECT count(*) FROM {table}"), [], |row| {
+                row.get(0)
+            })
+            .unwrap()
+    }
+
+    fn table_dump(ledger: &Ledger, table: &str) -> Vec<String> {
+        if !table_exists(ledger, table) {
+            return Vec::new();
+        }
+        let mut statement = ledger
+            .connection
+            .prepare(&format!("SELECT * FROM {table}"))
+            .unwrap();
+        let column_count = statement.column_count();
+        let mut rows = statement
+            .query_map([], |row| {
+                (0..column_count)
+                    .map(|index| row.get::<_, rusqlite::types::Value>(index))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(|values| format!("{values:?}"))
+            })
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        rows.sort();
+        rows
+    }
+
+    fn reset_state_dump(ledger: &Ledger) -> Vec<(String, Vec<String>)> {
+        [
+            "setting",
+            "usage_record",
+            "planet_usage_owner",
+            "daily_agent_total",
+            "guest_provenance_lineage",
+            "guest_provenance_occurrence_key",
+            "guest_provenance_occurrence_version",
+            "guest_provenance_mutation",
+            "guest_provenance_cycle",
+            "guest_provenance_reset_receipt",
+            "planet_wallet_credit",
+            "shop_effect_history",
+            "shop_effect_cycle_bound",
+            "shop_effect_cycle_bounds_state",
+            "shop_effect_timeline_state",
+            "shop_effect_contribution",
+            "shop_contribution_state",
+            "shop_activity_day",
+            "shop_game_reward",
+            "shop_wallet_credit",
+            "shop_cycle_settlement",
+            "shop_era_progress",
+            "growth_journal_state",
+            "growth_journal_cycle",
+            "growth_journal_entry",
+            "growth_journal_remote_cycle",
+            "growth_journal_remote_entry",
+            "shop_action_request",
+            "shop_landscape_instance",
+            "shop_landscape_placement",
+            "shop_avatar_owned",
+            "shop_avatar_equipment",
+            "shop_purchase",
+            "cosmetic_purchase",
+            "cosmetic_equipment",
+            "shop_natural_removal",
+            "shop_natural_removal_debit",
+            "planet_object",
+        ]
+        .into_iter()
+        .map(|table| (table.to_owned(), table_dump(ledger, table)))
+        .collect()
+    }
+
+    #[test]
+    fn reset_uuid_links_actual_request_and_credit() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let occurred_at = chrono::Utc::now();
+        let record = raw_one_date_record(occurred_at);
+        ledger.insert(&record).unwrap();
+        let raw_tokens = ledger
+            .reset_planet(chrono::Utc::now() + chrono::Duration::hours(1))
+            .unwrap();
+
+        assert_eq!(raw_tokens, 1_000_000);
+        let (request_id, result_json): (String, String) = ledger
+            .connection
+            .query_row(
+                "SELECT request_id,result_json FROM shop_action_request
+                 WHERE account_id='local' ORDER BY created_at_utc DESC LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert!(
+            uuid::Uuid::parse_str(&request_id).is_ok(),
+            "new eligible guest reset must persist a UUID request before applying reset"
+        );
+        let action: crate::domain::cosmetic_shop::ShopActionResult =
+            serde_json::from_str(&result_json).unwrap();
+        assert_eq!(action.request_id, request_id);
+        let (receipt_request, receipt_json): (String, String) = ledger
+            .connection
+            .query_row(
+                "SELECT request_id,receipt_json FROM guest_provenance_reset_receipt",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(receipt_request, request_id);
+        let receipt: crate::domain::guest_shop_import::GuestFirstResetReceipt =
+            serde_json::from_str(&receipt_json).unwrap();
+        assert_eq!(receipt.request.request_id, request_id);
+        assert_eq!(receipt.result.request_id, request_id);
+        assert_eq!(receipt.result.raw_tokens, 1_000_000);
+        assert_eq!(receipt.result.credited_tokens, 1_000_000);
+        let wallet_credit: (String, i64) = ledger
+            .connection
+            .query_row(
+                "SELECT previous_cycle_id,amount FROM planet_wallet_credit",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(wallet_credit, (receipt.request.cycle_id, 1_000_000));
+    }
+
+    #[test]
+    fn ordinary_scan_settle_reset_records_zero_baselines() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let occurred_at = chrono::Utc::now();
+        ledger.insert(&raw_one_date_record(occurred_at)).unwrap();
+        ledger.rebuild_shop_contributions().unwrap();
+        ledger
+            .settle_guest_rewards(occurred_at + chrono::Duration::minutes(1))
+            .unwrap();
+        let previous_cycle_id = ledger.planet_cycle_id().unwrap();
+        ledger
+            .settle_guest_cycle_tokens(
+                &previous_cycle_id,
+                occurred_at + chrono::Duration::minutes(2),
+            )
+            .unwrap();
+        ledger.prepare_growth_journal().unwrap();
+        let reset_at = chrono::DateTime::from_timestamp_micros(
+            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_micros(),
+        )
+        .unwrap();
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        let reset_at_rfc3339 = reset_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        ledger.prepare_growth_journal().unwrap();
+        let journal_after_reset = serde_json::to_value(ledger.growth_journal().unwrap()).unwrap();
+        let (old_end, old_credit, old_credit_at): (Option<String>, Option<i64>, Option<String>) =
+            ledger
+                .connection
+                .query_row(
+                    "SELECT ended_at_utc,wallet_credit,wallet_credit_at_utc
+                     FROM growth_journal_cycle WHERE account_id='local' AND cycle_id=?1",
+                    [&previous_cycle_id],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+        assert_eq!(old_end.as_deref(), Some(reset_at_rfc3339.as_str()));
+        assert_eq!(old_credit, Some(1_000_000));
+        assert_eq!(old_credit_at.as_deref(), Some(reset_at_rfc3339.as_str()));
+        ledger.prepare_growth_journal().unwrap();
+        assert_eq!(
+            serde_json::to_value(ledger.growth_journal().unwrap()).unwrap(),
+            journal_after_reset
+        );
+
+        assert!(
+            table_exists(&ledger, "guest_provenance_cycle"),
+            "fresh guest lineage must persist cycle bounds and revision-zero baselines"
+        );
+        let old_bound: (String, Option<String>, i64, String, String) = ledger
+            .connection
+            .query_row(
+                "SELECT started_at_utc,ended_at_utc,baseline_revision,
+                        active_instance_ids_json,effects_json
+                 FROM guest_provenance_cycle WHERE cycle_id=?1",
+                [&previous_cycle_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(old_bound.1.as_deref(), Some(reset_at_rfc3339.as_str()));
+        assert_eq!(old_bound.2, 0);
+        assert_eq!(old_bound.3, "[]");
+        assert_eq!(
+            old_bound.4,
+            serde_json::to_string(&crate::domain::cosmetic_shop::ActiveEffects::default()).unwrap()
+        );
+
+        let current_cycle_id = ledger.planet_cycle_id().unwrap();
+        let new_bound: (String, Option<String>, i64, String, String) = ledger
+            .connection
+            .query_row(
+                "SELECT started_at_utc,ended_at_utc,baseline_revision,
+                        active_instance_ids_json,effects_json
+                 FROM guest_provenance_cycle WHERE cycle_id=?1",
+                [&current_cycle_id],
+                |row| {
+                    Ok((
+                        row.get(0)?,
+                        row.get(1)?,
+                        row.get(2)?,
+                        row.get(3)?,
+                        row.get(4)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(new_bound.0, reset_at_rfc3339);
+        assert_eq!(new_bound.1, None);
+        assert_eq!(new_bound.2, 0);
+        assert_eq!(new_bound.3, "[]");
+        assert_eq!(new_bound.4, old_bound.4);
+        assert!(table_exists(&ledger, "guest_provenance_reset_receipt"));
+        let positive_history: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM shop_effect_history WHERE account_id='local'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(positive_history, 0);
+        ledger.rebuild_shop_contributions().unwrap();
+        let current_cycle_id = ledger.planet_cycle_id().unwrap();
+        let new_effect_revision: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT min(effect_revision) FROM shop_effect_contribution
+                 WHERE account_id='local' AND cycle_id=?1",
+                [&previous_cycle_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(new_effect_revision, 0);
+        let native = ledger.shop_device_contribution(false).unwrap();
+        assert_eq!(native.raw.current_planet_tokens, 0);
+        assert_eq!(native.raw.lifetime_tokens, 1_000_000);
+        assert!(native.daily_segments.iter().any(|segment| {
+            segment.cycle_id == previous_cycle_id
+                && segment.effect_revision == 0
+                && segment.tokens == 1_000_000
+        }));
+        assert!(!native
+            .daily_segments
+            .iter()
+            .any(|segment| segment.cycle_id == current_cycle_id));
+        let frozen_deadline: String = ledger
+            .connection
+            .query_row(
+                "SELECT value FROM setting WHERE key='planet_reset_available_at_utc'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        drop(ledger);
+        let reopened = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        assert_eq!(table_count(&reopened, "guest_provenance_reset_receipt"), 1);
+        assert_eq!(table_count(&reopened, "guest_provenance_cycle"), 2);
+        assert_eq!(
+            reopened
+                .connection
+                .query_row(
+                    "SELECT value FROM setting WHERE key='planet_reset_available_at_utc'",
+                    [],
+                    |row| row.get::<_, String>(0),
+                )
+                .unwrap(),
+            frozen_deadline
+        );
+    }
+
+    #[test]
+    fn reset_boundary_and_late_old_occurrences_keep_timestamp_cycle() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let activation = ledger.planet_activation_at().unwrap();
+        ledger
+            .insert(&raw_record(
+                "guest-reset-boundary-credit",
+                activation + chrono::Duration::microseconds(1),
+            ))
+            .unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        let reset_at =
+            chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        let new_cycle = ledger.planet_cycle_id().unwrap();
+
+        ledger
+            .insert(&raw_record(
+                "guest-reset-late-old-occurrence",
+                reset_at - chrono::Duration::microseconds(1),
+            ))
+            .unwrap();
+        ledger
+            .insert(&raw_record("guest-reset-at-boundary", reset_at))
+            .unwrap();
+
+        let assigned: Vec<(String, String)> = {
+            let mut statement = ledger
+                .connection
+                .prepare(
+                    "SELECT k.event_key,v.cycle_id
+                 FROM guest_provenance_occurrence_key k
+                 JOIN guest_provenance_occurrence_version v USING(occurrence_id)
+                 WHERE k.event_key IN ('guest-reset-late-old-occurrence','guest-reset-at-boundary')
+                 ORDER BY k.event_key",
+                )
+                .unwrap();
+            statement
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        assert_eq!(
+            assigned,
+            vec![
+                ("guest-reset-at-boundary".to_owned(), new_cycle.clone()),
+                (
+                    "guest-reset-late-old-occurrence".to_owned(),
+                    old_cycle.clone(),
+                ),
+            ]
+        );
+        ledger.rebuild_shop_contributions().unwrap();
+        let native = ledger.shop_device_contribution(false).unwrap();
+        assert_eq!(native.raw.current_planet_tokens, 1_000_000);
+        assert_eq!(native.raw.lifetime_tokens, 3_000_000);
+        assert!(native.daily_segments.iter().any(|segment| {
+            segment.cycle_id == old_cycle
+                && segment.effect_revision == 0
+                && segment.tokens == 2_000_000
+        }));
+        assert!(native.daily_segments.iter().any(|segment| {
+            segment.cycle_id == new_cycle
+                && segment.effect_revision == 0
+                && segment.tokens == 1_000_000
+        }));
+    }
+
+    #[test]
+    fn activation_boundary_uses_only_the_matching_fresh_guest_baseline() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let activation = ledger.planet_activation_at().unwrap();
+        let current_cycle = ledger.planet_cycle_id().unwrap();
+        ledger
+            .insert(&raw_record("guest-activation-boundary", activation))
+            .unwrap();
+        let (assigned_cycle, occurred_at): (String, String) = ledger
+            .connection
+            .query_row(
+                "SELECT cycle_id,occurred_at_utc FROM guest_provenance_occurrence_version
+                 WHERE occurrence_id=(SELECT occurrence_id FROM guest_provenance_occurrence_key
+                                      WHERE event_key='guest-activation-boundary')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(assigned_cycle, current_cycle);
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(&occurred_at)
+                .unwrap()
+                .timestamp_micros(),
+            activation.timestamp_micros()
+        );
+        assert_eq!(ledger.planet_usage_totals().unwrap().1, 1_000_000);
+        ledger.rebuild_shop_contributions().unwrap();
+        let native = ledger.shop_device_contribution(false).unwrap();
+        assert_eq!(native.raw.current_planet_tokens, 1_000_000);
+        assert!(native.daily_segments.iter().any(|segment| {
+            segment.cycle_id == current_cycle
+                && segment.effect_revision == 0
+                && segment.tokens == 1_000_000
+        }));
+    }
+
+    #[test]
+    fn reset_clock_regression_keeps_ordinary_history_without_first_reset_receipt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let cycle = ledger.planet_cycle_id().unwrap();
+        let observed_now =
+            chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
+        let activation = observed_now - chrono::Duration::seconds(3);
+        let reset_at = observed_now - chrono::Duration::seconds(2);
+        let occurred_at = observed_now - chrono::Duration::seconds(1);
+        let activation_text = activation.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value=?1
+                 WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
+                [&activation_text],
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE guest_provenance_lineage SET activated_at_utc=?1 WHERE singleton=1",
+                [&activation_text],
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE guest_provenance_cycle SET started_at_utc=?1 WHERE cycle_id=?2",
+                rusqlite::params![activation_text, cycle],
+            )
+            .unwrap();
+        ledger.insert(&raw_one_date_record(occurred_at)).unwrap();
+
+        let (last_ingested, eligible): (String, i64) = ledger
+            .connection
+            .query_row(
+                "SELECT last_ingested_at_utc,eligible FROM guest_provenance_lineage
+                 WHERE singleton=1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let reset_text = reset_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        assert_eq!(eligible, 1);
+        assert!(occurred_at > reset_at);
+        assert!(last_ingested > reset_text);
+
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn reset_boundary_occurrence_keeps_ordinary_history_without_first_reset_receipt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let cycle = ledger.planet_cycle_id().unwrap();
+        let observed_now =
+            chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
+        let activation = observed_now - chrono::Duration::seconds(3);
+        let reset_at = observed_now - chrono::Duration::seconds(1);
+        let activation_text = activation.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        let reset_text = reset_at.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value=?1
+                 WHERE key IN ('planet_activation_at_utc','planet_cycle_started_at_utc')",
+                [&activation_text],
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE guest_provenance_lineage SET activated_at_utc=?1 WHERE singleton=1",
+                [&activation_text],
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE guest_provenance_cycle SET started_at_utc=?1 WHERE cycle_id=?2",
+                rusqlite::params![activation_text, cycle],
+            )
+            .unwrap();
+        ledger.insert(&raw_one_date_record(reset_at)).unwrap();
+        // Isolate the occurrence-boundary check from the separate ingestion watermark check.
+        ledger
+            .connection
+            .execute(
+                "UPDATE guest_provenance_lineage SET last_ingested_at_utc=?1 WHERE singleton=1",
+                [&reset_text],
+            )
+            .unwrap();
+
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn signed_account_does_not_use_local_guest_cycle_bounds() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let activation = ledger.planet_activation_at().unwrap();
+        ledger
+            .insert(&raw_record(
+                "guest-to-signed-old-record",
+                activation + chrono::Duration::microseconds(1),
+            ))
+            .unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        let reset_at =
+            chrono::DateTime::from_timestamp_micros(chrono::Utc::now().timestamp_micros()).unwrap();
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        ledger
+            .insert(&raw_record(
+                "guest-to-signed-late-old",
+                reset_at - chrono::Duration::microseconds(1),
+            ))
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE planet_usage_owner SET account_id='account:signed-fixture'",
+                [],
+            )
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='account:signed-fixture'
+                 WHERE key='planet_account_id'",
+                [],
+            )
+            .unwrap();
+        ledger.rebuild_shop_contributions().unwrap();
+        let signed_guest_cycle_rows: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM shop_effect_contribution
+                 WHERE account_id='account:signed-fixture' AND cycle_id=?1",
+                [&old_cycle],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(signed_guest_cycle_rows, 0);
+        let baseline_rows: i64 = ledger
+            .connection
+            .query_row(
+                "SELECT count(*) FROM shop_effect_contribution
+                 WHERE account_id='account:signed-fixture' AND cycle_id='baseline'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        // Without a confirmed server timeline, signed-account rebuild is a no-op.
+        // Direct canonical occurrence selection is covered in shop_effects tests.
+        assert_eq!(baseline_rows, 0);
+    }
+
+    #[test]
+    fn missing_task_two_baseline_holds_without_manufacturing_history_or_blocking_reset() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let occurred_at = chrono::Utc::now();
+        ledger.insert(&raw_one_date_record(occurred_at)).unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        ledger
+            .connection
+            .execute(
+                "DELETE FROM guest_provenance_cycle WHERE cycle_id=?1",
+                [&old_cycle],
+            )
+            .unwrap();
+
+        assert_eq!(
+            ledger
+                .reset_planet(chrono::Utc::now() + chrono::Duration::hours(1))
+                .unwrap(),
+            1_000_000
+        );
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "guest_provenance_cycle"), 0);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+    }
+
+    #[test]
+    fn zero_credit_reset_keeps_ordinary_effect_history_and_no_receipt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        assert_eq!(
+            ledger
+                .reset_planet(chrono::Utc::now() + chrono::Duration::hours(1))
+                .unwrap(),
+            0
+        );
+        assert_ne!(ledger.planet_cycle_id().unwrap(), old_cycle);
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn second_reset_preserves_normal_gameplay_and_does_not_add_receipt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger
+            .insert(&raw_one_date_record(chrono::Utc::now()))
+            .unwrap();
+        let first_reset_at = chrono::DateTime::from_timestamp_micros(
+            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_micros(),
+        )
+        .unwrap();
+        assert_eq!(ledger.reset_planet(first_reset_at).unwrap(), 1_000_000);
+        let previous_cycle = ledger.planet_cycle_id().unwrap();
+        let second_reset_at = chrono::DateTime::from_timestamp_micros(
+            (first_reset_at + chrono::Duration::hours(25)).timestamp_micros(),
+        )
+        .unwrap();
+        assert_eq!(ledger.reset_planet(second_reset_at).unwrap(), 0);
+        assert_ne!(ledger.planet_cycle_id().unwrap(), previous_cycle);
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 1);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn threshold_growth_keeps_ordinary_reward_and_holds_import_proof() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger
+            .insert(&raw_record_with_tokens(
+                "guest-reset-threshold-growth",
+                chrono::Utc::now(),
+                5_000_000,
+            ))
+            .unwrap();
+        let reset_at = chrono::Utc::now() + chrono::Duration::hours(1);
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 5_000_000);
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "shop_era_progress"), 1);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn purchased_guest_state_keeps_normal_reset_but_no_first_reset_receipt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger
+            .insert(&raw_one_date_record(chrono::Utc::now()))
+            .unwrap();
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO cosmetic_purchase(account_id,purchase_id,sku,price,purchased_at_utc)
+                 VALUES ('local','fixture-purchase','fixture-sku',0,'2026-10-03T00:00:00.000000Z')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            ledger
+                .reset_planet(chrono::Utc::now() + chrono::Duration::hours(1))
+                .unwrap(),
+            1_000_000
+        );
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn non_uuid_direct_reset_keeps_ordinary_history_without_first_reset_receipt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger
+            .insert(&raw_one_date_record(chrono::Utc::now()))
+            .unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        let legacy_request_id = format!("legacy-reset:{old_cycle}");
+        let reset_at = chrono::DateTime::from_timestamp_micros(
+            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_micros(),
+        )
+        .unwrap();
+
+        let result = ledger
+            .reset_guest_planet(&legacy_request_id, &old_cycle, reset_at)
+            .unwrap();
+
+        assert_eq!(
+            result.status,
+            crate::domain::cosmetic_shop::ShopActionStatus::Reset
+        );
+        assert_eq!(result.request_id, legacy_request_id);
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn expired_preexisting_reset_deadline_keeps_ordinary_history_without_receipt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger
+            .insert(&raw_one_date_record(chrono::Utc::now()))
+            .unwrap();
+        let stale_deadline = (chrono::Utc::now() - chrono::Duration::hours(1))
+            .to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO setting(key,value) VALUES('planet_reset_available_at_utc',?1)
+                 ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                [&stale_deadline],
+            )
+            .unwrap();
+
+        assert_eq!(
+            ledger
+                .reset_planet(chrono::Utc::now() + chrono::Duration::hours(1))
+                .unwrap(),
+            1_000_000
+        );
+
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 1);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn preexisting_effect_history_keeps_ordinary_reset_without_first_reset_receipt() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        ledger
+            .insert(&raw_one_date_record(chrono::Utc::now()))
+            .unwrap();
+        let old_cycle = ledger.planet_cycle_id().unwrap();
+        let activation = ledger.planet_activation_at().unwrap();
+        let default_effects =
+            serde_json::to_string(&crate::domain::cosmetic_shop::ActiveEffects::default()).unwrap();
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO shop_effect_history(account_id,cycle_id,revision,started_at_utc,
+                 active_instance_ids_json,effects_json) VALUES('local',?1,1,?2,'[]',?3)",
+                rusqlite::params![
+                    old_cycle,
+                    activation.to_rfc3339_opts(chrono::SecondsFormat::Micros, true),
+                    default_effects
+                ],
+            )
+            .unwrap();
+        let reset_at = chrono::DateTime::from_timestamp_micros(
+            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_micros(),
+        )
+        .unwrap();
+
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 0);
+        assert_eq!(table_count(&ledger, "shop_effect_history"), 2);
+        assert_eq!(table_count(&ledger, "planet_wallet_credit"), 1);
+        let (old_end, new_revision): (Option<String>, i64) = ledger
+            .connection
+            .query_row(
+                "SELECT
+                   (SELECT ended_at_utc FROM shop_effect_history
+                    WHERE account_id='local' AND cycle_id=?1 AND revision=1),
+                   (SELECT revision FROM shop_effect_history
+                    WHERE account_id='local' AND cycle_id=(SELECT value FROM setting
+                      WHERE key='planet_current_cycle_id'))",
+                [&old_cycle],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            old_end.as_deref(),
+            Some(
+                reset_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+                    .as_str()
+            )
+        );
+        assert_eq!(new_revision, 2);
+        assert_eq!(
+            ledger
+                .connection
+                .query_row(
+                    "SELECT eligible FROM guest_provenance_lineage WHERE singleton=1",
+                    [],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn reset_provenance_failure_rolls_back_credit() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let mut ledger = Ledger::open(file.path(), chrono_tz::UTC).unwrap();
+        let occurred_at = chrono::Utc::now();
+        ledger.insert(&raw_one_date_record(occurred_at)).unwrap();
+
+        ledger.prepare_growth_journal().unwrap();
+        ledger
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER fail_guest_first_reset_receipt
+             BEFORE INSERT ON guest_provenance_reset_receipt
+             BEGIN SELECT RAISE(ABORT,'injected first-reset receipt failure'); END;",
+            )
+            .unwrap();
+
+        let previous_cycle_id = ledger.planet_cycle_id().unwrap();
+        let old_setting: (String, Option<String>) = ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT value FROM setting WHERE key='planet_current_cycle_id'),
+                        (SELECT value FROM setting WHERE key='planet_reset_available_at_utc')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let before = reset_state_dump(&ledger);
+        let reset_at = chrono::DateTime::from_timestamp_micros(
+            (chrono::Utc::now() + chrono::Duration::hours(1)).timestamp_micros(),
+        )
+        .unwrap();
+        assert!(ledger.reset_planet(reset_at).is_err());
+        assert_eq!(reset_state_dump(&ledger), before);
+        assert_eq!(ledger.planet_cycle_id().unwrap(), previous_cycle_id);
+        let new_setting: (String, Option<String>) = ledger
+            .connection
+            .query_row(
+                "SELECT (SELECT value FROM setting WHERE key='planet_current_cycle_id'),
+                        (SELECT value FROM setting WHERE key='planet_reset_available_at_utc')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(new_setting, old_setting);
+        assert_eq!(
+            ledger
+                .daily_total(
+                    crate::domain::usage::Agent::Codex,
+                    &occurred_at.format("%Y-%m-%d").to_string()
+                )
+                .unwrap(),
+            Some(1_000_000)
+        );
+        ledger
+            .connection
+            .execute_batch("DROP TRIGGER fail_guest_first_reset_receipt;")
+            .unwrap();
+        assert_eq!(ledger.reset_planet(reset_at).unwrap(), 1_000_000);
+        ledger.prepare_growth_journal().unwrap();
+        let (retry_end, retry_credit): (Option<String>, Option<i64>) = ledger
+            .connection
+            .query_row(
+                "SELECT ended_at_utc,wallet_credit FROM growth_journal_cycle
+                 WHERE account_id='local' AND cycle_id=?1",
+                [&previous_cycle_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            retry_end.as_deref(),
+            Some(
+                reset_at
+                    .to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
+                    .as_str()
+            )
+        );
+        assert_eq!(retry_credit, Some(1_000_000));
+        assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 1);
     }
 }

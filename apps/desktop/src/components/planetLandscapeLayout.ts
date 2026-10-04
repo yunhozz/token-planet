@@ -1,4 +1,5 @@
 import type { PlanetObject } from "../types/usage";
+export { validatePlacement } from "./landscapeEditing";
 
 export type LandscapeBounds = { x: number; y: number; width: number; height: number };
 export type LandscapePlacement = {

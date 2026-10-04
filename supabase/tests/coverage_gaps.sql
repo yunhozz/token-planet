@@ -17,7 +17,7 @@ select is((public.get_my_planet_state()->>'incomplete')::boolean, true, 'an inco
 select is((select incomplete from public.get_world_planets('20000000-0000-0000-0000-000000000901')), true, 'group members see the coverage gap');
 do $$ begin
   perform public.upsert_my_planet_state(pg_temp.planet_state('Coverage'),
-    pg_temp.planet_device('30000000-0000-0000-0000-000000000902', 'cycle-1', 200, false));
+    pg_temp.planet_device('30000000-0000-0000-0000-000000000902', 'cycle-1', 200, false, null, 2));
 end $$;
 select is((public.get_my_planet_state()->>'incomplete')::boolean, false, 'a resolved device gap clears the account coverage warning');
 select is((select incomplete from public.get_world_planets('20000000-0000-0000-0000-000000000901')), false, 'resolved coverage is reflected in the group');

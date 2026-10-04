@@ -103,30 +103,61 @@ mod tests {
     #[test]
     fn places_below_icon() {
         let result = popup_bounds(
-            Some(Bounds { x: 1000, y: 0, width: 24, height: 24 }),
+            Some(Bounds {
+                x: 1000,
+                y: 0,
+                width: 24,
+                height: 24,
+            }),
             screen(1440, 900),
             400,
             700,
         );
-        assert_eq!(result, Bounds { x: 812, y: 32, width: 400, height: 700 });
+        assert_eq!(
+            result,
+            Bounds {
+                x: 812,
+                y: 32,
+                width: 400,
+                height: 700
+            }
+        );
     }
 
     #[test]
     fn places_above_bottom_taskbar_icon_when_popup_will_not_fit_below() {
         let result = popup_bounds(
-            Some(Bounds { x: 1800, y: 1040, width: 24, height: 32 }),
+            Some(Bounds {
+                x: 1800,
+                y: 1040,
+                width: 24,
+                height: 32,
+            }),
             screen(1920, 1080),
             400,
             700,
         );
 
-        assert_eq!(result, Bounds { x: 1508, y: 332, width: 400, height: 700 });
+        assert_eq!(
+            result,
+            Bounds {
+                x: 1508,
+                y: 332,
+                width: 400,
+                height: 700
+            }
+        );
     }
 
     #[test]
     fn clamps_right_edge() {
         let result = popup_bounds(
-            Some(Bounds { x: 1420, y: 0, width: 24, height: 24 }),
+            Some(Bounds {
+                x: 1420,
+                y: 0,
+                width: 24,
+                height: 24,
+            }),
             screen(1440, 900),
             400,
             700,
@@ -138,8 +169,18 @@ mod tests {
     #[test]
     fn respects_monitor_origin() {
         let result = popup_bounds(
-            Some(Bounds { x: 1400, y: 0, width: 24, height: 24 }),
-            Bounds { x: 1440, y: 0, width: 800, height: 900 },
+            Some(Bounds {
+                x: 1400,
+                y: 0,
+                width: 24,
+                height: 24,
+            }),
+            Bounds {
+                x: 1440,
+                y: 0,
+                width: 800,
+                height: 900,
+            },
             400,
             700,
         );
@@ -156,7 +197,12 @@ mod tests {
     #[test]
     fn shrinks_on_short_screen() {
         let result = popup_bounds(
-            Some(Bounds { x: 100, y: 0, width: 24, height: 24 }),
+            Some(Bounds {
+                x: 100,
+                y: 0,
+                width: 24,
+                height: 24,
+            }),
             screen(800, 500),
             400,
             700,
@@ -172,7 +218,12 @@ mod tests {
         };
         assert_eq!(
             physical_icon_bounds(rect, 2.0),
-            Bounds { x: 200, y: 20, width: 48, height: 40 }
+            Bounds {
+                x: 200,
+                y: 20,
+                width: 48,
+                height: 40
+            }
         );
     }
 }

@@ -5,23 +5,40 @@ import { InvitePanel } from "./components/InvitePanel";
 import { GrowthJournal } from "./components/GrowthJournal";
 import { FormattedNumber } from "./components/FormattedNumber";
 import { LoadingStatus } from "./components/LoadingStatus";
+import { NaturalRemovalDialog } from "./components/NaturalRemovalDialog";
 import { PlanetProfileSetup } from "./components/PlanetProfileSetup";
 import { objectName, objectProgress, PlanetScene, STAGE_NAMES } from "./components/PlanetScene";
 import { initialLandscapeCamera } from "./components/planetLandscapeCamera";
 import { PlanetLandscape, planetLandscapeBounds, type PlanetExplorationState } from "./components/PlanetLandscape";
-import { PlanetCosmeticOrganizer, type PlanetCosmeticOrganizerView } from "./components/PlanetCosmeticOrganizer";
-import { CosmeticThumbnail } from "./components/CosmeticThumbnail";
 import { SharingSetup } from "./components/SharingSetup";
 import { SourceStatus } from "./components/SourceStatus";
 import { SyncStatus } from "./components/SyncStatus";
 import { UsageSummary } from "./components/UsageSummary";
 import { WorldCommunity } from "./components/WorldCommunity";
-import { CosmeticShop } from "./components/CosmeticShop";
+import { ShopPanel, type ShopPanelPreview } from "./components/ShopPanel";
+import { ShopProductThumbnail } from "./components/ShopProductThumbnail";
+import { useShopActions } from "./hooks/useShopActions";
 import { sharing, type SharingState, type WorldMember } from "./lib/sharing";
-import type { Agent, CosmeticEquipAction, CosmeticProduct, CosmeticPurchaseAction, CosmeticShopState, EquippedCosmetic, GrowthJournal as GrowthJournalData, PlanetAvatar, WorldSnapshot } from "./types/usage";
+import type { Agent, GrowthJournal as GrowthJournalData, NaturalObjectKey, PlanetAvatar, ShopActionResult, ShopQuote, ShopRequest, ShopState, WorldSnapshot } from "./types/usage";
 import "./App.css";
 
 type FeatureScreen = "planet" | "cosmetic-shop" | "growth-journal";
+type ActiveNaturalRemoval = {
+  context: string;
+  key: NaturalObjectKey;
+  label: string;
+  generation: number;
+};
+
+type ConfirmedResetViewUnavailable = {
+  kind: "confirmed_reset_view_unavailable";
+  account_id: string;
+  request_id: string;
+  expected_old_cycle_id: string;
+  new_cycle_id: string;
+};
+
+type ResetViewRefreshRequired = ConfirmedResetViewUnavailable & { context: string };
 
 function FeatureToolMenu({
   active,
@@ -33,7 +50,7 @@ function FeatureToolMenu({
   onNavigate: (screen: Exclude<FeatureScreen, "planet">) => void;
 }) {
   return <nav className="feature-tool-menu" aria-label="행성 도구">
-    <button type="button" data-feature-screen-trigger="cosmetic-shop" aria-current={active === "cosmetic-shop" ? "page" : undefined} disabled={disabled} onClick={() => onNavigate("cosmetic-shop")}>행성 꾸미기</button>
+    <button type="button" data-feature-screen-trigger="cosmetic-shop" aria-current={active === "cosmetic-shop" ? "page" : undefined} disabled={disabled} onClick={() => onNavigate("cosmetic-shop")}>행성 상점</button>
     <button type="button" data-feature-screen-trigger="growth-journal" aria-current={active === "growth-journal" ? "page" : undefined} disabled={disabled} onClick={() => onNavigate("growth-journal")}>성장 일지 보기</button>
   </nav>;
 }
@@ -50,29 +67,41 @@ const EMPTY_SNAPSHOT: WorldSnapshot = {
     version: 1, profile: null, timezone: "", current_cycle_id: "", cycle_started_at_utc: "", last_reset_at_utc: null,
     wallet_balance: 0, wallet_credits: [], current_planet_tokens: 0, lifetime_tokens: 0,
     growth_credit: 0, stage: 0, progress_to_next: 0, incomplete: true,
-    can_reset: true, reset_available_at_utc: null, objects: [],
+    can_reset: true, reset_available_at_utc: null, objects: [], removed_natural_keys: [],
   },
 };
 
-const COSMETIC_SHOP_READ_SUPERSEDED = "cosmetic-shop-read-superseded";
-
-type CosmeticShopLoad = {
-  generation: number;
-  pending: Promise<CosmeticShopState> | null;
-};
-
-function isCosmeticShopReadSuperseded(cause: unknown) {
-  return cause instanceof Error && cause.message === COSMETIC_SHOP_READ_SUPERSEDED;
-}
-
 function broadcastDesktopEvent(name: string) {
   return isTauri() ? emit(name, "main").catch(() => {}) : Promise.resolve();
+}
+
+function newShopRequestId(): string {
+  if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `shop-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function sameNaturalKey(left: NaturalObjectKey, right: NaturalObjectKey): boolean {
+  return left.cycle_id === right.cycle_id && left.stage === right.stage && left.ordinal === right.ordinal;
 }
 
 function worldContext(shared: SharingState | null, snapshot: WorldSnapshot | null) {
   return JSON.stringify([shared?.phase ?? null, shared?.user_id ?? null,
     shared?.world?.id ?? null, shared?.world?.is_owner ?? false,
     snapshot?.planet.current_cycle_id ?? null]);
+}
+
+function confirmedResetViewUnavailable(error: unknown): ConfirmedResetViewUnavailable | null {
+  if (!error || typeof error !== "object") return null;
+  const value = error as Record<string, unknown>;
+  if (value.kind !== "confirmed_reset_view_unavailable"
+    || typeof value.account_id !== "string"
+    || typeof value.request_id !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value.request_id)
+    || typeof value.expected_old_cycle_id !== "string"
+    || typeof value.new_cycle_id !== "string"
+    || !value.new_cycle_id
+    || value.new_cycle_id === value.expected_old_cycle_id) return null;
+  return value as ConfirmedResetViewUnavailable;
 }
 
 function App() {
@@ -120,6 +149,8 @@ function App() {
   const [sharingBusy, setSharingBusy] = useState(false);
   const [sharingError, setSharingError] = useState("");
   const [planetBusy, setPlanetBusy] = useState(false);
+  const resetPendingOwnerRef = useRef<{ context: string; epoch: number } | null>(null);
+  const [resetViewRefreshRequired, setResetViewRefreshRequired] = useState<ResetViewRefreshRequired | null>(null);
   const [planetError, setPlanetError] = useState("");
   const [sourceBusy, setSourceBusy] = useState<Agent | null>(null);
   const sourceBusyRef = useRef<Agent | null>(null);
@@ -134,70 +165,69 @@ function App() {
   const journalContextRef = useRef(journalContext);
   journalContextRef.current = journalContext;
   const journalRequestId = useRef(0);
-  const cosmeticShopContext = JSON.stringify([shared?.user_id ?? null, snapshot?.planet.current_cycle_id ?? null]);
-  const cosmeticShopContextRef = useRef(cosmeticShopContext);
-  cosmeticShopContextRef.current = cosmeticShopContext;
-  const cosmeticShopLoads = useRef(new Map<string, CosmeticShopLoad>());
-  const [cosmeticShopEntry, setCosmeticShopEntry] = useState<{ context: string; state: CosmeticShopState } | null>(null);
-  const cosmeticShop = cosmeticShopEntry?.context === cosmeticShopContext ? cosmeticShopEntry.state : null;
-  const [cosmeticPreview, setCosmeticPreview] = useState<EquippedCosmetic[] | null>(null);
-  const [cosmeticPreviewResetRevision, setCosmeticPreviewResetRevision] = useState(0);
-  const [cosmeticPreviewSelection, setCosmeticPreviewSelection] = useState<{ context: string; product: CosmeticProduct } | null>(null);
-  const [selectedCosmeticEntry, setSelectedCosmeticEntry] = useState<{ context: string; sku: string } | null>(null);
-  const [cosmeticOrganizerEntry, setCosmeticOrganizerEntry] = useState<{ context: string; view: PlanetCosmeticOrganizerView } | null>(null);
-  const [shopFocusEntry, setShopFocusEntry] = useState<{ context: string; sku: string } | null>(null);
-  const [cosmeticShopError, setCosmeticShopError] = useState("");
-  const [cosmeticActionError, setCosmeticActionError] = useState<{ context: string; message: string } | null>(null);
-  const cosmeticActionErrorMessage = cosmeticActionError?.context === cosmeticShopContext ? cosmeticActionError.message : "";
-  const [cosmeticShopLoadingContext, setCosmeticShopLoadingContext] = useState<string | null>(null);
   const featureActionsBlocked = sharedLoading || sharedContextLockedRef.current;
-  const selectedCosmeticSku = selectedCosmeticEntry?.context === cosmeticShopContext ? selectedCosmeticEntry.sku : null;
-  const cosmeticOrganizerView = cosmeticOrganizerEntry?.context === cosmeticShopContext
-    ? cosmeticOrganizerEntry.view
-    : { open: false, category: "all", query: "" };
-  const shopFocusSku = shopFocusEntry?.context === cosmeticShopContext ? shopFocusEntry.sku : null;
+  const shopAccount = shared?.phase === "signed_out" && shared.user_id === null
+    ? { account_id: "local", is_guest: true }
+    : (shared && (shared.phase === "signed_in" || shared.phase === "shared") && shared.user_id
+      ? { account_id: `account:${shared.user_id}`, is_guest: false }
+      : null);
+  const shopIdentity = shopAccount && snapshot?.planet.current_cycle_id
+    ? JSON.stringify([shopAccount.account_id, snapshot.planet.current_cycle_id])
+    : "unverified-shop-context";
+  const shopActionsAvailable = Boolean(shopAccount && snapshot?.planet.current_cycle_id)
+    && !featureActionsBlocked && shared?.sync_status !== "paused";
+  const shopActions = useShopActions({
+    account_id: shopAccount?.account_id ?? "",
+    current_cycle_id: snapshot?.planet.current_cycle_id ?? "",
+    is_guest: shopAccount?.is_guest ?? false,
+    online: typeof navigator !== "undefined" && navigator.onLine,
+    actions_available: shopActionsAvailable,
+    unavailable_reason: featureActionsBlocked
+      ? "계정과 행성 상태를 확인하고 있습니다."
+      : shared?.sync_status === "paused"
+        ? "동기화가 일시 정지되어 상점 작업을 사용할 수 없습니다."
+        : !shopAccount
+          ? "확인된 계정에서만 상점을 사용할 수 있습니다."
+          : null,
+  });
+  const shopRefreshRef = useRef(shopActions.refresh);
+  shopRefreshRef.current = shopActions.refresh;
+  const shopContextRef = useRef(shopIdentity);
+  shopContextRef.current = shopIdentity;
+  const [shopPreview, setShopPreview] = useState<ShopPanelPreview | null>(null);
+  const [naturalRemoval, setNaturalRemoval] = useState<ActiveNaturalRemoval | null>(null);
+  const [naturalRemovalQuote, setNaturalRemovalQuote] = useState<ShopQuote | null>(null);
+  const [naturalRemovalError, setNaturalRemovalError] = useState<string | null>(null);
+  const naturalRemovalGeneration = useRef(0);
+  const naturalRemovalSubmitting = useRef(false);
+  const [selectedLandscapeEntry, setSelectedLandscapeEntry] = useState<{ context: string; instanceId: string } | null>(null);
+  const selectedLandscapeInstanceId = selectedLandscapeEntry?.context === shopIdentity ? selectedLandscapeEntry.instanceId : null;
 
-  function cosmeticShopLoad(context: string) {
-    let load = cosmeticShopLoads.current.get(context);
-    if (!load) {
-      load = { generation: 0, pending: null };
-      cosmeticShopLoads.current.set(context, load);
-    }
-    return load;
-  }
-
-  function storeCosmeticShop(context: string, shop: CosmeticShopState, generation?: number) {
-    const load = cosmeticShopLoad(context);
-    if (!sharedContextLockedRef.current && cosmeticShopContextRef.current === context && (generation === undefined || load.generation === generation)) {
-      setCosmeticShopEntry({ context, state: shop });
-    }
-  }
-
-  function invalidateCosmeticShopReads(context: string) {
-    const load = cosmeticShopLoad(context);
-    load.generation += 1;
-    load.pending = null;
-    if (cosmeticShopContextRef.current === context) {
-      setCosmeticShopLoadingContext((current) => current === context ? null : current);
-    }
-    return load.generation;
-  }
+  useEffect(() => {
+    if (!shopActionsAvailable) return;
+    setShopPreview(null);
+    setSelectedLandscapeEntry((current) => current?.context === shopIdentity ? current : null);
+    void shopActions.refresh();
+  }, [shopIdentity, shopActionsAvailable]);
 
   function lockWorldContext() {
     worldTransitionEpoch.current += 1;
     sharedContextLockedRef.current = true;
+    naturalRemovalGeneration.current += 1;
+    naturalRemovalSubmitting.current = false;
+    setNaturalRemoval(null);
+    setNaturalRemovalQuote(null);
+    setNaturalRemovalError(null);
+    if (resetPendingOwnerRef.current) {
+      resetPendingOwnerRef.current = null;
+      setPlanetBusy(false);
+      setPlanetError("");
+    }
     sharedRequestId.current += 1;
     setSharedLoading(true);
-    setCosmeticShopEntry(null);
-    setCosmeticPreview(null);
-    setCosmeticPreviewSelection(null);
-    setSelectedCosmeticEntry(null);
-    setCosmeticOrganizerEntry(null);
-    setShopFocusEntry(null);
+    setShopPreview(null);
+    setSelectedLandscapeEntry(null);
     setPlanetExplorationEntry(null);
-    setCosmeticShopError("");
-    setCosmeticActionError(null);
-    invalidateCosmeticShopReads(cosmeticShopContextRef.current);
     journalRequestId.current += 1;
     setJournal(null);
     setJournalOwner("");
@@ -210,43 +240,10 @@ function App() {
     worldContextRef.current = worldContext(nextShared, nextSnapshot);
     sharedContextLockedRef.current = false;
     journalContextRef.current = nextUserId ?? "local";
-    cosmeticShopContextRef.current = JSON.stringify([nextUserId, nextSnapshot?.planet.current_cycle_id ?? null]);
     setShared(nextShared);
     setSnapshot(nextSnapshot);
     setSharedLoading(false);
     return true;
-  }
-
-  function loadCosmeticShop(context: string): Promise<CosmeticShopState> {
-    if (sharedContextLockedRef.current) return Promise.reject(new Error(COSMETIC_SHOP_READ_SUPERSEDED));
-    const load = cosmeticShopLoad(context);
-    if (cosmeticShopContextRef.current === context) {
-      setCosmeticShopLoadingContext(context);
-      setCosmeticShopError("");
-    }
-    if (load.pending) return load.pending;
-
-    const generation = load.generation;
-    let pending: Promise<CosmeticShopState>;
-    pending = invoke<CosmeticShopState>("get_shop_state")
-      .then((value) => {
-        if (sharedContextLockedRef.current || load.generation !== generation || cosmeticShopContextRef.current !== context) {
-          throw new Error(COSMETIC_SHOP_READ_SUPERSEDED);
-        }
-        storeCosmeticShop(context, value, generation);
-        if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
-        return value;
-      })
-      .finally(() => {
-        if (load.pending === pending) {
-          load.pending = null;
-          if (load.generation === generation && cosmeticShopContextRef.current === context) {
-            setCosmeticShopLoadingContext((current) => current === context ? null : current);
-          }
-        }
-      });
-    load.pending = pending;
-    return pending;
   }
 
   useEffect(() => {
@@ -283,7 +280,7 @@ function App() {
         if (sharingActionErrorRef.current) sharingActionErrorRef.current = false;
         else setSharingError("");
         setError(false);
-        if (!invalidate) void loadCosmeticShop(cosmeticShopContextRef.current).catch(() => {});
+
         if (!invalidate && contextChanged && featureScreenRef.current === "growth-journal") void loadGrowthJournal();
       } else if (invalidate || sharedContextLockedRef.current) {
         sharedContextLockedRef.current = true;
@@ -303,7 +300,7 @@ function App() {
         featureScreenRef.current = "planet";
         featureScreenEpoch.current += 1;
         setFeatureScreen("planet");
-        setCosmeticPreview(null);
+        setShopPreview(null);
       }
     }).catch(() => () => {});
     const unlistenWorldState = listen("world-state-updated", () => {
@@ -314,17 +311,17 @@ function App() {
     }).catch(() => () => {});
     const unlistenCosmeticShop = listen("cosmetic-shop-updated", () => {
       if (!active || sharedContextLockedRef.current) return;
-      setCosmeticPreview(null);
-      const context = cosmeticShopContextRef.current;
-      invalidateCosmeticShopReads(context);
-      void loadCosmeticShop(context).catch((cause) => {
-        if (active && cosmeticShopContextRef.current === context && !isCosmeticShopReadSuperseded(cause)) {
-          setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
-        }
-      });
+      setShopPreview(null);
+      void shopRefreshRef.current();
     }).catch(() => () => {});
     const unlistenSync = listen("sync-status-updated", () => {
-      if (active && !sharedContextLockedRef.current) void refreshSharedContext(false);
+      if (!active || sharedContextLockedRef.current) return;
+      const capturedContext = worldContextRef.current;
+      void refreshSharedContext(false).finally(() => {
+        if (active && !sharedContextLockedRef.current && worldContextRef.current === capturedContext) {
+          void shopRefreshRef.current();
+        }
+      });
     }).catch(() => () => {});
     void Promise.all([unlisten, unlistenScanFailed]).then(() => {
       if (active) void refreshSharedContext();
@@ -394,39 +391,6 @@ function App() {
     }
     return () => { active = false; };
   }, [sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner, sharedMemberCount, memberRefreshRevision]);
-
-  useEffect(() => {
-    if (sharedContextLockedRef.current) return;
-    const context = cosmeticShopContext;
-    let active = true;
-    setCosmeticShopEntry(null);
-    setCosmeticPreview(null);
-    setCosmeticPreviewSelection(null);
-    setSelectedCosmeticEntry(null);
-    setCosmeticOrganizerEntry({ context, view: { open: false, category: "all", query: "" } });
-    setShopFocusEntry(null);
-    setCosmeticShopError("");
-    setCosmeticActionError((current) => current?.context === context ? current : null);
-    void loadCosmeticShop(context).catch((cause) => {
-      if (active && cosmeticShopContextRef.current === context && !isCosmeticShopReadSuperseded(cause)) {
-        setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
-      }
-    });
-    return () => { active = false; };
-  }, [cosmeticShopContext, sharedLoading]);
-
-  useEffect(() => {
-    if (featureScreen !== "cosmetic-shop" || sharedLoading || sharedContextLockedRef.current) return;
-    const context = cosmeticShopContext;
-    let active = true;
-    void loadCosmeticShop(context).catch((cause) => {
-      if (active && cosmeticShopContextRef.current === context && !isCosmeticShopReadSuperseded(cause)) {
-        setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
-      }
-    });
-    return () => { active = false; };
-  }, [featureScreen, cosmeticShopContext, sharedLoading]);
-
 
   async function changeSharing(action: () => Promise<SharingState>) {
     lockWorldContext();
@@ -502,16 +466,64 @@ function App() {
   }
 
   async function resetPlanet() {
-    if (sourceBusyRef.current !== null || refreshing || planetBusy) return;
+    const resetAccountId = shopAccount?.account_id ?? null;
+    const resetUserId = shopAccount && !shopAccount.is_guest ? shared?.user_id ?? null : null;
+    const resetCycleId = snapshot?.planet.current_cycle_id ?? null;
+    const resetContext = shopContextRef.current;
+    const resetWorldContext = worldContextRef.current;
+    const resetEpoch = worldTransitionEpoch.current;
+    const resetOwner = { context: resetContext, epoch: resetEpoch };
+    const isSignedResetEligible = Boolean(!shopAccount?.is_guest
+      && resetUserId
+      && currentShopState
+      && currentShopState.account_id === resetAccountId
+      && currentShopState.current_cycle_id === resetCycleId
+      && !currentShopState.guest_import_pending
+      && shopActions.canAct
+      && !shopActions.pending
+      && shopActionsAvailable
+      && planet.can_reset);
+    const isGuestResetEligible = shopAccount?.is_guest === true && canReset;
+    const resetContextIsCurrent = () => resetAccountId !== null
+      && resetCycleId !== null
+      && shopActionsAvailable
+      && !sharedContextLockedRef.current
+      && shopContextRef.current === resetContext
+      && worldContextRef.current === resetWorldContext
+      && worldTransitionEpoch.current === resetEpoch;
+    const thisResetIsCurrent = () => resetPendingOwnerRef.current === resetOwner && resetContextIsCurrent();
+    if ((!isGuestResetEligible && !isSignedResetEligible)
+      || !resetContextIsCurrent()
+      || resetViewRefreshRequired?.context === resetContext
+      || resetPendingOwnerRef.current !== null
+      || sourceBusyRef.current !== null || refreshing || planetBusy) return;
     if (!window.confirm("현재 행성을 초기화할까요? 확인된 이번 행성 토큰은 지갑에 적립되고, 자연 생태계부터 다시 시작합니다.")) return;
+    if ((!isGuestResetEligible && !isSignedResetEligible) || !resetContextIsCurrent()) return;
+    resetPendingOwnerRef.current = resetOwner;
     setPlanetBusy(true);
     setPlanetError("");
     try {
-      setSnapshot(await invoke<WorldSnapshot>("reset_planet"));
+      const updated = await invoke<WorldSnapshot>("reset_planet");
+      if (!thisResetIsCurrent()) return;
+      setSnapshot(updated);
       broadcastDesktopEvent("world-state-updated");
     }
-    catch (cause) { setPlanetError(typeof cause === "string" ? cause : "행성을 초기화하지 못했습니다."); }
-    finally { setPlanetBusy(false); }
+    catch (cause) {
+      if (!thisResetIsCurrent()) return;
+      const confirmed = confirmedResetViewUnavailable(cause);
+      if (confirmed && resetUserId === confirmed.account_id && resetCycleId === confirmed.expected_old_cycle_id) {
+        setResetViewRefreshRequired({ ...confirmed, context: resetContext });
+        setPlanetError("");
+      } else {
+        setPlanetError(typeof cause === "string" ? cause : "행성을 초기화하지 못했습니다.");
+      }
+    }
+    finally {
+      if (resetPendingOwnerRef.current === resetOwner) {
+        resetPendingOwnerRef.current = null;
+        setPlanetBusy(false);
+      }
+    }
   }
 
   async function runSourceAction(agent: Agent, fallback: string, action: () => Promise<WorldSnapshot | null>) {
@@ -544,117 +556,20 @@ function App() {
       invoke<WorldSnapshot | null>("choose_source_folder", { agent }));
   }
 
-  function clearCosmeticActionError(context: string) {
-    setCosmeticActionError((current) => current?.context === context ? null : current);
+  async function applyShopAction(request: ShopRequest): Promise<ShopActionResult | null> {
+    if (sharedContextLockedRef.current || shopContextRef.current !== shopIdentity || !shopActionsAvailable) return null;
+    return shopActions.apply(request);
   }
 
-  function recordCosmeticActionError(context: string, epoch: number, screenEpoch: number, cause: unknown, fallback: string) {
-    if (sharedContextLockedRef.current || epoch !== worldTransitionEpoch.current
-      || context !== cosmeticShopContextRef.current || screenEpoch === featureScreenEpoch.current) return;
-    setCosmeticActionError({ context, message: typeof cause === "string" ? cause : fallback });
-  }
-
-  async function purchaseCosmetic(sku: string): Promise<CosmeticPurchaseAction> {
-    const context = cosmeticShopContext;
-    const epoch = worldTransitionEpoch.current;
-    const screenEpoch = featureScreenEpoch.current;
-    if (sharedContextLockedRef.current || context !== cosmeticShopContextRef.current) {
-      throw "계정 또는 행성 상태를 확인하는 동안에는 구매할 수 없습니다.";
-    }
-    clearCosmeticActionError(context);
-    let action: CosmeticPurchaseAction;
-    try {
-      action = await invoke<CosmeticPurchaseAction>("purchase_cosmetic", { sku });
-    } catch (cause) {
-      recordCosmeticActionError(context, epoch, screenEpoch, cause, "구매 결과를 확인할 수 없습니다. 상점 상태를 다시 확인하세요.");
-      throw cause;
-    }
-    if (sharedContextLockedRef.current || epoch !== worldTransitionEpoch.current || context !== cosmeticShopContextRef.current) {
-      throw "계정 또는 행성 상태가 바뀌었습니다. 상점 상태를 다시 확인하세요.";
-    }
-    const generation = invalidateCosmeticShopReads(context);
-    storeCosmeticShop(context, action.state, generation);
-    if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
-    broadcastDesktopEvent("cosmetic-shop-updated");
-    return action;
-  }
-
-  async function equipCosmetic(
-    slotId: string,
-    sku: string | null,
-    cycleId: string,
-    expectedVersion: number,
-  ): Promise<CosmeticEquipAction> {
-    const context = cosmeticShopContext;
-    const epoch = worldTransitionEpoch.current;
-    const screenEpoch = featureScreenEpoch.current;
-    if (sharedContextLockedRef.current || context !== cosmeticShopContextRef.current) {
-      throw "계정 또는 행성 상태를 확인하는 동안에는 장착을 변경할 수 없습니다.";
-    }
-    clearCosmeticActionError(context);
-    let action: CosmeticEquipAction;
-    try {
-      action = await invoke<CosmeticEquipAction>("equip_cosmetic", { slotId, sku, cycleId, expectedVersion });
-    } catch (cause) {
-      recordCosmeticActionError(context, epoch, screenEpoch, cause, "장착을 변경하지 못했습니다. 상점 상태를 다시 확인하세요.");
-      throw cause;
-    }
-    if (sharedContextLockedRef.current || epoch !== worldTransitionEpoch.current || context !== cosmeticShopContextRef.current) {
-      throw "계정 또는 행성 상태가 바뀌었습니다. 상점 상태를 다시 확인하세요.";
-    }
-    const generation = invalidateCosmeticShopReads(context);
-    storeCosmeticShop(context, action.state, generation);
-    if (cosmeticShopContextRef.current === context) setCosmeticShopError("");
-    broadcastDesktopEvent("cosmetic-shop-updated");
-    return action;
-  }
-
-  async function retryLoadCosmeticShop() {
-    if (sharedContextLockedRef.current) return;
-    const context = cosmeticShopContext;
-    setCosmeticShopError("");
-    try { await loadCosmeticShop(context); }
-    catch (cause) {
-      if (cosmeticShopContextRef.current === context && !isCosmeticShopReadSuperseded(cause)) {
-        setCosmeticShopError(typeof cause === "string" ? cause : "상점 상태를 불러오지 못했습니다.");
-      }
-    }
-  }
-
-  async function refreshCosmeticShop() {
-    if (sharedContextLockedRef.current) throw new Error(COSMETIC_SHOP_READ_SUPERSEDED);
-    const context = cosmeticShopContext;
-    return loadCosmeticShop(context);
-  }
-
-  function updateCosmeticPreview(
-    preview: EquippedCosmetic[] | null,
-    context: string,
-    epoch: number,
-    screenEpoch: number,
-  ) {
+  function updateShopPreview(preview: ShopPanelPreview | null) {
     if (sharedContextLockedRef.current || featureScreenRef.current !== "cosmetic-shop"
-      || worldTransitionEpoch.current !== epoch || cosmeticShopContextRef.current !== context
-      || featureScreenEpoch.current !== screenEpoch) return;
-    setCosmeticPreview(preview);
+      || shopContextRef.current !== shopIdentity) return;
+    setShopPreview(preview);
   }
 
-  function updateCosmeticPreviewSelection(
-    product: CosmeticProduct | null,
-    context: string,
-    epoch: number,
-    screenEpoch: number,
-  ) {
-    if (sharedContextLockedRef.current || featureScreenRef.current !== "cosmetic-shop"
-      || worldTransitionEpoch.current !== epoch || cosmeticShopContextRef.current !== context
-      || featureScreenEpoch.current !== screenEpoch) return;
-    setCosmeticPreviewSelection(product ? { context, product } : null);
-  }
-
-  function launchFeatureScreen(feature: Exclude<FeatureScreen, "planet">, focusSku?: string) {
+  function launchFeatureScreen(feature: Exclude<FeatureScreen, "planet">) {
     if (sharedContextLockedRef.current) return;
     if (featureScreenRef.current === feature) return;
-    setShopFocusEntry(feature === "cosmetic-shop" && focusSku ? { context: cosmeticShopContext, sku: focusSku } : null);
     featureReturnFocusRef.current = feature;
     featureScreenRef.current = feature;
     featureScreenEpoch.current += 1;
@@ -662,9 +577,7 @@ function App() {
   }
 
   function returnToPlanetDetail() {
-    setCosmeticPreview(null);
-    setCosmeticPreviewSelection(null);
-    setShopFocusEntry(null);
+    setShopPreview(null);
     setDetail(true);
     setDetailTab("planet");
     featureScreenRef.current = "planet";
@@ -686,7 +599,7 @@ function App() {
   }
 
   function selectDetailTab(tab: "planet" | "group") {
-    if (tab === "group") setCosmeticPreview(null);
+    if (tab === "group") setShopPreview(null);
     setDetailTab(tab);
   }
 
@@ -773,17 +686,84 @@ function App() {
       || capturedExplorationContext !== worldContextRef.current) return;
     setPlanetExplorationEntry({ context: capturedExplorationContext, value });
   };
-  const capturedPreviewContext = cosmeticShopContext;
-  const capturedPreviewEpoch = worldTransitionEpoch.current;
-  const capturedPreviewScreenEpoch = featureScreenEpoch.current;
+  const currentShopState: ShopState | null = shopAccount && shopActions.state?.account_id === shopAccount.account_id
+    && shopActions.state.current_cycle_id === planet.current_cycle_id
+    ? shopActions.state
+    : null;
   const canReset = planet.can_reset || Boolean(planet.reset_available_at_utc && resetCheckAt >= Date.parse(planet.reset_available_at_utc));
+  const activeResetViewRefresh = resetViewRefreshRequired?.context === shopIdentity ? resetViewRefreshRequired : null;
+  const signedResetAvailable = Boolean(shopAccount && !shopAccount.is_guest
+    && currentShopState
+    && currentShopState.account_id === shopAccount.account_id
+    && currentShopState.current_cycle_id === planet.current_cycle_id
+    && !currentShopState.guest_import_pending
+    && shopActions.canAct
+    && !shopActions.pending
+    && shopActionsAvailable
+    && planet.can_reset);
+  const resetAvailable = shopAccount?.is_guest ? canReset : signedResetAvailable;
+  const resetAccessMessage = !shopAccount
+    ? "계정 상태 확인 중이므로 초기화할 수 없습니다."
+    : activeResetViewRefresh
+      ? "서버에서 행성 초기화가 완료되었습니다. 새 행성 상태를 불러와 주세요."
+      : shopAccount.is_guest
+        ? null
+        : !shopActionsAvailable
+          ? shopActions.unavailableReason ?? "로그인 행성 상점 작업을 사용할 수 없습니다."
+        : !currentShopState
+          ? "로그인 행성 상점 상태를 확인하고 있습니다."
+          : !shopActions.canAct
+            ? shopActions.unavailableReason ?? "로그인 행성 상점 작업을 사용할 수 없습니다."
+            : !planet.can_reset
+              ? "서버에서 초기화 대기 시간이 끝나지 않은 것으로 확인했습니다."
+              : null;
   const nextObjectProgress = objectProgress(planet.growth_credit, planet.stage);
-  const confirmedCosmetics = cosmeticShop?.current_cycle_id === planet.current_cycle_id
-    ? cosmeticShop.equipped
-    : [];
-  const sceneCosmetics = cosmeticPreview ?? confirmedCosmetics;
-  const previewProduct = cosmeticPreviewSelection?.context === cosmeticShopContext ? cosmeticPreviewSelection.product : null;
-  const availableWalletBalance = cosmeticShop?.available_balance ?? planet.wallet_balance;
+  const availableWalletBalance = currentShopState?.available_balance ?? planet.wallet_balance;
+  const removedNaturalIds = new Set([
+    ...(planet.removed_natural_keys ?? []),
+    ...(currentShopState?.removed_natural_keys ?? []),
+  ].map(({ stage, ordinal }) => `${stage}:${ordinal}`));
+  const visiblePlanetObjects = planet.objects.filter((object) => !removedNaturalIds.has(`${object.stage}:${object.ordinal}`));
+  const activeNaturalRemoval = naturalRemoval
+    && naturalRemoval.context === shopIdentity
+    && featureScreen === "planet"
+    && detail
+    && detailTab === "planet"
+    && !sharedContextLockedRef.current
+    ? naturalRemoval
+    : null;
+  const activeNaturalRemovalPending = activeNaturalRemoval && shopActions.pending?.request.kind === "remove_natural"
+    && sameNaturalKey(shopActions.pending.request.key, activeNaturalRemoval.key)
+    ? shopActions.pending
+    : null;
+  const activeNaturalRemovalError = activeNaturalRemovalPending?.status === "uncertain"
+    ? `${activeNaturalRemovalPending.error ?? "요청 결과를 확인하지 못했습니다."} 제거 확인을 누르면 같은 요청 ID로 다시 확인합니다.`
+    : naturalRemovalError;
+  const canRequestNaturalRemoval = Boolean(shopAccount && currentShopState
+    && currentShopState.account_id === shopAccount.account_id
+    && currentShopState.current_cycle_id === planet.current_cycle_id
+    && shopActions.canAct
+    && shopActionsAvailable
+    && (!shopActions.pending || (
+      shopActions.pending.status === "uncertain"
+      && shopActions.pending.request.kind === "remove_natural"
+    ))
+    && featureScreen === "planet"
+    && detail
+    && detailTab === "planet");
+  const canRequestNaturalRemovalForKey = (key: NaturalObjectKey) => {
+    const pending = shopActions.pending;
+    return !pending || (pending.status === "uncertain"
+      && pending.request.kind === "remove_natural"
+      && sameNaturalKey(pending.request.key, key));
+  };
+  useEffect(() => {
+    naturalRemovalGeneration.current += 1;
+    naturalRemovalSubmitting.current = false;
+    setNaturalRemoval(null);
+    setNaturalRemovalQuote(null);
+    setNaturalRemovalError(null);
+  }, [shopIdentity, featureScreen, detail, detailTab]);
   useEffect(() => {
     if (planet.can_reset || !planet.reset_available_at_utc) return;
     const wait = Math.max(0, Date.parse(planet.reset_available_at_utc) - Date.now()) + 25;
@@ -800,6 +780,113 @@ function App() {
       void invoke("set_detail_view", { detail: true }).catch(() => {});
     }
   }, []);
+
+  function requestNaturalRemoval(key: NaturalObjectKey, label: string) {
+    const context = shopContextRef.current;
+    if (!canRequestNaturalRemoval || !currentShopState || sharedContextLockedRef.current
+      || context !== shopIdentity || key.cycle_id !== planet.current_cycle_id
+      || !visiblePlanetObjects.some((object) => object.stage === key.stage && object.ordinal === key.ordinal)) return;
+
+    naturalRemovalGeneration.current += 1;
+    const generation = naturalRemovalGeneration.current;
+    setNaturalRemoval({ context, key, label, generation });
+    const pending = shopActions.pending;
+    if (pending) {
+      if (pending.status !== "uncertain" || pending.request.kind !== "remove_natural"
+        || !sameNaturalKey(pending.request.key, key)) return;
+      setNaturalRemovalQuote(pending.request.quote);
+      setNaturalRemovalError("요청 결과를 확인하지 못했습니다. 제거 확인을 누르면 같은 요청 ID로 다시 확인합니다.");
+      return;
+    }
+
+    setNaturalRemovalQuote(null);
+    setNaturalRemovalError(null);
+    void shopActions.quote({ kind: "remove_natural", key }).then((quote) => {
+      if (generation !== naturalRemovalGeneration.current || shopContextRef.current !== context
+        || sharedContextLockedRef.current || !quote || quote.target.kind !== "remove_natural"
+        || !sameNaturalKey(quote.target.key, key)) return;
+      setNaturalRemovalQuote(quote);
+    }).catch((cause: unknown) => {
+      if (generation !== naturalRemovalGeneration.current || shopContextRef.current !== context
+        || sharedContextLockedRef.current) return;
+      setNaturalRemovalError(cause instanceof Error ? cause.message : "제거 견적을 확인하지 못했습니다.");
+    });
+  }
+
+  function closeNaturalRemoval() {
+    naturalRemovalGeneration.current += 1;
+    naturalRemovalSubmitting.current = false;
+    setNaturalRemoval(null);
+    setNaturalRemovalQuote(null);
+    setNaturalRemovalError(null);
+  }
+
+  async function confirmNaturalRemoval() {
+    const target = activeNaturalRemoval;
+    const context = target?.context;
+    const pending = shopActions.pending;
+    const matchingPending = Boolean(target && pending?.request.kind === "remove_natural"
+      && sameNaturalKey(pending.request.key, target.key));
+    if (!target || !context || !currentShopState || !canRequestNaturalRemoval
+      || naturalRemovalSubmitting.current || sharedContextLockedRef.current
+      || context !== shopContextRef.current || context !== shopIdentity
+      || target.key.cycle_id !== planet.current_cycle_id
+      || (pending && (!matchingPending || pending.status !== "uncertain"))) return;
+
+    const quote = naturalRemovalQuote;
+    if (!pending && (!quote || quote.target.kind !== "remove_natural"
+      || !sameNaturalKey(quote.target.key, target.key))) return;
+
+    const generation = target.generation;
+    naturalRemovalSubmitting.current = true;
+    try {
+      let result: ShopActionResult | null;
+      if (pending?.status === "uncertain" && matchingPending) {
+        result = await shopActions.retryPending();
+      } else {
+        const request: ShopRequest = {
+          kind: "remove_natural",
+          request_id: newShopRequestId(),
+          key: target.key,
+          expected_version: 0,
+          quote: quote!,
+        };
+        result = await applyShopAction(request);
+      }
+
+      if (!result || generation !== naturalRemovalGeneration.current
+        || shopContextRef.current !== context || sharedContextLockedRef.current) return;
+      if (result.status === "quote_changed") {
+        const confirmedQuote = result.confirmed_quote;
+        if (confirmedQuote?.target.kind === "remove_natural"
+          && sameNaturalKey(confirmedQuote.target.key, target.key)) {
+          setNaturalRemovalQuote(confirmedQuote);
+          setNaturalRemovalError("제거 비용이 변경되었습니다. 새 금액을 확인한 뒤 다시 눌러 주세요.");
+        } else {
+          setNaturalRemovalQuote(null);
+          setNaturalRemovalError("새 제거 비용을 확인하지 못했습니다. 다시 견적을 확인해 주세요.");
+        }
+        return;
+      }
+      if (result.status === "removed" || result.status === "already_removed") {
+        closeNaturalRemoval();
+        return;
+      }
+      setNaturalRemovalError(result.status === "insufficient_balance"
+        ? "잔액이 부족해 자연물을 제거하지 못했습니다."
+        : "자연물을 제거하지 못했습니다. 상태를 확인한 뒤 다시 시도해 주세요.");
+    } catch (cause) {
+      if (generation === naturalRemovalGeneration.current
+        && shopContextRef.current === context && !sharedContextLockedRef.current) {
+        setNaturalRemovalError(cause instanceof Error
+          ? cause.message
+          : "요청 결과를 확인하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.");
+      }
+    } finally {
+      if (generation === naturalRemovalGeneration.current) naturalRemovalSubmitting.current = false;
+    }
+  }
+
   useEffect(() => {
     if (featureScreen !== "planet") {
       featureScreenHeadingRef.current?.focus();
@@ -835,64 +922,69 @@ function App() {
   );
 
   if (featureScreen === "cosmetic-shop") {
+    const activeShopState = shopAccount && shopActions.state?.account_id === shopAccount.account_id
+      && shopActions.state.current_cycle_id === planet.current_cycle_id
+      ? shopActions.state
+      : null;
+    const previewProduct = shopPreview?.product ?? null;
+    const previewEquipment = shopPreview?.kind === "avatar"
+      ? shopPreview.equipment
+      : activeShopState?.avatar_equipment;
     return (
       <main className="app-shell app-shell--feature-screen">
         <header className="topbar feature-screen-topbar">
           <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>Token Planet</span></div>
           <FeatureToolMenu active={featureScreen} disabled={featureActionsBlocked} onNavigate={launchFeatureScreen} />
-          <h1 ref={featureScreenHeadingRef} className="feature-screen-title" tabIndex={-1}>행성 꾸미기</h1>
-          <button className="icon-button" type="button" onClick={refresh} disabled={refreshing || sourceBusy !== null || planetBusy} aria-busy={refreshing || undefined} aria-label={refreshing ? "사용량을 갱신하는 중" : "사용량 새로고침"} title="사용량 새로고침">↻</button>
+          <h1 ref={featureScreenHeadingRef} className="feature-screen-title" tabIndex={-1}>행성 상점</h1>
+          <button className="icon-button" type="button" onClick={() => void shopActions.refresh()} disabled={!shopAccount || featureActionsBlocked} aria-label="상점 상태 새로고침" title="상점 상태 새로고침">↻</button>
         </header>
         <div className="feature-screen-secondary-nav"><button type="button" className="feature-screen-back" onClick={returnToPlanetDetail}>← 행성으로 돌아가기</button></div>
         <div className="feature-window-content shop-window-content">
           <section className="shop-planet-preview" aria-label="행성 미리보기">
-            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} highlightedCosmeticSku={previewProduct?.sku ?? null} animate incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
+            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={[]} avatarEquipment={previewEquipment} animate incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
             <div className="shop-planet-preview-copy">
               <h2>{profile!.nickname}의 행성</h2>
-              <p>{previewProduct ? `${previewProduct.display_name} 미리보기 중` : "장식 미리보기를 눌러 행성 모습을 확인하세요."}</p>
+              <p>{previewProduct ? `${previewProduct.display_name} 미리보기 중` : "상품을 선택해 행성이나 아바타 모습을 미리 보세요."}</p>
               <strong>{STAGE_NAMES[planet.stage] ?? STAGE_NAMES[4]}</strong>
+              <p className="shop-reward-timezone">보상 기준 시간대 · {activeShopState?.reward_state.reward_timezone ?? "확인 중"}</p>
               {previewProduct && <div className="shop-selected-preview" aria-live="polite">
-                <CosmeticThumbnail sku={previewProduct.sku} slotId={previewProduct.slot_id} className="shop-selected-preview-art" />
-                <div><span>현재 미리보기</span><b>{previewProduct.display_name}</b><small>구매나 장착을 눌러야 행성에 저장됩니다.</small></div>
-                <button type="button" onClick={() => {
-                  setCosmeticPreviewResetRevision((revision) => revision + 1);
-                  updateCosmeticPreview(null, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch);
-                  updateCosmeticPreviewSelection(null, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch);
-                }}>원래 모습</button>
+                <ShopProductThumbnail
+                  product={previewProduct}
+                  instance={shopPreview?.kind === "landscape" ? shopPreview.instance : undefined}
+                  avatar={profile!.avatar}
+                  equipment={previewEquipment}
+                  className="shop-selected-preview-art"
+                />
+                <div><span>현재 미리보기</span><b>{previewProduct.display_name}</b><small>{shopPreview?.kind === "avatar" ? "확정된 상점 응답을 받으면 행성 아바타에 적용됩니다." : "구매 후 풍경에서 위치를 정하고 설치할 수 있습니다."}</small></div>
+                <button type="button" onClick={() => setShopPreview(null)}>미리보기 해제</button>
               </div>}
             </div>
           </section>
-          <section className="shop-window-store" aria-label="행성 꾸미기 상점">
-            {cosmeticShop && <CosmeticShop
-              key={cosmeticShopContext}
-              state={cosmeticShop}
-              onPurchase={purchaseCosmetic}
-              onEquip={equipCosmetic}
-              onPreviewChange={(preview) => updateCosmeticPreview(
-                preview, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch,
-              )}
-              onPreviewSelectionChange={(product) => updateCosmeticPreviewSelection(
-                product, capturedPreviewContext, capturedPreviewEpoch, capturedPreviewScreenEpoch,
-              )}
-              onRefresh={refreshCosmeticShop}
-              actionsDisabled={featureActionsBlocked}
-              showCollapseButton={false}
-              initialTab={shopFocusSku ? "inventory" : "shop"}
-              initialFocusSku={shopFocusSku}
-              previewResetRevision={cosmeticPreviewResetRevision}
-              initiallyOpen
+          <section className="shop-window-store">
+            {featureActionsBlocked && <LoadingStatus className="cosmetic-load-state" label="계정과 행성 상태를 확인하고 있습니다." />}
+            {!featureActionsBlocked && !shopAccount && <p className="error-note" role="status">확인된 계정 상태에서 상점을 불러올 수 있습니다.</p>}
+            {!featureActionsBlocked && shopAccount && !activeShopState && !shopActions.error && <LoadingStatus className="cosmetic-load-state" label="상점을 불러오고 있습니다." />}
+            {activeShopState && <ShopPanel
+              key={shopIdentity}
+              state={activeShopState}
+              quote={shopActions.quote}
+              apply={applyShopAction}
+              retryPending={shopActions.retryPending}
+              pending={shopActions.pending}
+              disabledReason={shopActions.unavailableReason}
+              avatar={profile!.avatar}
+              onPreviewChange={updateShopPreview}
+              onSelectLandscapeInstance={(instanceId) => {
+                if (shopContextRef.current !== shopIdentity || sharedContextLockedRef.current) return;
+                setSelectedLandscapeEntry({ context: shopIdentity, instanceId });
+                returnToPlanetDetail();
+              }}
             />}
-            {featureActionsBlocked
-              ? <LoadingStatus className="cosmetic-load-state" label="계정과 행성 상태를 확인하고 있습니다." />
-              : cosmeticShopLoadingContext === cosmeticShopContext
-              ? <LoadingStatus className="cosmetic-load-state" label={cosmeticShop ? "상점 상태를 갱신하고 있습니다." : "상점을 불러오고 있습니다."} />
-              : !cosmeticShop && !cosmeticShopError && <LoadingStatus className="cosmetic-load-state" label="상점을 불러오고 있습니다." />}
           </section>
           <div className="app-feedback">
+            {shopActions.error && <p className="error-note" role="alert"><span>{shopActions.error}</span> <button className="error-retry" type="button" onClick={() => void shopActions.refresh()} disabled={!shopAccount || featureActionsBlocked}>상점 다시 확인</button></p>}
             {error && <p className="error-note" role="alert">사용량을 읽지 못했습니다. 새로고침을 다시 시도하세요.</p>}
             {sharingError && <p className="error-note" role="alert">{sharingError} <button className="error-retry" type="button" onClick={() => void refresh()} disabled={refreshing}>다시 확인</button></p>}
-            {cosmeticShopError && <p className="error-note" role="alert"><span>{cosmeticShopError}</span> <button className="error-retry" type="button" onClick={() => void retryLoadCosmeticShop()}>다시 불러오기</button></p>}
-            {cosmeticActionErrorMessage && <p className="error-note" role="alert"><span>{cosmeticActionErrorMessage} 상점 상태를 다시 확인해 주세요.</span> <button className="error-retry" type="button" onClick={() => { clearCosmeticActionError(cosmeticShopContext); void retryLoadCosmeticShop(); }}>상점 다시 확인</button></p>}
           </div>
         </div>
       </main>
@@ -938,7 +1030,7 @@ function App() {
       <div className="world-layout">
         {!detail ? <>
           <section className="world-visual" aria-label="나의 행성">
-            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={planet.objects} equippedCosmetics={sceneCosmetics} compact animate={detail} interactive publicOnly={false} incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
+            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={visiblePlanetObjects} equippedCosmetics={[]} avatarEquipment={currentShopState?.avatar_equipment} compact animate={detail} interactive publicOnly={false} incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
           </section>
           <section className="planet-summary" aria-label="행성 요약">
             <div className="planet-summary-heading">
@@ -974,13 +1066,25 @@ function App() {
                 stage={planet.stage}
                 progress={planet.progress_to_next}
                 avatar={profile!.avatar}
-                objects={planet.objects}
-                equippedCosmetics={sceneCosmetics}
+                objects={visiblePlanetObjects}
+                equippedCosmetics={[]}
+                avatarEquipment={currentShopState?.avatar_equipment}
                 incomplete={planet.incomplete}
                 cycleId={planet.current_cycle_id}
                 exploration={planetExploration}
                 onExplorationChange={updatePlanetExploration}
-                selectedCosmeticSku={selectedCosmeticSku}
+                shopState={currentShopState}
+                shopAccountId={shopAccount?.account_id ?? null}
+                terrainObjects={planet.objects}
+                selectedLandscapeInstanceId={selectedLandscapeInstanceId}
+                pendingShopAction={shopActions.pending}
+                onShopAction={applyShopAction}
+                onSelectLandscapeInstance={(instanceId) => {
+                  if (sharedContextLockedRef.current || shopContextRef.current !== shopIdentity) return;
+                  setSelectedLandscapeEntry(instanceId ? { context: shopIdentity, instanceId } : null);
+                }}
+                onRequestNaturalRemoval={canRequestNaturalRemoval ? requestNaturalRemoval : undefined}
+                canRequestNaturalRemoval={canRequestNaturalRemovalForKey}
               />
               <div className="personal-quick-facts">
                 <h1>{profile!.nickname}의 행성</h1>
@@ -995,17 +1099,24 @@ function App() {
                 </div>
               </div>
             </div>
-            <PlanetCosmeticOrganizer
-              state={cosmeticShop}
-              loading={cosmeticShopLoadingContext === cosmeticShopContext}
-              error={cosmeticShopError}
-              selectedSku={selectedCosmeticSku}
-              view={cosmeticOrganizerView}
-              equipped={confirmedCosmetics}
-              onViewChange={(view) => setCosmeticOrganizerEntry({ context: cosmeticShopContext, view })}
-              onSelect={(product) => setSelectedCosmeticEntry({ context: cosmeticShopContext, sku: product.sku })}
-              onOpenShop={(sku) => launchFeatureScreen("cosmetic-shop", sku)}
-            />
+            <section className="shop-effects-summary" aria-label="상점 효과">
+              <div className="shop-effects-summary-heading">
+                <h2>활성 상점 효과</h2>
+                <button type="button" onClick={() => launchFeatureScreen("cosmetic-shop")} disabled={featureActionsBlocked}>행성 상점 열기</button>
+              </div>
+              {currentShopState ? <>
+                <dl>
+                  <div><dt>토큰 획득</dt><dd>{(currentShopState.effects.token_earning_bps / 100).toFixed(2)}%</dd></div>
+                  <div><dt>문명 성장</dt><dd>{(currentShopState.effects.civilization_growth_bps / 100).toFixed(2)}%</dd></div>
+                  <div><dt>상점 할인</dt><dd>{(currentShopState.effects.shop_discount_bps / 100).toFixed(2)}%</dd></div>
+                  <div><dt>초기화 대기시간</dt><dd>{(currentShopState.effects.reset_cooldown_bps / 100).toFixed(2)}%</dd></div>
+                  <div><dt>자연물 제거 할인</dt><dd>{(currentShopState.effects.natural_removal_discount_bps / 100).toFixed(2)}%</dd></div>
+                  <div><dt>시대 보상</dt><dd><FormattedNumber value={currentShopState.effects.era_reward_tokens} /> 토큰</dd></div>
+                  <div><dt>연속 보상</dt><dd><FormattedNumber value={currentShopState.effects.streak_reward_tokens} /> 토큰</dd></div>
+                </dl>
+                <p>보상 기준 시간대 · {currentShopState.reward_state.reward_timezone}</p>
+              </> : <p>{shopActions.error ?? "상점 효과를 확인하는 중입니다."}</p>}
+            </section>
             <div className="personal-information">
               <section className="planet-action-panel" aria-label="행성 기록">
                 <h2>행성 기록</h2>
@@ -1025,9 +1136,13 @@ function App() {
                 <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "claude_code"} error={sourceError?.agent === "claude_code" ? sourceError.message : undefined} />
               </div>
               <div className="reset-row">
-                <span className="reset-note">확인된 이번 행성 토큰은 지갑에 적립되며, 행성을 자연 생태계부터 다시 시작합니다.{!canReset && planet.reset_available_at_utc && <><br />다음 초기화 가능: {new Date(planet.reset_available_at_utc).toLocaleString("ko-KR")}</>}</span>
-                <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!canReset || planetBusy || sourceBusy !== null || refreshing}>{planetBusy ? "처리 중" : "행성 초기화"}</button>
+                <span className="reset-note">{resetAccessMessage ?? "확인된 이번 행성 토큰은 지갑에 적립되며, 행성을 자연 생태계부터 다시 시작합니다."}{shopAccount?.is_guest && !canReset && planet.reset_available_at_utc && <><br />다음 초기화 가능: {new Date(planet.reset_available_at_utc).toLocaleString("ko-KR")}</>}</span>
+                <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!resetAvailable || featureActionsBlocked || activeResetViewRefresh !== null || planetBusy || sourceBusy !== null || refreshing}>{planetBusy ? "처리 중" : activeResetViewRefresh ? "초기화 완료" : "행성 초기화"}</button>
               </div>
+              {activeResetViewRefresh && <p className="reset-completed-note" role="status">
+                서버에서 초기화가 완료됐습니다. 화면 갱신만 필요합니다.
+                {" "}<button className="error-retry" type="button" onClick={() => void refresh()} disabled={planetBusy || sourceBusy !== null || refreshing}>완료된 초기화 상태 새로고침</button>
+              </p>}
             </div>
           </section> : <section id="panel-group" className="detail-panel group-panel" role="tabpanel" aria-labelledby="tab-group" tabIndex={0}>
             <div className="sharing-stack">
@@ -1065,6 +1180,17 @@ function App() {
         </div>
         <footer className="bottom-actions"><SyncStatus status={shared?.sync_status ?? "local"} pending={shared?.pending ?? 0} lastSyncedAt={shared?.last_synced_at} onPause={() => changeSharing(() => sharing.pause(true))} onResume={() => { if (window.confirm("동기화를 재개하면 내 행성 상태를 서버에 다시 동기화합니다. 공동 세계에 참여 중이면 행성 모습, 이번 행성 토큰, 누적 토큰과 성장 점수가 멤버에게 공개됩니다.")) void changeSharing(() => sharing.pause(false)); }} /></footer>
       </div>
+      {activeNaturalRemoval && currentShopState && <NaturalRemovalDialog
+        target={activeNaturalRemoval.key}
+        quote={naturalRemovalQuote}
+        pending={activeNaturalRemovalPending?.status === "submitting"}
+        allowUnaffordableRetry={activeNaturalRemovalPending?.status === "uncertain"}
+        confirmedWalletBalance={currentShopState.available_balance}
+        onConfirm={() => void confirmNaturalRemoval()}
+        onCancel={closeNaturalRemoval}
+        objectName={activeNaturalRemoval.label}
+        error={activeNaturalRemovalError}
+      />}
     </main>
   );
 }

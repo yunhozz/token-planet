@@ -1,0 +1,79 @@
+{
+  "schema_version": 1,
+  "snapshot": {
+    "data": {
+      "activation_at_utc": "2026-10-02T14:54:13.376221+00:00",
+      "activity_days": [],
+      "avatar_equipment": [],
+      "avatar_owned": [],
+      "contribution_canonical_version": null,
+      "cosmetic_equipment": [],
+      "cosmetic_purchases": [],
+      "current_cycle": {
+        "cycle_id": "253be5a5-ffa4-48ea-9a90-f3b13840404b",
+        "ended_at_utc": null,
+        "is_current": true,
+        "settled_bonus_tokens": null,
+        "started_at_utc": "2026-10-02T14:54:13.376221+00:00"
+      },
+      "current_cycle_usage_tokens": 0,
+      "cycle_settlements": [],
+      "cycle_usage_totals": [],
+      "daily_agent_totals": [],
+      "effect_contributions": [],
+      "effect_cycle_bounds": [],
+      "effect_cycle_bounds_authoritative": false,
+      "effect_history": [],
+      "effect_timeline_state": null,
+      "era_progress": [],
+      "game_rewards": [],
+      "growth_journal_cycles": [
+        {
+          "cycle_id": "253be5a5-ffa4-48ea-9a90-f3b13840404b",
+          "ended_at_utc": null,
+          "started_at_utc": "2026-10-02T14:54:13.376221+00:00",
+          "wallet_credit": null,
+          "wallet_credit_at_utc": null
+        }
+      ],
+      "growth_journal_entries": [],
+      "growth_journal_state": {
+        "deleted_at_utc": null,
+        "generation": 0
+      },
+      "historical_cycles": [],
+      "integrity_issues": [],
+      "landscape_edit_versions": [],
+      "landscape_instances": [],
+      "last_reset_at_utc": null,
+      "legacy_partial_import_pending": false,
+      "lifetime_usage_tokens": 0,
+      "natural_objects": [],
+      "natural_removals": [],
+      "pending_purchases": [],
+      "placements": [],
+      "planet_device_id": "1d9c0545-9876-47b7-bb57-afe3b5427d56",
+      "planet_timezone": "UTC",
+      "profile": {
+        "avatar": "masculine",
+        "nickname": "Synthetic Native"
+      },
+      "purchases": [],
+      "removal_debits": [],
+      "reset_available_at_utc": null,
+      "reset_receipts_unverifiable": false,
+      "reset_settlement_proofs": [],
+      "reward_timezone": "UTC",
+      "shop_state_revision": 0,
+      "unverified_planet_wallet_claims": [],
+      "usage_aggregates": [],
+      "wallet_credits": [],
+      "world_timezone": "UTC"
+    },
+    "disposition": "local_integrity_validated",
+    "import_id": "59cc031d-948c-4c6e-bc77-8de58b519f99",
+    "source_account_id": "local",
+    "source_fingerprint": "5e611b03b1f9425c4a4758db57f2c664ae87afc06887b4b4c27763e2d29bb110",
+    "target_account_id": "account:00000000-0000-4000-a000-000000000001"
+  }
+}

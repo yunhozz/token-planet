@@ -1,7 +1,7 @@
 import { type CSSProperties, useEffect, useId, useMemo, useRef, useState } from "react";
 import { AvatarSprite } from "./AvatarSprite";
 import { PlanetObjectSprite } from "./PlanetObjectSprite";
-import type { EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
+import type { AvatarEquipment, EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
 import { styleIdForSku } from "./cosmeticStyles";
 import { planWalk, restDuration, stepDuration, WALK_POINTS } from "./sceneMotion";
 import { pickDialogue, type DialogueTarget } from "./sceneDialogue";
@@ -40,7 +40,7 @@ export function objectName(kind: string) {
   return names[kind] ?? "행성 오브젝트";
 }
 
-export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false, interactive = false, publicOnly = false, incomplete = false, cycleId = "", highlightedCosmeticSku = null }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean; interactive?: boolean; publicOnly?: boolean; incomplete?: boolean; cycleId?: string; highlightedCosmeticSku?: string | null }) {
+export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false, interactive = false, publicOnly = false, incomplete = false, cycleId = "", highlightedCosmeticSku = null, avatarEquipment }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean; interactive?: boolean; publicOnly?: boolean; incomplete?: boolean; cycleId?: string; highlightedCosmeticSku?: string | null; avatarEquipment?: AvatarEquipment }) {
   const name = STAGE_NAMES[stage] ?? STAGE_NAMES[4];
   const clipId = `planet-clip-${useId().replace(/:/g, "")}`;
   const sceneRef = useRef<HTMLElement | null>(null);
@@ -306,7 +306,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
             </g>;
           })}
           <g data-planet-avatar="true" className={avatarWalking ? "planet-avatar planet-avatar--walking" : "planet-avatar"} style={{ "--avatar-step-ms": `${avatarStepDuration}ms` } as CSSProperties} transform={`translate(${WALK_POINTS[avatarPosition].x} ${WALK_POINTS[avatarPosition].y}) scale(1.05)`}>
-            <AvatarSprite avatar={avatar} className="planet-scene-avatar" facing={avatarFacing} eyesClosed={eyesClosed} walking={avatarWalking} />
+            <AvatarSprite avatar={avatar} className="planet-scene-avatar" facing={avatarFacing} eyesClosed={eyesClosed} walking={avatarWalking} equipment={avatarEquipment} />
           </g>
           {hasCosmetic("surface", "flag") && <g data-cosmetic="flag" transform="translate(172 220)" shapeRendering="crispEdges"><rect x="8" y="0" width="4" height="35" fill="#8c6655"/><path d="M12 2h24v11H22l-10 7Z" fill="#ec8c78" stroke="#572f4b" strokeWidth="2"/><rect x="3" y="34" width="17" height="4" fill="#926e58"/></g>}
           {hasCosmetic("surface", "crystal_tower") && <g data-cosmetic="crystal_tower" transform="translate(168 218)" shapeRendering="crispEdges"><rect x="2" y="23" width="27" height="15" fill="#536c91" stroke="#c2c6cf" strokeWidth="2"/><path d="M8 23V9l8-8 8 8v14Z" fill="#a6d9e2" stroke="#e3f0de" strokeWidth="2"/><path d="M16 3v19M10 14h12" stroke="#6ba9bb" strokeWidth="2"/><rect x="11" y="28" width="9" height="10" fill="#455471"/></g>}

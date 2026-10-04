@@ -24,24 +24,35 @@ select lives_ok($$select public.upsert_my_planet_state(pg_temp.planet_state('Bob
   '[{"previous_cycle_id":"bob-old","amount":20,"created_at_utc":"2026-09-26T00:00:00Z"}]'::jsonb),
   pg_temp.planet_device('30000000-0000-0000-0000-000000000801', 'bob-cycle', 7))$$, 'same installation can upload a separate second-account planet');
 select is((public.get_my_planet_state()->>'lifetime_tokens')::bigint, 7::bigint, 'second account does not inherit first-account totals');
-select is((public.get_my_planet_state()->>'wallet_balance')::bigint, 20::bigint, 'second-account wallet is independent');
+select is((public.get_my_planet_state()->>'wallet_balance')::bigint, 0::bigint,
+  'client-supplied wallet credits do not fund the second account');
 select set_config('request.jwt.claim.sub', '00000000-0000-0000-0000-000000000801', true);
 select is((public.get_my_planet_state()->>'lifetime_tokens')::bigint, 200000::bigint, 'returning to the first account restores its totals');
 select is((public.get_my_planet_state()->>'wallet_balance')::bigint, 0::bigint, 'another account wallet credit is not visible');
 select is(public.get_my_planet_state()->'profile'->>'nickname', 'Alice', 'another account cannot change the first profile');
-select lives_ok($$select public.upsert_my_planet_state(pg_temp.planet_state('Alice', 'alice-reset', now(),
-  jsonb_build_array(jsonb_build_object('previous_cycle_id','alice-cycle','amount',200000,'created_at_utc',now()))),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000801', 'alice-reset', 0, false, 100000))$$, 'reset creates a new cycle with one wallet credit');
-select is((public.get_my_planet_state()->>'wallet_balance')::bigint, 200000::bigint, 'reset credits the previous cycle once');
+select is((public.reset_my_planet(
+  '40000000-0000-0000-0000-000000000801', 'alice-cycle')->'action'->>'status'),
+  'reset', 'the server reset action creates the next cycle');
+select is((public.get_my_planet_state()->>'wallet_balance')::bigint, 200000::bigint,
+  'reset credits the previous cycle raw tokens once');
 select lives_ok($$select public.upsert_my_planet_state(public.get_my_planet_state(),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000803', 'alice-reset', 0, false, 100000))$$, 'downloaded canonical reset state can be uploaded by another device');
-select is((public.get_my_planet_state()->>'wallet_balance')::bigint, 200000::bigint, 'canonical retry does not duplicate the wallet credit');
-select throws_ok($$select public.upsert_my_planet_state(pg_temp.planet_state('Alice','too-soon',now()+interval '1 hour'),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000801','too-soon',0,false,100000))$$, '23514', null, 'reset cooldown is enforced');
+  pg_temp.planet_device('30000000-0000-0000-0000-000000000803',
+    public.get_my_planet_state()->>'current_cycle_id', 0, false, 100000, 2))$$,
+  'another device can upload the canonical server reset state');
+select is((public.get_my_planet_state()->>'wallet_balance')::bigint, 200000::bigint,
+  'canonical retry does not duplicate the server reset credit');
+select throws_ok($$select public.reset_my_planet(
+  '40000000-0000-0000-0000-000000000802',
+  public.get_my_planet_state()->>'current_cycle_id')$$,
+  '55000', 'planet reset cooldown is active', 'reset cooldown is enforced');
 select throws_ok($$select public.upsert_my_planet_state(pg_temp.planet_state('Alice') || '{"source_path":"secret"}'::jsonb,
   pg_temp.planet_device('30000000-0000-0000-0000-000000000801','cycle-1',0))$$, '23514', null, 'raw source fields are rejected');
-select throws_ok($$select public.upsert_my_planet_state(pg_temp.planet_state('Alice'),
-  pg_temp.planet_device('30000000-0000-0000-0000-000000000801','cycle-1',5) || '{"daily_tokens":{"2026-09-26":6}}'::jsonb)$$, '23514', null, 'inconsistent daily contribution is rejected');
+select throws_ok($$select public.upsert_my_planet_state(public.get_my_planet_state(),
+  pg_temp.planet_device('30000000-0000-0000-0000-000000000801',
+    public.get_my_planet_state()->>'current_cycle_id', 5, false, 100000, 2)
+    || '{"daily_tokens":{"2026-09-26":6}}'::jsonb)$$,
+  '23514', 'planet device contribution is invalid',
+  'inconsistent daily contribution is rejected');
 reset role;
 set local role anon;
 select throws_ok($$select public.get_my_planet_state()$$, '42501', null, 'anonymous users cannot read an account planet');
