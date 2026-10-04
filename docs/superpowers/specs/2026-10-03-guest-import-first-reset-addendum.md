@@ -1,6 +1,6 @@
 # 일반 게스트 첫 reset 가져오기 명세 추가안
 
-상태: written spec 및 실행 계획 승인 완료. Tasks1–4의 로컬 구현·독립 QA·Reviewer gate 완료. 후속 사용자 지시로 Tasks5–10을 순차 재개한다. 기존 disposable 환경이 없어 새 동일 프로젝트 환경 구축을 사용자가 승인했으며, 새 baseline에서 Tasks5–6 private writer/public dispatch·race의 QA/Reviewer gate를 통과했다. Task7 native RPC/atomic completion의 QA/Reviewer gate도 통과했다. Tasks8–10 worker/API/통합 gate는 아직 완료하지 않았다.
+상태: written spec 및 실행 계획 승인 완료. Tasks1–8 구현·독립 QA·Reviewer gate 완료. Task9는 SQL 공개 장면 9/9와 fail-closed API 준비 검사까지 PARTIAL/BLOCKED이며 actual API→native worker/cache→sharing/public scene E2E는 미구현·미실행이다. Task10은 Rust365/365, Desktop327/build, 전체 SQL40 suites1103/1103·race4/4 및 schema1 privacy 수정의 fresh Reviewer CLEAR를 확보했으나 Task9 의존 통합 완료 판정은 보류한다. Exact uncached PostgREST image 준비 승인 전 pull/start하지 않는다.
 기준: PR #6, `feat/shop-system-revamp`, `f233b612773b8afda88528040bdd67886f9b0b06`.
 상위 명세: [상점 개편 명세](2026-10-01-shop-system-revamp.md) §8.2–8.4.
 관련 계획: [상점 개편 계획](../plans/2026-10-01-shop-system-revamp.md) Task8B–D.

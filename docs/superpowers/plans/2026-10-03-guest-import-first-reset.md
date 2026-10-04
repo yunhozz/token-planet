@@ -12,6 +12,8 @@
 
 **Spec:** [승인된 written spec](../specs/2026-10-03-guest-import-first-reset-addendum.md).
 
+**현재 실행 상태 (2026-10-04):** Tasks1–8 PASS. Task9 PARTIAL/BLOCKED: 공개 scene SQL9/9·readiness fail-closed 검증 완료, actual API/native E2E는 exact image 준비 승인 전 미구현·미실행. Task10의 Rust365/365·Desktop327/build·전체 SQL40 suites1103/1103·race4/4 및 schema1 privacy 수정 fresh review는 PASS이며 Task9 의존 통합 완료 판정은 보류한다. Local fix commit `31c575a`, push 없음.
+
 ## Global Constraints
 
 - 계획 실행은 **사용자의 계획 승인 이후**다. 아래 명령/검사는 향후 실행 항목이며 실행 결과가 아니다.
@@ -192,7 +194,7 @@ assert_eq!(receipt.request.request_id, receipt.result.request_id);
 
 **Gate 결과:** PASS — Task 2 focused 55/55, 전체 Rust `--lib` 295/295, 기존 reset 회귀 1/1, stable rustfmt, `git diff --check` 통과. Reviewer 재검토 CLEAR. Clock regression과 `occurred_at == reset_at`의 old-cycle credit 경계는 각각 RED→GREEN으로 검증했다. 증거: `/private/tmp/shop-import-v2-task2-qa-final-{focused,lib,reset,fmt,diff}.log`, `/private/tmp/shop-import-v2-task2-clock-{red,green2}.log`, `/private/tmp/shop-import-v2-task2-reset-boundary-{red,green}.log`. 독립 Reviewer 보고의 Lead 기록: `/private/tmp/shop-import-v2-task2-reviewer-clear.md`.
 
-**범위 상태:** Tasks1–4 gate 완료. 사용자의 최신 지시에 따라 Task4 완료 후 중단한다. Tasks5–10은 진행하지 않았고 public RPC 성공 및 공개 장면 E2E는 미검증이다.
+**당시 범위 상태 (Task4 checkpoint):** Tasks1–4 gate 완료 후 중단했던 기록이다. 후속 사용자 재개 지시와 현재 실행 상태가 이를 대체한다.
 
 ## Task 3: immutable capture·source relation·raw를 유지하는 game gate
 
