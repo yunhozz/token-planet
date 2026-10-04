@@ -24,6 +24,26 @@ The database requires a recognized world timezone and keeps it fixed. A world ow
 
 For hosted use, apply the latest migrations and enable **Anonymous Sign-Ins** in the project's Authentication → Sign In / Providers settings. The local equivalent is `auth.enable_anonymous_sign_ins` in `supabase/config.toml`. A publishable key remains in the desktop configuration; never put a secret or service-role key there. The hosted setting and an actual cross-device invitation must be checked before calling hosted sharing ready. See the [Supabase anonymous sign-ins guide](https://supabase.com/docs/guides/auth/auth-anonymous).
 
+## CI migration replay
+
+`.github/workflows/supabase-migrations.yml` stages the original SQL into a new temporary Supabase project, replays the complete migration chain, checks the generated migration history against its manifest, and runs every top-level SQL suite under `supabase/tests`.
+
+The staging manifest uses `history_mode: synthetic_ci_only`. It records each source filename, original version string, synthetic version, staged filename, and SQL SHA-256. SQL bytes are copied unchanged; the repository's migration filenames, SQL, configuration, and existing database history are not rewritten. Synthetic history is solely for the disposable CI database and must not be applied to deployments or used to update existing databases. The repository's ordinary `supabase db reset` still reads the original filenames, so this CI-only path does not change the filename-order behavior of a normal local reset.
+
+### Run locally
+
+Use an already-installed Supabase CLI **2.119.0** by setting `SUPABASE_BIN` to its absolute executable path. The runner creates its own temporary project ID and work directory. It refuses Supabase project/credential overrides, database URLs, non-local Docker contexts, and occupied local ports `56432` or `56430`.
+
+The local Docker daemon must be available through a Unix socket, and the pinned Postgres image `public.ecr.aws/supabase/postgres:17.6.1.171` must already be cached. The local runner does not install the CLI or pull images. The GitHub-hosted workflow checks the Docker endpoint first, then pulls that exact image before starting the runner.
+
+```sh
+SUPABASE_BIN=/opt/homebrew/bin/supabase \
+SUPABASE_TELEMETRY_DISABLED=1 \
+bash supabase/ci/run.sh --artifacts-dir /tmp/token-planet-migration-results
+```
+
+The artifact directory must be an empty absolute path outside the repository. The runner keeps the manifest and sanitized summaries there; raw Docker inspect responses, SQL output, and CLI output stay in the temporary work directory and are removed during cleanup.
+
 
 ## Shop revamp transition policy (implementation in progress)
 

@@ -1,0 +1,76 @@
+name: Supabase migration replay
+
+on:
+  pull_request:
+  push:
+    branches:
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: supabase-migrations-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  replay:
+    name: Replay migrations in a disposable local database
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Supabase CLI
+        uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb
+        with:
+          version: 2.119.0
+
+      - name: Run migration staging and runner tests
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: python3 -m unittest discover -s supabase/ci -p 'test_*.py' -v
+
+      - name: Verify local Docker endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in DOCKER_HOST DOCKER_CONTEXT DOCKER_TLS_VERIFY DOCKER_CERT_PATH; do
+            if [[ -n "${!name:-}" ]]; then
+              printf 'Refusing Docker connection override: %s\n' "$name" >&2
+              exit 2
+            fi
+          done
+          context="$(docker context show)"
+          endpoint="$(docker context inspect --format '{{json .Endpoints.docker.Host}}' "$context")"
+          python3 - "$endpoint" <<'PY'
+          import json
+          import sys
+          try:
+              value = json.loads(sys.argv[1])
+          except json.JSONDecodeError as error:
+              raise SystemExit(f"Invalid Docker endpoint: {error}")
+          if not isinstance(value, str) or not value.startswith("unix:///"):
+              raise SystemExit("Docker daemon must use a local Unix socket endpoint")
+          PY
+
+      - name: Pull the pinned Supabase Postgres image
+        run: docker pull public.ecr.aws/supabase/postgres:17.6.1.171
+
+      - name: Replay migrations and SQL suites
+        env:
+          SUPABASE_TELEMETRY_DISABLED: "1"
+        run: bash supabase/ci/run.sh --artifacts-dir "$RUNNER_TEMP/supabase-migration-results"
+
+      - name: Upload sanitized migration results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: supabase-migration-results
+          path: |
+            ${{ runner.temp }}/supabase-migration-results/manifest.json
+            ${{ runner.temp }}/supabase-migration-results/*.log
+          if-no-files-found: ignore
+          retention-days: 7
