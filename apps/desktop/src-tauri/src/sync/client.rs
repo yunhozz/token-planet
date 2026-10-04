@@ -30,12 +30,64 @@ pub(crate) fn shared_http_client() -> Client {
         .clone()
 }
 
+#[cfg(test)]
+pub(crate) fn task9_local_api_origin_port(base_url: &str) -> Option<u16> {
+    let url = reqwest::Url::parse(base_url).ok()?;
+    let port = url.port()?;
+    (url.scheme() == "http"
+        && url.host_str() == Some("127.0.0.1")
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
+        && (49152..=65535).contains(&port)
+        && base_url == format!("http://127.0.0.1:{port}"))
+    .then_some(port)
+}
+
+#[cfg(test)]
+pub(crate) fn task9_local_api_url_matches_owned_port(base_url: &str, owned_port: u16) -> bool {
+    task9_local_api_origin_port(base_url) == Some(owned_port)
+}
+
+#[cfg(test)]
+fn task9_local_api_http_client_builder() -> reqwest::ClientBuilder {
+    Client::builder()
+        .connect_timeout(Duration::from_secs(5))
+        .timeout(Duration::from_secs(20))
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+}
+
+#[cfg(test)]
+pub(crate) fn task9_local_api_http_client() -> Client {
+    task9_local_api_http_client_builder()
+        .build()
+        .expect("Task 9 local API HTTP client configuration is valid")
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub enum SyncError {
     InvalidSnapshot,
     Transport,
     Rejected(u16),
     InvalidResponse,
+}
+
+#[cfg(test)]
+fn task9_postgrest_error_code(body: &str) -> Option<String> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let code = value.get("code")?.as_str()?;
+    if code.is_empty()
+        || code.len() > 12
+        || !code
+            .bytes()
+            .all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit())
+    {
+        return None;
+    }
+    Some(code.to_owned())
 }
 
 #[derive(Serialize)]
@@ -159,6 +211,8 @@ pub struct SupabaseSyncClient {
     http: Client,
     base_url: String,
     publishable_key: String,
+    #[cfg(test)]
+    task9_diagnostic: bool,
 }
 
 impl SupabaseSyncClient {
@@ -167,6 +221,27 @@ impl SupabaseSyncClient {
             http: shared_http_client(),
             base_url: base_url.trim_end_matches('/').to_owned(),
             publishable_key: publishable_key.to_owned(),
+            #[cfg(test)]
+            task9_diagnostic: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_task9_local_api_e2e(
+        base_url: &str,
+        publishable_key: &str,
+        owned_port: u16,
+    ) -> Self {
+        let normalized_url = base_url.strip_suffix('/').unwrap_or(base_url);
+        assert!(
+            task9_local_api_url_matches_owned_port(normalized_url, owned_port),
+            "Task 9 E2E client requires the exact owned loopback origin"
+        );
+        Self {
+            http: task9_local_api_http_client(),
+            base_url: normalized_url.to_owned(),
+            publishable_key: publishable_key.to_owned(),
+            task9_diagnostic: true,
         }
     }
 
@@ -208,7 +283,17 @@ impl SupabaseSyncClient {
             .await
             .map_err(|_| SyncError::Transport)?;
         if !response.status().is_success() {
-            return Err(SyncError::Rejected(response.status().as_u16()));
+            let status = response.status().as_u16();
+            #[cfg(test)]
+            if self.task9_diagnostic {
+                let body = response.text().await.unwrap_or_default();
+                let code =
+                    task9_postgrest_error_code(&body).unwrap_or_else(|| "UNKNOWN".to_owned());
+                let diagnostic = format!("Task9 RPC diagnostic HTTP={status} code={code}");
+                eprintln!("{diagnostic}");
+                panic!("{diagnostic}");
+            }
+            return Err(SyncError::Rejected(status));
         }
         let response_body = response
             .text()
@@ -816,6 +901,36 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread::{self, JoinHandle};
+
+    #[test]
+    fn task9_postgrest_error_code_accepts_only_bounded_uppercase_alphanumeric_code() {
+        assert_eq!(
+            super::task9_postgrest_error_code(
+                r#"{"code":"42501","message":"sensitive server detail"}"#
+            )
+            .as_deref(),
+            Some("42501")
+        );
+        assert_eq!(
+            super::task9_postgrest_error_code(r#"{"code":"P0001"}"#).as_deref(),
+            Some("P0001")
+        );
+        assert_eq!(
+            super::task9_postgrest_error_code(r#"{"code":"ABCDEFGHIJKL"}"#).as_deref(),
+            Some("ABCDEFGHIJKL")
+        );
+
+        for body in [
+            r#"{"code":"p0001"}"#,
+            r#"{"code":"42501;DROP"}"#,
+            r#"{"code":"ABCDEFGHIJKLM"}"#,
+            r#"{"code":403}"#,
+            r#"{"message":"42501"}"#,
+            "not-json",
+        ] {
+            assert_eq!(super::task9_postgrest_error_code(body), None);
+        }
+    }
 
     #[derive(Debug)]
     struct CapturedRequest {
@@ -1912,5 +2027,93 @@ mod tests {
             import.purchases[0].purchase_id
         );
         assert!(body.get("user_id").is_none());
+    }
+
+    #[test]
+    fn task9_local_api_transport_has_no_proxy_and_rejects_redirects() {
+        let builder = super::task9_local_api_http_client_builder();
+        let config = format!("{builder:?}");
+
+        assert!(
+            !config.contains("proxies:"),
+            "the Task 9 client builder must disable all proxy matchers: {config}"
+        );
+        assert!(
+            config.contains("redirect_policy: Policy(None)"),
+            "the Task 9 client builder must disable redirects: {config}"
+        );
+        assert!(
+            config.contains("connect_timeout: 5s"),
+            "the Task 9 client must keep the shared connect timeout: {config}"
+        );
+        assert!(
+            config.contains("timeout: 20s"),
+            "the Task 9 client must keep the shared request timeout: {config}"
+        );
+    }
+
+    #[test]
+    fn task9_local_api_constructor_keeps_the_supabase_url_and_key_fields() {
+        let client = SupabaseSyncClient::new_task9_local_api_e2e(
+            "http://127.0.0.1:50259/",
+            "task9-publishable-key",
+            50259,
+        );
+
+        assert_eq!(client.base_url, "http://127.0.0.1:50259");
+        assert_eq!(client.publishable_key, "task9-publishable-key");
+    }
+
+    #[test]
+    fn task9_local_api_url_port_requires_a_canonical_loopback_origin_and_owned_port() {
+        for (url, port) in [
+            ("http://127.0.0.1:49152", 49152),
+            ("http://127.0.0.1:50259", 50259),
+            ("http://127.0.0.1:65535", 65535),
+        ] {
+            assert_eq!(super::task9_local_api_origin_port(url), Some(port));
+            assert!(super::task9_local_api_url_matches_owned_port(url, port));
+        }
+
+        for url in [
+            "https://api.example.com:50259",
+            "http://api.example.com:50259",
+            "https://127.0.0.1:50259",
+            "http://localhost:50259",
+            "http://user:password@127.0.0.1:50259",
+            "http://127.0.0.1:50259/path",
+            "http://127.0.0.1:50259/",
+            "http://127.0.0.1:50259?query=1",
+            "http://127.0.0.1:50259#fragment",
+            "http://127.0.0.2:50259",
+            "http://192.168.1.10:50259",
+            "http://127.0.0.1:49151",
+            "http://127.0.0.1:65536",
+            "http://127.0.0.1:0",
+            "http://127.0.0.1",
+            "http://127.0.0.1:050259",
+        ] {
+            assert_eq!(super::task9_local_api_origin_port(url), None, "{url}");
+        }
+        assert!(!super::task9_local_api_url_matches_owned_port(
+            "http://127.0.0.1:50259",
+            50260
+        ));
+    }
+
+    #[test]
+    fn task9_local_api_constructor_rejects_mismatch_and_nonlocal_origins_before_build() {
+        use std::panic::{catch_unwind, AssertUnwindSafe};
+
+        for (url, port) in [
+            ("http://127.0.0.1:50260", 50259),
+            ("https://127.0.0.1:50259", 50259),
+            ("http://localhost:50259", 50259),
+        ] {
+            assert!(catch_unwind(AssertUnwindSafe(|| {
+                SupabaseSyncClient::new_task9_local_api_e2e(url, "task9-key", port)
+            }))
+            .is_err());
+        }
     }
 }

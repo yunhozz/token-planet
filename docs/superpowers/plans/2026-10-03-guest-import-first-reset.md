@@ -12,7 +12,7 @@
 
 **Spec:** [승인된 written spec](../specs/2026-10-03-guest-import-first-reset-addendum.md).
 
-**현재 실행 상태 (2026-10-04):** Tasks1–8 PASS. Task9 PARTIAL/BLOCKED: 공개 scene SQL9/9·readiness fail-closed 검증 완료, actual API/native E2E는 exact image 준비 승인 전 미구현·미실행. Task10의 Rust365/365·Desktop327/build·전체 SQL40 suites1103/1103·race4/4 및 schema1 privacy 수정 fresh review는 PASS이며 Task9 의존 통합 완료 판정은 보류한다. Local fix commit `31c575a`, push 없음.
+**현재 실행 상태 (2026-10-04):** Tasks1–10 PASS. Task9 actual loopback public RPC→native worker/cache→explicit sharing/public scene E2E는 native1/1, denial3/viewer read3/DML0으로 통과했다. 독립 cleanup은 schema/history/48-table digest와 auth0/world0/shim0/API·proxy·run-file 부재를 확인했고 새 exact PostgREST 이미지만 제거했다. Task10 최신 독립 Rust380 PASS/0 FAIL/actual ignored1, Desktop327/build, 전체 SQL40 suites1103/1103 및 race4/4는 PASS다. 아래 최종 증거가 이전 PARTIAL/403 checkpoint를 대체하며 최종 full-scope Reviewer CLEAR 및 acceptance 완료. 의도한 Task9/10 파일만 local conventional commit으로 확정하며 push 없음.
 
 ## Global Constraints
 
@@ -260,14 +260,14 @@ select ok(private.shop_guest_import_v2_normalize(v2_request, trusted_now) is not
 
 **Interface:** `private.shop_guest_import_v2_bootstrap(p_import_id uuid,p_request jsonb) -> jsonb`. 기존 account lock/public receipt/private empty receipt를 확인한다. 별도 normalized proof/ACK storage가 필요하면 private에 두고 receipt(user_id,import_id)에 FK 연결한다. client EXECUTE/public dispatch 없음.
 
-- [ ] `supabase migration new guest_import_first_reset_writer`로 path 생성.
-- [ ] **RED:** validator positive 후 writer 부재의 expected imported 실패. runner writer suite 실행.
-- [ ] auth/envelope→lock→receipt→fresh→전체 normalize→FK writes→persisted DTO equality→success receipt 마지막 저장 구현.
-- [ ] 명세12의 planet/shop/device/contribution/baseline/activity/reset/settlement/wallet/journal/source ACK를 정확히 저장. reward/item/world/membership 없음, shared_visible=false.
-- [ ] 사용자 승인 null profile 보완: 검증된 null만 nickname `행성 동기화 대기`/avatar `masculine`로 canonical 초기화, valid non-null 보존, malformed fallback 없음. auth metadata·immutable payload 수정 없음, 저장값/PlanetState/receipt 동일·replay 불변·hidden 초기화 검사. 기존 계획의 의존 순서와 검증 경로는 동일하다.
-- [ ] 기존 fresh predicate를 보존하고 새 orphan success proof도 fresh에서 제외.
-- [ ] 의도한 RED와 구현 파일이 준비되면 위 local staging 계약에 따라 `M_WRITER`의 실제 local-only 적용 command를 확인·기록·실행한다. signature/ACL/RLS/search_path·schema1 경계·기존 행/receipt 보존을 확인한다. 안전한 incremental 적용을 확정하지 못하면 중단한다.
-- [ ] **GREEN:** replay/conflict/new-ID active, held/private empty 호환, orphan receipt, 마지막 proof DML0.
+- [x] `supabase migration new guest_import_first_reset_writer`로 path 생성.
+- [x] **RED:** validator positive 후 writer 부재의 expected imported 실패. runner writer suite 실행.
+- [x] auth/envelope→lock→receipt→fresh→전체 normalize→FK writes→persisted DTO equality→success receipt 마지막 저장 구현.
+- [x] 명세12의 planet/shop/device/contribution/baseline/activity/reset/settlement/wallet/journal/source ACK를 정확히 저장. reward/item/world/membership 없음, shared_visible=false.
+- [x] 사용자 승인 null profile 보완: 검증된 null만 nickname `행성 동기화 대기`/avatar `masculine`로 canonical 초기화, valid non-null 보존, malformed fallback 없음. auth metadata·immutable payload 수정 없음, 저장값/PlanetState/receipt 동일·replay 불변·hidden 초기화 검사. 기존 계획의 의존 순서와 검증 경로는 동일하다.
+- [x] 기존 fresh predicate를 보존하고 새 orphan success proof도 fresh에서 제외.
+- [x] 의도한 RED와 구현 파일이 준비되면 위 local staging 계약에 따라 `M_WRITER`의 실제 local-only 적용 command를 확인·기록·실행한다. signature/ACL/RLS/search_path·schema1 경계·기존 행/receipt 보존을 확인한다. 안전한 incremental 적용을 확정하지 못하면 중단한다.
+- [x] **GREEN:** replay/conflict/new-ID active, held/private empty 호환, orphan receipt, 마지막 proof DML0.
 
 ```sql
 select is(imported_result->>'status', 'imported', 'whole bootstrap succeeds');
@@ -275,8 +275,8 @@ select is(replayed_result, imported_result, 'same payload replays immutable rece
 select is(conflict_result->>'status', 'request_conflict', 'changed payload cannot overwrite');
 ```
 
-- [ ] journal/settlement/final receipt의 fixture-local trigger 실패로 game/success receipt/new lock 전체 rollback 검사. production test mode 금지.
-- [ ] QA는 정확한 저장값/digest, Reviewer는 FK/snapshot/ledger/receipt/ACL 확인.
+- [x] journal/settlement/final receipt의 fixture-local trigger 실패로 game/success receipt/new lock 전체 rollback 검사. production test mode 금지.
+- [x] QA는 정확한 저장값/digest, Reviewer는 FK/snapshot/ledger/receipt/ACL 확인.
 
 ## Task 6: public schema2 dispatch·호환성·경쟁
 
@@ -286,13 +286,13 @@ select is(conflict_result->>'status', 'request_conflict', 'changed payload canno
 
 **Interfaces:** public `import_guest_shop(uuid,jsonb)`의 schema1 held 유지/schema2 dispatch. 같은 ID의 payload equality는 fresh/validation보다 먼저다. 응답은 명세13을 따른다.
 
-- [ ] `supabase migration new guest_import_first_reset_public`으로 path 생성.
-- [ ] **RED:** old wrapper에서 native v2는 held/reject, schema1/anon/private controls는 정상. public suite 실행.
-- [ ] version dispatch/auth/grant/revoke/RLS/search_path 구현. schema1 완화 없음.
-- [ ] 실제 usage/journal/game writer의 account lock→game lock을 확인하고 누락만 수정한다. race는 실제 initial usage RPC를 호출한다.
-- [ ] pinning/소유 fixture cleanup을 갖춘 race harness 작성.
-- [ ] 의도한 RED와 구현 파일이 준비되면 위 local staging 계약에 따라 `M_PUBLIC`의 실제 local-only 적용 command를 확인·기록·실행한다. signature/ACL/RLS/search_path·schema1 경계·기존 행/receipt 보존을 확인한다. 안전한 incremental 적용을 확정하지 못하면 중단한다.
-- [ ] **GREEN:** 같은 ID·같은 payload, 같은 ID·다른 payload, 서로 다른 ID, import×initial usage. bootstrap은 한 번, replay/conflict/active 결과, overwrite 없음.
+- [x] `supabase migration new guest_import_first_reset_public`으로 path 생성.
+- [x] **RED:** old wrapper에서 native v2는 held/reject, schema1/anon/private controls는 정상. public suite 실행.
+- [x] version dispatch/auth/grant/revoke/RLS/search_path 구현. schema1 완화 없음.
+- [x] 실제 usage/journal/game writer의 account lock→game lock을 확인하고 누락만 수정한다. race는 실제 initial usage RPC를 호출한다.
+- [x] pinning/소유 fixture cleanup을 갖춘 race harness 작성.
+- [x] 의도한 RED와 구현 파일이 준비되면 위 local staging 계약에 따라 `M_PUBLIC`의 실제 local-only 적용 command를 확인·기록·실행한다. signature/ACL/RLS/search_path·schema1 경계·기존 행/receipt 보존을 확인한다. 안전한 incremental 적용을 확정하지 못하면 중단한다.
+- [x] **GREEN:** 같은 ID·같은 payload, 같은 ID·다른 payload, 서로 다른 ID, import×initial usage. bootstrap은 한 번, replay/conflict/active 결과, overwrite 없음.
 
 ```bash
 bash supabase/tests/shop_guest_import_v2_race.sh
@@ -300,7 +300,7 @@ bash supabase/tests/run_guest_import_v2.sh shop_guest_import_native_first_reset_
 bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_public.sql
 ```
 
-- [ ] QA는 race/cleanup/ACL/digest, Reviewer는 dispatch/lock/receipt 호환을 확인한다.
+- [x] QA는 race/cleanup/ACL/digest, Reviewer는 dispatch/lock/receipt 호환을 확인한다.
 
 **Rollout/rollback:** `M_VALIDATION→M_WRITER→M_PUBLIC`을 native 송신보다 먼저 준비한다. 구 backend에서는 같은 ID/payload를 pending 호환 hold로 보존하고 legacy fallback/new ID 없음. 새 capability API 없음. 새 schema2 dispatch 중단은 가능하나 이미 imported된 data/receipt를 downgrade/delete하지 않는다. hosted 적용 없음.
 
@@ -312,9 +312,9 @@ bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_public.sql
 
 **Interfaces:** `SupabaseSyncClient::import_guest_shop(&self,access_token:&str,request:&GuestShopImportV2Request) -> Result<GuestShopImportV2Result,SyncError>`; `mark_guest_shop_import_attempt_started(&mut self,target:&str,import_id:Uuid) -> Result<(),ScanError>`; `complete_guest_shop_import(&mut self,target:&str,result:&GuestShopImportV2Result) -> Result<GuestImportCompletion,ScanError>`; `GuestImportCompletion::{Imported,ImportedWithCorrectionHold,Held}`. cache helpers는 같은 transaction을 사용한다.
 
-- [ ] **RED transport:** 정확한 rest RPC path/bearer/p_import_id/p_request, 불변 retry, typed correlation. filter `guest_import_v2_transport` 실행.
-- [ ] strict response 구현. old backend/401/truncated/wrong account/import/hash/cycle/version/missing ACK/held의 success state는 pending 유지, fallback 없음.
-- [ ] **RED completion:** valid receipt의 ownership/cache/ACK 미완료와 마지막 marker 쓰기 실패 시 모든 local 상태 불변.
+- [x] **RED transport:** 정확한 rest RPC path/bearer/p_import_id/p_request, 불변 retry, typed correlation. filter `guest_import_v2_transport` 실행.
+- [x] strict response 구현. old backend/401/truncated/wrong account/import/hash/cycle/version/missing ACK/held의 success state는 pending 유지, fallback 없음.
+- [x] **RED completion:** valid receipt의 ownership/cache/ACK 미완료와 마지막 marker 쓰기 실패 시 모든 local 상태 불변.
 
 ```rust
 assert_eq!(result.import_id, pending.request.snapshot.import_id);
@@ -322,9 +322,9 @@ assert_eq!(result.ack.prefix_fingerprint, pending.request.snapshot.provenance.pr
 assert_eq!(ledger_state_after_failed_commit, ledger_state_before);
 ```
 
-- [ ] caches/ownership/marker/ACK/phase/correction hold를 하나의 SQLite transaction으로 완료한다. selected account 재확인, captured journal revision/hash만 ACK하고 새 revision은 pending 보존.
-- [ ] **GREEN:** local failure/reopen/retry, duplicate completion, append delta/raw rows 보존, imported+correction hold 원자 저장. filter `guest_import_v2_completion` 실행.
-- [ ] QA transport/failure, Reviewer correlation/transaction/account isolation.
+- [x] caches/ownership/marker/ACK/phase/correction hold를 하나의 SQLite transaction으로 완료한다. selected account 재확인, captured journal revision/hash만 ACK하고 새 revision은 pending 보존.
+- [x] **GREEN:** local failure/reopen/retry, duplicate completion, append delta/raw rows 보존, imported+correction hold 원자 저장. filter `guest_import_v2_completion` 실행.
+- [x] QA transport/failure, Reviewer correlation/transaction/account isolation.
 
 ## Task 8: worker·account guards·delta/복구
 
@@ -334,7 +334,7 @@ assert_eq!(ledger_state_after_failed_commit, ledger_state_before);
 
 **Interfaces:** `GuestShopImportTransport: Send + Sync`는 `import_guest_shop(&self, access_token:&str, request:&GuestShopImportV2Request) -> impl Future<Output=Result<GuestShopImportV2Result,SyncError>> + Send`를 제공한다; `sync_pending_guest_shop_import(state:&AppState,client:&impl GuestShopImportTransport,access_token:&str,target:&str) -> Result<GuestImportSyncOutcome,String>`; outcome::{NoPending,Held,Imported,ImportedWithCorrectionHold}. 순서는 pending import→completion→delta rebuild→기존 signed sync다.
 
-- [ ] **RED:** `pending_import_precedes_all_uploads`, `response_loss_recovers_same_receipt`, `append_ack_only_prefix`, `late_closed_usage_no_new_credit`, `account_switch_cannot_apply_response`.
+- [x] **RED:** `pending_import_precedes_all_uploads`, `response_loss_recovers_same_receipt`, `append_ack_only_prefix`, `late_closed_usage_no_new_credit`, `account_switch_cannot_apply_response`.
 
 ```rust
 assert_eq!(mock.first_remote_call(), "import_guest_shop");
@@ -343,37 +343,37 @@ assert_eq!(late_old.wallet_balance, imported.wallet_balance);
 assert_eq!(other_account.cache, original_other_account_cache);
 ```
 
-- [ ] filter `guest_import_v2_worker` 실행.
-- [ ] durable attempt-before-await/target/prefix/same-ID 복구 구현. network await 중 ledger mutex를 유지하지 않는다.
-- [ ] sync_once의 legacy cosmetic/journal/usage보다 먼저 연결한다. selected account와 ledger ownership은 completion까지 구분한다.
-- [ ] completion 후에만 delta rebuild. delta 없으면 captured upload 재예약0, 있으면 새 canonical version/current 반영, 늦은 old 기록은 lifetime만/credit0.
-- [ ] attempt 전 correction은 hold, 이후에는 receipt 복구→imported hold/held 처리. raw scan/private read 유지.
-- [ ] **GREEN:** await 중 switch/append/correction, reopen, backend mismatch, server success/local failure, sharing pause, refresh failure의 marker 보존.
-- [ ] QA focused+기존 signed reset/contribution/legacy 회귀, Reviewer order/mutex/account/pending/double credit.
+- [x] filter `guest_import_v2_worker` 실행.
+- [x] durable attempt-before-await/target/prefix/same-ID 복구 구현. network await 중 ledger mutex를 유지하지 않는다.
+- [x] sync_once의 legacy cosmetic/journal/usage보다 먼저 연결한다. selected account와 ledger ownership은 completion까지 구분한다.
+- [x] completion 후에만 delta rebuild. delta 없으면 captured upload 재예약0, 있으면 새 canonical version/current 반영, 늦은 old 기록은 lifetime만/credit0.
+- [x] attempt 전 correction은 hold, 이후에는 receipt 복구→imported hold/held 처리. raw scan/private read 유지.
+- [x] **GREEN:** await 중 switch/append/correction, reopen, backend mismatch, server success/local failure, sharing pause, refresh failure의 marker 보존.
+- [x] QA focused+기존 signed reset/contribution/legacy 회귀, Reviewer order/mutex/account/pending/double credit.
 
 ## Task 9: 실제 local API→native worker/cache→sharing→공개 scene
 
 **소유:** Coder. **의존:** Tasks6/8.
 
-**Files:** Create `shop_guest_import_v2_public_scene.sql`, `shop_guest_import_v2_api.sh`, `shop_guest_import_v2_e2e.sh`; test-only local orchestration in `sync/guest_shop_import.rs`. 기존 sharing/WorldPlanet을 사용하고 새 private 공개 필드는 추가하지 않는다.
+**Files:** Create `shop_guest_import_v2_public_scene.sql`, `shop_guest_import_v2_api.sh`, `shop_guest_import_v2_e2e.sh`, `shop_guest_import_v2_native.py`; test-only local orchestration in `sync/guest_shop_import.rs`. Python helper는 동일 승인 범위의 보호된 env/Cargo 호출과 public privacy 검사를 별도 소유 파일로 분리한다. 기존 sharing/WorldPlanet을 사용하고 새 private 공개 필드는 추가하지 않는다.
 
 **Interfaces/environment:** native fixture, actual public DB result, native client/worker, explicit sharing을 연결한다. 현재 DB-only 프로젝트에 API가 있다고 가정하지 않는다. api.sh는 pinned 환경만 사용해 loopback 전용 isolated test API와 synthetic JWT를 준비한다. 기존 hosted/primary API·실제 credentials/session을 읽지 않는다.
 
-- [ ] **RED:** imported hidden placeholder, explicit sharing 후 profile/current0/lifetime/empty scene. mock-only imported 응답은 실제 DB 성공 증거가 될 수 없다.
-- [ ] installed/cached stack의 PostgREST version/image를 확인해 고정한다. pinned disposable DB 전용 run-specific service/config/port/test credentials와 loopback binding을 준비하고 새 service/fixture만 cleanup한다. runtime/image/port를 확인할 수 없으면 환경 blocker로 중단하며 primary/hosted 또는 미승인 전역 설치로 대체하지 않는다.
-- [ ] 이 환경에서만 synthetic auth fixture/JWT를 만들고 auth.uid/RPC grants를 검사한다. DB identity/copy hash/소유 cleanup을 runner와 공유한다. native에 service_role을 전달하지 않는다.
-- [ ] 실제 public RPC로 native exact request를 송신하고 DB result를 actual client/worker/completion에 적용한다. canonical payload/ACK equality 확인.
-- [ ] 성공 후 기존 explicit sharing interface로 viewer를 구성해 공개 scene 조회.
-- [ ] **GREEN:** recursive private-field deny, 반복 조회 DML0, hidden/outsider/other world/anon, initial0, current append 증가, late-old wallet 불변.
+- [x] **RED:** imported hidden placeholder, explicit sharing 후 profile/current0/lifetime/empty scene. mock-only imported 응답은 실제 DB 성공 증거가 될 수 없다.
+- [x] installed/cached stack의 PostgREST version/image를 확인해 고정한다. pinned disposable DB 전용 run-specific service/config/port/test credentials와 loopback binding을 준비하고 새 service/fixture만 cleanup한다. runtime/image/port를 확인할 수 없으면 환경 blocker로 중단하며 primary/hosted 또는 미승인 전역 설치로 대체하지 않는다.
+- [x] 이 환경에서만 synthetic auth fixture/JWT를 만들고 auth.uid/RPC grants를 검사한다. DB identity/copy hash/소유 cleanup을 runner와 공유한다. native에 service_role을 전달하지 않는다.
+- [x] 실제 public RPC로 native exact request를 송신하고 DB result를 actual client/worker/completion에 적용한다. canonical payload/ACK equality 확인.
+- [x] 성공 후 기존 explicit sharing interface로 viewer를 구성해 공개 scene 조회.
+- [x] **GREEN:** recursive private-field deny, 반복 조회 DML0, hidden/outsider/other world/anon, initial0, current append 증가, late-old wallet 불변.
 
 ```bash
 bash supabase/tests/run_guest_import_v2.sh shop_guest_import_v2_public_scene.sql
-bash supabase/tests/shop_guest_import_v2_e2e.sh
+bash supabase/tests/shop_guest_import_v2_e2e.sh --run
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib guest_import_v2 -- --nocapture
 ```
 
-- [ ] QA는 실제 DB/RPC와 mock/native 증거를 구분·연결한다. Reviewer는 privacy/visibility/isolation/과도한 완료 주장을 검토한다.
-- [ ] 실제 Tauri 화면은 disposable app-data/source가 별도 확인됐을 때만 검사한다. 기능 E2E가 rendering PASS를 의미하지 않는다.
+- [x] QA는 실제 DB/RPC와 mock/native 증거를 구분·연결한다. Reviewer는 privacy/visibility/isolation/과도한 완료 주장을 검토한다.
+- [x] 실제 Tauri 화면은 disposable app-data/source가 별도 확인됐을 때만 검사한다. 기능 E2E가 rendering PASS를 의미하지 않는다. 조건 검토 완료: 별도 disposable UI app-data가 확인되지 않아 화면 검사는 미실행이며 rendering PASS를 주장하지 않는다.
 
 ## Task 10: 통합 회귀와 완료 gate
 
@@ -381,25 +381,25 @@ cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib guest_import_
 
 **Files:** 앞 Task의 test scope. Lead가 이 plan/spec의 evidence/status를 기록하고 Coder가 제품 범위를 바꾸지 않는다.
 
-- [ ] 최종 안정 상태에서 전체 Rust/format 실행.
+- [x] 최종 안정 상태에서 전체 Rust/format 실행.
 
 ```bash
 cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib
 rustup run stable cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml --all -- --check
 ```
 
-- [ ] 기존 SQL+새 v2 전체 suite 및 영향을 받은 race 실행. proofless fixture hash/schema1 hold 보존.
-- [ ] native command/account routing/pending output 변경이면 Desktop 회귀/build.
+- [x] 기존 SQL+새 v2 전체 suite 및 영향을 받은 race 실행. proofless fixture hash/schema1 hold 보존.
+- [x] native command/account routing/pending output 변경이면 Desktop 회귀/build.
 
 ```bash
 npm --prefix apps/desktop test
 npm --prefix apps/desktop run build
 ```
 
-- [ ] QA는 counts/pinning/fixture hash/digest/auth cleanup/fault/race/limitations를 보고한다.
-- [ ] Reviewer는 final diff의 spec/authority/compatibility/atomicity/prefix ACK/cache account/privacy를 확인한다. Findings→Coder→영향받은 QA, 필요한 범위의 재검토만 수행.
-- [ ] 변경 없는 evidence는 재사용한다. 변경된 code에 과거 PASS counts를 붙이지 않는다.
-- [ ] Lead는 제한된 ordinary local public 성공과 미지원 domain·hosted 미실행을 기록한다. 미해결 failure가 있으면 해당 완료 판정을 보류한다.
+- [x] QA는 counts/pinning/fixture hash/digest/auth cleanup/fault/race/limitations를 보고한다.
+- [x] Reviewer는 final diff의 spec/authority/compatibility/atomicity/prefix ACK/cache account/privacy를 확인한다. Findings→Coder→영향받은 QA, 필요한 범위의 재검토만 수행.
+- [x] 변경 없는 evidence는 재사용한다. 변경된 code에 과거 PASS counts를 붙이지 않는다.
+- [x] Lead는 제한된 ordinary local public 성공과 미지원 domain·hosted 미실행을 기록한다. 미해결 failure가 있으면 해당 완료 판정을 보류한다.
 
 ## 가정·열린 항목의 처분
 
@@ -558,3 +558,78 @@ Independent candidate QA는 동일 session BEGIN→candidate→original suite→
 Fresh independent Reviewer `reviewer_schema1_privacy_final`은 privacy 수정 및 prepared artifacts CLEAR 판정했다. Public scene9 assertion은 cycle ID 포함 recursive deny와 첫/반복 조회 전후 settlement/reset receipt/device canonical/ACK fingerprint를 보강했다. API/e2e 준비 검사는 syntax 및 exact missing-image fail-closed가 확인됐고 실제 E2E가 아님을 명시한다. Task9 actual RPC→native worker/cache→explicit sharing/public scene, current append/late-old API 통합 및 rendering은 미구현·미실행이다. 그 증거 전에는 Task9/전체5–10 완료를 주장하지 않는다.
 
 남은 정확한 환경 승인 범위는 CLI2.119.0 bundled image `ghcr.io/supabase/cli/postgrest:v16.4-r0@sha256:63a8d4acfdeb107b6568f4582759c78072100ef07951a7fbe58c9a51241138a7` 다운로드와 run-specific loopback-only API 시작/owned cleanup이다. Plan cache-miss 중단 조건에 따라 pull/start는 아직 하지 않았다. 기존 DB/volume/port와 unrelated resources를 변경하지 않는다. Push도 재시도하지 않는다.
+
+## Task 9 exact image 승인과 API lifecycle 증거 (2026-10-04)
+
+Full shell runner는 fixture UUID 부재 proof/보호 manifest 저장 전 DML 금지, owner-scoped world→auth cleanup, digest 복원, pre-manifest abort/response-loss/unknown-file 보존을 구현했다. Frozen SHA `4aeb09b2e8b78c606a26cad2ebfa0a26b8696b1b00e946a75b6d1b1813f4f5de`의 독립 shell QA는 **11개 listed/discoverable mock harness**, 12 embedded Python compile, bash/diff PASS다(`/private/tmp/task9-shell-final-preexecution-qa.log`). Coder의 최초 12 harness 보고는 확인된 11개로 정정한다. Native helper 호출은 mocked이며 실제 fixture 실행은 helper QA와 joint Reviewer 후 진행한다.
+
+추가 security pre-execution gate는 Python `ProxyHandler({})`/redirect 거절과 native cfg(test) no-proxy/no-redirect client, credential 읽기 전 소유 proxy.port와 canonical loopback origin/source/world-id 검증을 포함한다. 독립 QA는 5 pure harness, 7 Python compile, Rust 10/10(실제 E2E 1 ignored), fmt/diff PASS를 확인했다(`/private/tmp/task9-security-preexecution-qa.log`, `/private/tmp/task9-security-native-qa.log`). Fresh Reviewer는 lifecycle-only live 실행 CLEAR로 판정했다. Production client constructor는 변경하지 않았다.
+
+현재 frozen Rust source의 Task10 독립 전체 serialized 회귀는 **375 passed/0 failed/1 ignored**, exit0, fmt PASS다(`/private/tmp/task10-task9-full-rust-qa.log`, `/private/tmp/task10-task9-fmt-qa.log`). Ignored 1개는 아직 실행하지 않은 실제 Task9 native E2E이며 이 전체 lib 성공에 포함하지 않는다. SQL40/1103·race4 및 Desktop327/build는 변경 없는 해당 source의 이전 독립 증거를 재사용한다. Task9 actual gate는 열린 상태다.
+
+UID501 사용자 실행에서 짧은 PATH의 `/usr/sbin/lsof` 누락으로 첫 시도는 side effect 전에 중단했다. `/usr/sbin`만 추가한 재실행은 owned API `127.0.0.1:54480` → owned proxy → missing RPC 404/PGRST202 → cleanup을 exit0으로 검증했다(`/private/tmp/task9-proxy-live-lifecycle-path.log`). 소유 API label inventory와 run 경로는 비었고 protected digest는 `ce9ef4b37d29422d9d8cd8cb3c9d9bba`로 동일했다. 이 증거는 proxy lifecycle만 검증하며 fixture/native actual E2E 완료를 의미하지 않는다.
+
+사용자가 `ghcr.io/supabase/cli/postgrest:v16.4-r0@sha256:63a8d4acfdeb107b6568f4582759c78072100ef07951a7fbe58c9a51241138a7`만 pull하고 기존 고정 disposable DB를 사용하는 loopback API와 실제 E2E를 실행한 뒤 소유 자원을 정리하도록 승인했다. 이 한 image를 pull해 digest와 PostgREST16.4를 확인했다. DB reset/rebind, hosted/primary, 다른 image·volume 정리는 범위 밖이며 push 차단은 유지한다.
+
+API script SHA `eb65f8b65c76dff528a36bd257f3612ef2519cef2a8aa21acb0c71fe4c21ea46`은 static/pure QA PASS와 독립 시작 전 Reviewer CLEAR를 받았다. Exact desktop-linux socket, pinned DB/network/config/image, mode별 인자와 canonical 소유 경로, run label/ID/image/loopback 소유권을 검사한다. Mock absent-container 정리는 성공하고 mismatch/multiple/query failure는 파일을 보존하며 실패한다. `/private/tmp/task9-api-preflight-qa-final.log`.
+
+실제 lifecycle QA는 `--start` → loopback HTTP200 → `--stop`을 exit0으로 검증했다. Run `9cb42bcb73a0ce81b93db74b`, API `127.0.0.1:50259`만 bind, 기존 고정 DB network 사용. 소유 API container와 runtime 파일은 제거됐으며 auth0, 보호 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba`, DB container ID/identity/기존55432 바인딩이 불변이었다. `/private/tmp/task9-api-lifecycle-qa.log`.
+
+이 증거는 lifecycle/health에 한정한다. Synthetic auth fixture와 실제 RPC/native worker/cache/public scene E2E는 아직 미실행이며 proxy/outer runner와 current append/late-old native acceptance를 작성 중이다. 전체 완료 및 rendering PASS는 주장하지 않는다.
+
+### Actual E2E 진단 checkpoint (2026-10-04)
+
+이후 joint pre-execution QA/Reviewer CLEAR를 받은 UID501 `--run`을 실행했다. 첫 실패는 native RPC 전에 pending import의 game-mutation guard가 `rebuild_shop_contributions`를 `InvalidShopState`로 거절한 테스트 순서 오류였다. 오류 문맥을 가리던 Python 요약기는 별도 RED→GREEN/독립14/14 QA/Reviewer로 수정했다. Production guard는 유지하고 immutable request/version/prefix/current0 및 raw17 행을 확인한 뒤, 재계산과 journal 준비를 Imported·초기 shared0 확인 뒤로 이동했다. 독립 focused6/6(실제 probe ignored1)·guard5/5 QA와 Reviewer CLEAR를 받았다.
+
+다음 실제 실행은 첫 import RPC까지 진행했으나 HTTP403으로 실패했다. Safe cfg(test) transport 진단은 요청을 한 번만 전달하고 고정 오류 종류·HTTP 상태만 기록한다(독립7/7, 실제 probe ignored1, Reviewer CLEAR). `/private/tmp/task9-actual-e2e-safe-error.log`가 `HttpRejected(403)`을 확인하며 local completion에는 도달하지 않았다. `authenticated`의 public RPC EXECUTE/schema USAGE는 확인됐으므로 정확한 PostgREST 오류 코드 확인 전 권한이나 production 동작을 바꾸지 않는다.
+
+각 실패 후 독립 read-only cleanup QA는 auth0/world0, protected digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba`, history28/max20261003061830, 기존 DB ID/volume/55432 binding 보존과 소유 API/proxy/run 파일 부재를 확인했다. 최신 `/private/tmp/task9-safe-error-cleanup-qa.log`. 승인 image는 재시도용으로만 cached 상태이며 referencing container는 없다. Task9 실제 E2E 및 Task10 최종 gate는 여전히 열려 있고 완료/rendering PASS를 주장하지 않는다.
+
+### Task9 로컬 인증 호환 bounded 설계·계획 수정안
+
+기존 API/E2E runner에 run 소유 임시 pre-request 함수를 연결합니다. DB 객체 생성·API 시작·실패 복구에 순서 의존성이 있어 계획이 필요합니다. 추가 호환 fixture 범위는 CEO 승인 사실을 반영하며, 최종 계획 gate는 Lead가 처리합니다.
+
+**설계**
+
+- 기존 `private` schema에 고유 `private.task9_claim_bridge_<24hex>() RETURNS void`를 생성합니다. `SECURITY INVOKER`, `SET search_path = ''`를 사용하고 API 노출 schema는 `public`을 유지합니다.
+- 기존 schema owner/ACL과 authenticated USAGE를 기록·검증합니다. 기존 권한은 변경하지 않습니다. 새 함수의 `PUBLIC EXECUTE`를 생성 transaction 안에서 revoke하고 **authenticated만 EXECUTE**를 부여합니다.
+- 함수는 `current_user='authenticated'`, JSON object claims, 문자열 `role='authenticated'`, 문자열 canonical UUID `sub`를 모두 검증합니다. UUID는 소문자 8-4-4-4-12 hex와 `uuid` cast를 통과해야 합니다. 누락·잘못된 타입·malformed JSON·role 불일치는 SQLSTATE42501로 거절합니다.
+- 검증 후 상태 변경은 `pg_catalog.set_config('request.jwt.claim.sub', sub, true)` 하나입니다. `auth.uid()`, role defaults, 기존 함수·ACL·product migration은 변경하지 않습니다.
+- owned API env에 정확한 `PGRST_DB_PRE_REQUEST` 함수명을 넣습니다. anon은 함수를 실행할 권한이 없어 기존 403 거절을 유지합니다. anon 권한을 추가하지 않습니다.
+- hook 적용 후 API health는 짧은 수명의 synthetic authenticated JWT로 OpenAPI를 읽습니다. signed `role`과 canonical UUID `sub`를 사용하며 auth row는 생성하지 않습니다. JWT는 owned mode0600 manifest에서 읽고 argv·로그·출력에 노출하지 않습니다. 응답에 불필요한 DB 쓰기가 발생하지 않아야 합니다.
+
+권장안은 이 임시 bridge입니다. legacy image 교체는 exact image 승인 경로를 바꾸며, `auth.uid()` 교체는 production 인증 동작을 바꾸므로 현재 범위에 맞지 않습니다.
+
+**실행 계획**
+
+수정 파일은 `/Users/yunho/Desktop/project/token-planet/supabase/tests/shop_guest_import_v2_api.sh`와 `/Users/yunho/Desktop/project/token-planet/supabase/tests/shop_guest_import_v2_e2e.sh`입니다.
+
+1. **TDD mocks:** 함수 사전 존재, authenticated USAGE 부재, 다른 DB identity, manifest 손상·소유권 불일치, CREATE/OID 기록/COMMIT 응답 소실, health 실패, DROP 불일치·재정리 경로를 RED→GREEN으로 검증합니다. authenticated health JWT 보호, anon403, 정확한 hook env도 포함합니다.
+2. **DDL 전 manifest:** pinned DB/container/image/volume/binding, 함수 signature 초기 부재, schema owner/ACL, role settings, 기존 함수 정의·권한, history·row digest·전체 schema fingerprint와 예정 정의 hash를 보호 manifest에 원자 저장·flush합니다.
+3. **생성 transaction:** `CREATE OR REPLACE` 없이 함수와 소유 함수 ACL을 생성합니다. 열린 transaction에서 실제 OID·owner·signature·definition hash·ACL·security/search-path 설정을 읽어 manifest에 저장·flush한 뒤 COMMIT합니다. COMMIT 전 연결 소실은 rollback, COMMIT 응답 소실은 저장된 OID로 판정·복구합니다.
+4. **rollback SQL:** 정상 authenticated UID 일치, 오류 claims42501, transaction 종료 후 legacy GUC 복원, `auth.uid()`·기존 ACL 불변을 검증합니다. anon 거절과 pooled 요청 간 UID 누출 부재는 실제 HTTP에서도 확인합니다.
+5. **독립 gate:** mocks·syntax/embedded Python compile·rollback SQL을 QA가 확인하고 fresh Reviewer가 권한·manifest·실패 복구·JWT 보호를 검토합니다. CLEAR 후 UID501로 approved exact API/E2E만 실행합니다. authenticated health, anon403, 원래 import→worker/cache→sharing/public scene acceptance를 모두 유지합니다.
+6. **정리·복구:** 신규 요청 유입과 owned proxy/API를 중단하고 기존 owner-scoped fixture cleanup을 수행합니다. shim manifest는 DB 정리 완료까지 보존합니다. pinned DB와 OID·owner·signature·정의 hash·ACL·설정이 모두 일치할 때만 `DROP FUNCTION`을 CASCADE 없이 실행합니다. 실패·불일치는 manifest를 보존하고 비정상 종료합니다. 함수가 이미 없어도 전체 baseline 검증 후에만 파일을 제거합니다.
+
+수용 조건은 actual E2E 성공과 임시 함수/API/proxy/fixture 부재, schema·ACL·settings fingerprint, history28/max20261003061830, row digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 및 기존 bindings 복원입니다. 다른 DB의 결과는 증거에서 제외합니다.
+
+자체 검토에서 anon 권한 확대와 hook 적용 후 anonymous health 의존성을 제거했습니다. 남은 실행 전 확인은 authenticated의 실제 schema USAGE, fingerprint coverage, health JWT 보호와 pre-COMMIT manifest protocol입니다. 경로 문제는 발견하지 않았으며 파일 수정·live 작업은 수행하지 않았습니다.
+
+Lead 통합: `/private/tmp/task9-sqlstate-cleanup-and-claims-qa.log`의 rollback-only boolean proof는 JSON claims에서 UID NULL, legacy setting에서 UID 일치를 확인했다. Exact HTTP403/42501은 `/private/tmp/task9-actual-e2e-sqlstate.log`에 status/code만 기록됐다. CEO는 reversible compatibility fixture와 위 authenticated-only/health 수정안을 승인했다. Native execution mode, 현재 checkout, QA→fresh Reviewer→live 순서를 유지한다. Product migration/기존 ACL 변경 및 push는 금지한다.
+
+
+## Task9 actual PASS와 Task10 최종 증거 (2026-10-04)
+
+이 절이 앞선 PARTIAL/환경 blocker/HTTP403 checkpoint를 대체한다. 승인된 exact PostgREST16.4 image와 UID501·127.0.0.1 API만 사용했다. 제품 migration/auth.uid/기존 ACL·role settings를 변경하지 않고, private의 run-owned invoker/empty-search-path/authenticated-only pre-request 함수가 검증된 JSON UUID sub를 transaction-local legacy GUC에 연결했다. manifest/OID/정의 hash/권한·전체 보호 baseline 확인 후 exact DROP(no CASCADE) 및 복원을 수행했다.
+
+TDD 및 독립 gate: initial process-substitution RED는 함수 로딩 자체가 실패한 무효 scaffold였다. Coder 자신의 미검증 body만 제거해 기존 snapshot을 복원한 뒤 실제 owned source-prefix와 기존 stop positive control로 true RED→GREEN을 다시 수행했다. 이후 OID·fingerprint mismatch, 출력 한도, coalesced marker, COMMIT 응답 소실, absent/idempotent cleanup, lifecycle/readiness RED→GREEN을 기록했다. 최종 API SHA `b973f95a9c81714867e458d7bea7c4d33727277332fb45e812706b9a2a6b5b6a`의 독립 QA는 lifecycle14/create7/baseline8/identifier1/fixture cleanup/Python17/syntax PASS이며 fresh Reviewer CLEAR다. 로그 `/private/tmp/task9-auth-shim-readiness-final-independent-qa.log`.
+
+첫 shim 실제 실행은 import/cache/initial sharing까지 성공한 뒤 current17 worker guard에서 실패했다. native fixture가 로컬 `account:<UUID>`를 bare UUID 입력인 worker에 넘겨 `account:account:<UUID>`를 비교한 원인이다. 실제 첫 guard를 사용하는 집중 RED는 prefixed 입력/remote0을 재현했고, cfg(test) current/late 호출 두 곳만 bare UUID로 수정했다. prefixed 거절/remote0과 bare 허용/planet_state1을 보존한 focused QA1/1 및 fresh Reviewer CLEAR 후 재실행했다. 제품 guard는 변경하지 않았다. 실패 후에도 독립 cleanup PASS다(`/private/tmp/task9-auth-shim-failed-run-cleanup-qa.log`).
+
+**실제 Task9 PASS:** `/private/tmp/task9-actual-e2e-bare-account.log`, runner exit0, native ignored probe를 명시 실행해 **1 passed**, public boundary **denials3/viewer_reads3/database_digest_unchanged=true**. 실제 RPC 결과와 immutable prefix ACK·로컬 ownership/cache, hidden initial0, explicit sharing, current17 증가, late closed-cycle7의 lifetime 증가/current17·growth·단일 wallet credit 불변, recursive private-field deny를 검증했다. run `7227c20cf62d32a45b5055b2`, API127.0.0.1:58582의 owned service만 사용했다. 별도 disposable Tauri UI 환경이 없어 rendering은 미실행이다.
+
+**독립 성공 cleanup PASS:** `/private/tmp/task9-auth-shim-success-run-cleanup-qa.log`. DB identity `postgres|postgres|5432`, pinned container/image/volume/config/기존55432 binding 유지. schema fingerprint `9e6a0f732a1def6cb355d6f946773c20`, complete history hash `345a066ea3b807a4a54b0d7609e6200a`(28/max20261003061830), 48-table digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba`, auth0/world0/shim0. API name/label inventory0, proxy PID23531/run directory 부재. 별도 refs/containers가 없는 exact 새 image만 제거하고 inspect 부재를 검증했다(`/private/tmp/task9-approved-image-final-cleanup.log`). DB/volume/기존 network/binding 및 다른 resources는 제거하지 않았다.
+
+**Task10 회귀:** 최신 독립 serialized offline Rust **380 passed/0 failed/1 ignored**, fmt/diff/hash PASS(`/private/tmp/task10-task9-final-rust-bare-arg-qa.log`); ignored1은 위 실제 Task9 실행으로 별도 PASS가 확보됐다. Desktop327/327(18files)·TS/Vite build47modules의 `/private/tmp/task10-qa-restored-desktop-{test,build}.log`, 전체 SQL40/1103 assertions 및 affected race4/4의 `/private/tmp/task10-qa-schema1-final-summary.json`/`task10-qa-schema1-final-race.log`를 해당 코드/SQL 불변 및 실제 cleanup의 schema/history/digest 복원 증거와 함께 재사용한다. SQL40에는 validation53/writer47/public27/schema1 hold15/public scene9와 기존 회귀가 포함된다. API shim은 제품 migration을 바꾸지 않았고 cleanup 후 기존 schema로 돌아왔다. 전체 SQL/race를 이번 actual run 뒤 다시 실행했다고 주장하지 않는다.
+
+제한된 ordinary first-reset zero-effect 도메인의 로컬 성공만 검증했다. hosted/primary/deploy/merge/push는 미실행이며 broader domain/correction 재정산 및 UI rendering PASS를 주장하지 않는다. 최종 full-scope Reviewer `reviewer_task9_task10_final_acceptance`는 substantive P1/P2 findings 없음으로 CLEAR 판정했다. 독립 final resource QA(`/private/tmp/task9-final-resource-absence-qa.log`)는 exact image ref/ID 부재, pinned DB healthy·config/volume/bindings 불변, schema/history/48-table digest 동일 및 auth0/world0/shim0/API·proxy·run 부재를 다시 확인했다. Tasks5–10 acceptance 완료. Local commit은 이 Task9/10의 의도한 9개 파일만 포함하며 commit ID는 git log와 최종 보고에 기록한다. Push는 하지 않는다.

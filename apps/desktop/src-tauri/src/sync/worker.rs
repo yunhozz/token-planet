@@ -2929,6 +2929,60 @@ mod tests {
         const TARGET_ACCOUNT: &str = "account:00000000-0000-4000-a000-000000000071";
         const OTHER_TARGET_ACCOUNT: &str = "account:00000000-0000-4000-a000-000000000072";
 
+        #[test]
+        fn imported_first_reset_task9_worker_reaches_remote_with_fixture_account_id() {
+            let user_id = TARGET_ACCOUNT.strip_prefix("account:").unwrap();
+            let mut ledger = prepared_first_reset_ledger();
+            let PendingGuestShopImport::V2(capture) = ledger
+                .capture_guest_shop_import_request(TARGET_ACCOUNT)
+                .unwrap()
+            else {
+                panic!("the prepared first-reset fixture must capture a schema-2 request");
+            };
+            let request = capture.request;
+            ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+            ledger
+                .mark_guest_shop_import_attempt_started(
+                    TARGET_ACCOUNT,
+                    request.snapshot.import_id.parse().unwrap(),
+                )
+                .unwrap();
+            let imported = imported_result_for(&request);
+            ledger
+                .complete_guest_shop_import(TARGET_ACCOUNT, &imported)
+                .unwrap();
+            let state = app_state_from_ledger(ledger);
+            let cycle_id = state.ledger.lock().unwrap().planet_cycle_id().unwrap();
+            let mut prefixed_api = super::mock_private_api(Some(&state.ledger), user_id, &cycle_id);
+            prefixed_api.fail_state = true;
+            let prefixed_result = tauri::async_runtime::block_on(sync_private_effect_contribution(
+                &state,
+                TARGET_ACCOUNT,
+                "account-token",
+                &prefixed_api,
+                false,
+            ));
+            assert_eq!(
+                prefixed_result,
+                Err("계정 또는 행성 주기가 변경되어 동기화를 중단했습니다".into())
+            );
+            assert!(prefixed_api.calls.lock().unwrap().is_empty());
+
+            let mut api = super::mock_private_api(Some(&state.ledger), user_id, &cycle_id);
+            api.fail_state = true;
+
+            let result = tauri::async_runtime::block_on(sync_private_effect_contribution(
+                &state,
+                user_id,
+                "account-token",
+                &api,
+                false,
+            ));
+
+            assert_eq!(result, Err("행성 동기화 상태를 불러올 수 없습니다".into()));
+            assert_eq!(*api.calls.lock().unwrap(), vec!["planet_state"]);
+        }
+
         fn ledger_snapshot_excluding_selected_auth(
             connection: &rusqlite::Connection,
         ) -> Vec<String> {

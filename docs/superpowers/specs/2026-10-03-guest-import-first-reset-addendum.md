@@ -1,6 +1,6 @@
 # 일반 게스트 첫 reset 가져오기 명세 추가안
 
-상태: written spec 및 실행 계획 승인 완료. Tasks1–8 구현·독립 QA·Reviewer gate 완료. Task9는 SQL 공개 장면 9/9와 fail-closed API 준비 검사까지 PARTIAL/BLOCKED이며 actual API→native worker/cache→sharing/public scene E2E는 미구현·미실행이다. Task10은 Rust365/365, Desktop327/build, 전체 SQL40 suites1103/1103·race4/4 및 schema1 privacy 수정의 fresh Reviewer CLEAR를 확보했으나 Task9 의존 통합 완료 판정은 보류한다. Exact uncached PostgREST image 준비 승인 전 pull/start하지 않는다.
+상태: written spec 및 실행 계획 승인 완료. Tasks1–10 구현·독립 QA·Reviewer gate와 actual loopback API→native worker/cache→explicit sharing/public scene E2E PASS(native1, denial3/viewer read3/DML0). 승인된 run-owned 인증 호환 함수는 exact DROP 및 schema/history/48-table digest 복원으로 정리됐고 auth0/world0/shim0/API·proxy·run-file 부재를 독립 확인했다. 새 exact PostgREST 이미지만 제거했다. Task10 최신 독립 Rust380 PASS/0 FAIL/actual ignored1(실제 probe는 별도1 PASS), Desktop327/build, 전체 SQL40 suites1103/1103·race4/4 증거를 확보했으며 최종 full-scope Reviewer CLEAR 및 Tasks5–10 acceptance 완료. 의도한 파일만 local conventional commit으로 확정한다. prior HTTP403/guard 실패는 아래 execution evidence의 호환 fixture와 cfg(test) bare UUID 인자 수정으로 해소했다. rendering/hosted/deploy/merge/push 미실행.
 기준: PR #6, `feat/shop-system-revamp`, `f233b612773b8afda88528040bdd67886f9b0b06`.
 상위 명세: [상점 개편 명세](2026-10-01-shop-system-revamp.md) §8.2–8.4.
 관련 계획: [상점 개편 계획](../plans/2026-10-01-shop-system-revamp.md) Task8B–D.
@@ -540,3 +540,27 @@ Independent candidate QA는 동일 session BEGIN→candidate→original suite→
 Fresh independent Reviewer `reviewer_schema1_privacy_final`은 privacy 수정 및 prepared artifacts CLEAR 판정했다. Public scene9 assertion은 cycle ID 포함 recursive deny와 첫/반복 조회 전후 settlement/reset receipt/device canonical/ACK fingerprint를 보강했다. API/e2e 준비 검사는 syntax 및 exact missing-image fail-closed가 확인됐고 실제 E2E가 아님을 명시한다. Task9 actual RPC→native worker/cache→explicit sharing/public scene, current append/late-old API 통합 및 rendering은 미구현·미실행이다. 그 증거 전에는 Task9/전체5–10 완료를 주장하지 않는다.
 
 남은 정확한 환경 승인 범위는 CLI2.119.0 bundled image `ghcr.io/supabase/cli/postgrest:v16.4-r0@sha256:63a8d4acfdeb107b6568f4582759c78072100ef07951a7fbe58c9a51241138a7` 다운로드와 run-specific loopback-only API 시작/owned cleanup이다. Plan cache-miss 중단 조건에 따라 pull/start는 아직 하지 않았다. 기존 DB/volume/port와 unrelated resources를 변경하지 않는다. Push도 재시도하지 않는다.
+
+### Task9 승인된 local API lifecycle checkpoint (2026-10-04)
+
+사용자가 exact PostgREST `v16.4-r0@sha256:63a8d4acfdeb107b6568f4582759c78072100ef07951a7fbe58c9a51241138a7` pull, 기존 pinned disposable DB에 대한 loopback API/실제 E2E 및 소유 자원 정리를 승인했다. 이 image만 준비했고 DB·volume·기존 binding을 변경하지 않았다. API script `eb65f8b6…c21ea46`의 static QA와 독립 시작 전 Reviewer는 PASS/CLEAR다. 실제 start/HTTP200/stop QA는 API127.0.0.1:50259만 bind하고 소유 container/runtime 파일 제거, auth0·보호 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba`·DB identity/binding 불변을 확인했다. 증거 `/private/tmp/task9-api-preflight-qa-final.log`, `/private/tmp/task9-api-lifecycle-qa.log`.
+
+Actual RPC/native worker/cache→sharing/public scene 및 current append/late-old API 통합은 아직 미실행이다. 이 lifecycle 성공을 Task9 완료나 rendering 성공으로 취급하지 않는다. Push 차단은 유지한다.
+
+추가 Python/native proxy·redirect·소유 origin/source/world-id guard는 독립 QA 5 harness/7 Python compile/Rust 10 PASS(실제 E2E 1 ignored)와 fresh Reviewer lifecycle-only CLEAR를 통과했다. UID501 실행의 PATH에 설치된 `/usr/sbin/lsof`를 포함한 뒤 owned loopback API127.0.0.1:54480/proxy missing-RPC404-PGRST202/cleanup이 exit0이었다. 소유 label inventory/run files 없음, 보호 digest 동일. `/private/tmp/task9-security-preexecution-qa.log`, `/private/tmp/task9-security-native-qa.log`, `/private/tmp/task9-proxy-live-lifecycle-path.log`. Fixture credentials와 실제 native E2E는 다음 구현·QA·review gate까지 실행하지 않는다.
+## Task9 로컬 인증 호환 fixture 승인 메모 (2026-10-04)
+
+실제 고정 로컬 PostgREST16 호출은 HTTP403/SQLSTATE42501을 반환했다. Rollback-only probe는 JSON `request.jwt.claims`만 설정할 때 이 disposable DB의 legacy-only `auth.uid()`가 NULL이고, `request.jwt.claim.sub`를 설정할 때 UID가 일치함을 확인했다. Product import/ACL 수정의 근거로 사용하지 않는다.
+
+CEO가 승인한 reversible compatibility fixture는 고유한 `private.task9_claim_bridge_<run>()` SECURITY INVOKER/empty search_path 함수다. 인증된 JSON role/sub의 canonical UUID를 검증하고 transaction-local legacy setting만 전달한다. 새 함수 EXECUTE는 authenticated만 허용하며 기존 schema/role/function 권한은 변경하지 않는다. API pre-request는 exact owned 함수만 호출하고 health는 짧은 수명 authenticated 테스트 JWT를 사용한다. 소유 manifest-before-COMMIT, OID/owner/정의 hash/ACL 일치 DROP, schema/settings/history/row baseline 복구와 QA→fresh Reviewer gate를 계획에 기록했다.
+
+Task9 actual E2E 및 Task10 최종 gate는 열린 상태다. HTTP 성공·native/cache·공개 scene 검증과 소유 fixture/image/API/proxy/files 정리까지 완료하기 전 완료를 주장하지 않는다.
+
+
+## Task9 actual PASS 및 Task10 최신 검증 (2026-10-04)
+
+실행 계획의 `Task9 actual PASS와 Task10 최종 증거`가 이전 PARTIAL/HTTP403 checkpoint를 대체한다. Authenticated-only run-owned pre-request shim은 JSON claims와 legacy-only auth.uid를 transaction-local로 연결하며 제품 migration/auth.uid/기존 ACL·settings를 수정하지 않았다. 첫 실제 shim 실행의 current17 실패는 cfg(test)가 로컬 account-prefixed 키를 bare UUID worker 입력으로 넘긴 인자 오류였고, 동일 guard의 focused RED→GREEN/독립 QA/fresh Reviewer 후 current·late 두 인자만 수정했다.
+
+실제 `/private/tmp/task9-actual-e2e-bare-account.log` exit0: native1 PASS, public denials3/viewer reads3/DML0, current17·late-old7의 lifetime/current/growth/wallet 및 private-field denial을 검증했다. 독립 `/private/tmp/task9-auth-shim-success-run-cleanup-qa.log`는 schema `9e6a0f732a1def6cb355d6f946773c20`, history `345a066ea3b807a4a54b0d7609e6200a`(28/max20261003061830), 48-table digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba`, auth0/world0/shim0/API·proxy·run 부재 및 pinned DB/volume/bindings 보존을 확인했다. Exact 새 image만 제거했다(`/private/tmp/task9-approved-image-final-cleanup.log`).
+
+Task10 최신 Rust380/0FAIL/1actualignored 및 fmt는 `/private/tmp/task10-task9-final-rust-bare-arg-qa.log`; actual ignored probe는 위 E2E에서 별도 통과했다. SQL40/1103·race4/4와 Desktop327/18files·build47modules는 해당 SQL/제품 source 불변 및 schema 복원 증거와 함께 이전 독립 결과를 재사용한다. 이번 actual 뒤 SQL/race 재실행 또는 별도 Tauri UI rendering을 주장하지 않는다. 최종 full-scope Reviewer CLEAR 및 독립 final resource QA PASS(`/private/tmp/task9-final-resource-absence-qa.log`)를 계획에 기록했다. Tasks5–10 acceptance 완료, local commit만 수행하며 push는 하지 않는다.
