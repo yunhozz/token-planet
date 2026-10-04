@@ -523,3 +523,36 @@ Task8 PASS: 위 checkpoint의 P2는 별도 behavioral RED (`[]` vs `[planet_stat
 최종 독립 QA: `CARGO_INCREMENTAL=0 cargo test --offline --manifest-path apps/desktop/src-tauri/Cargo.toml --lib -- --test-threads=1` 365/365 exit0; `--lib authenticated_sync_ -- --test-threads=1` 12/12 exit0. Test-only wrapping 수정 후 독립 format/diff 재검사 exit0. Logs `/private/tmp/task8-correction-read-red.log`, `/private/tmp/task8-qa-correction-read-full.log`, `/private/tmp/task8-qa-correction-read-focused.log`, `/private/tmp/task8-qa-correction-read-fmt-final.log`. 이전 364 count는 수정 전 checkpoint이며 최종 code에는 365 count를 사용한다.
 
 Task10 Rust/full-scope correctness review/format은 위 최종 상태 증거로 충족했다. SQL 및 affected race는 변경 없는 Tasks5/6 evidence를 재사용하지만 현재 Docker 환경 때문에 최종 rerun은 불가다. Task9 실제 local API/E2E 및 Task10 Desktop test/build는 위 환경 blocker 때문에 미완료이며 전체 Tasks5–10 완료는 주장하지 않는다. Dependency/runtime 설치나 다른 DB/API 사용 없이 중단 조건을 지켰다. Task8은 로컬 conventional commit만 수행하며 거절된 push를 재시도하지 않는다.
+
+
+## Task 9/10 환경 복구 후 checkpoint (2026-10-04)
+
+사용자는 Docker 복구·CLI 설치 후 Task9/10 진행과 Desktop 환경 수선을 승인했다. Docker Engine29.8.1은 elevated local read에서 정상 응답한다. 기본 sandbox의 socket permission denied는 daemon 장애 증거가 아니며 elevated local-only runner를 사용한다. CLI2.119.0이 설치됐고 pinned config/project/container/volume은 기존 값, PG17.6.1.171/auth0/history28/max20261003061830을 유지한다. DB host binding0.0.0.0/::55432는 기존 상태로 보존하며 Task9 API는 별도 loopback-only가 요구된다. 다른 DB/volume을 수정하거나 초기화하지 않았다.
+
+기존 `/usr/local/bin/node`22.21.0 및 npm10.9.4를 명시 PATH로 사용하고 승인된 `npm ci`로 lockfile 의존성만 복원했다. Node/npm 설치는 추가로 필요하지 않았다. Package-lock SHA256 `8e93c5d0d30963e7d670f0ee7f1d2ec98a0bfac285efdc4b35140956ed7926cb` 불변, package/source 수정 없음. 이전 missing TS/Rolldown startup blocker는 해결됐다.
+
+최신 독립 QA: validation53/53, writer47/47, public27/27, schema1 hold15/15, affected race4/4 모두 exit0. 각 SQL rollback 및 owned race cleanup 후 보호 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 동일, test-owned auth/receipt/game 행0. Logs `/private/tmp/task10-qa-sql-{validation,writer,public,hold,race}.log`. Desktop tests327/327(18files) 및 TypeScript/Vite build47modules exit0: `/private/tmp/task10-qa-restored-desktop-{test,build}.log`. Task8 최종 Rust365/365와 fmt/diff 및 full-scope Reviewer CLEAR는 코드 불변으로 재사용한다.
+
+Task9 actual API/E2E는 아직 미완료다. Cached image inventory에 PostgREST가 없으며 설치 CLI2.119.0의 bundled artifact manifest는 `ghcr.io/supabase/cli/postgrest:v16.4-r0@sha256:63a8d4acfdeb107b6568f4582759c78072100ef07951a7fbe58c9a51241138a7`(upstream `postgrest/postgrest:v16.4`)를 지정한다. Plan의 cache-miss 중단 조건에 따라 image pull/API start를 하지 않았다. 환경 의존 없는 planned public-scene/runner artifacts를 먼저 준비·검토하고 이 exact image의 별도 준비 승인이 필요하다. 전체 완료 gate는 Task9 실제 API/native/public scene 증거 후에만 닫는다. Push는 재시도하지 않는다.
+
+
+## Task 10 전체 SQL 회귀 RED (2026-10-04)
+
+위 선택 suite PASS 이후 전체 기존 SQL+v2를 독립 QA로 실행했다. 40 suites 중39 PASS/1 FAIL, 1102 assertions 중1101 PASS/1 FAIL이다. 유일한 실패는 `shop_guest_import_bootstrap.sql` TAP17의 schema1 public held-only privacy assertion이다. 원래 assertion은 반환 JSON을 출력하지 않으므로 실제 반환값 진단 전 원인을 확정하지 않는다. 이 회귀를 해결하고 Task5/6 public/schema1 및 race/전체40을 재검증하기 전 Task10 완료 판정은 보류한다.
+
+모든 SQL/fixture staged hash가 일치하고 drift0, 각 suite 명시적 rollback, 보호 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba` 동일/auth0/history28/max20261003061830/probe0. Summary `/private/tmp/task10-qa-full-sql-summary.json`, failure `/private/tmp/task10-qa-full-sql-shop_guest_import_bootstrap.log`, final state `/private/tmp/task10-qa-full-sql-final-state.log`.
+
+Task9 준비물 public scene SQL은 8/8, readiness api/e2e scripts는 syntax PASS 및 exact uncached image gate에서 exit1로 중단됨을 독립 확인했다. Logs `/private/tmp/task9-qa-api-readiness.log`, `/private/tmp/task9-qa-e2e-failclosed.log`. 이는 fail-closed readiness 증거이며 실제 E2E 성공이 아니다. Public scene privacy/fingerprint assertion 범위도 추가 검토 중이다.
+
+
+## Task 10 schema1 privacy 회귀 수정 최종 증거 (2026-10-04)
+
+실제 diagnostic RED는 schema1 요청과 private 성공 receipt가 같을 때 public RPC가 `status=imported`, private `result` 및 `source_metadata`를 반환함을 확인했다. 원인은 M_PUBLIC의 schema 분기 이전 private receipt replay였다. CLI2.119.0 생성 `supabase/migrations/20261004013811_guest_import_schema1_private_receipt_guard.sql`(SHA256 `aaf60b3ba940a3e621325a87502335e3db35c04e0707ac453000da44e10a096b`)은 이 replay를 schema2에만 제한한다. 기존 schema1 strict validator/public held replay/freshness/형식은 유지했다. Applied 과거 migration은 수정하지 않았다.
+
+Independent candidate QA는 동일 session BEGIN→candidate→original suite→ROLLBACK으로 bootstrap31/public27/hold15/scene9=82/82 통과하고 function definition/ACL/owner/security/search_path/history/auth/digest 전후 동일을 확인했다. 이후 Lead는 exact config/context/containerID/volume/55432/identity 및 source/container SHA를 재확인해 corrective migration 하나만 `psql -X -v ON_ERROR_STOP=1 --single-transaction` 적용했다. Owned temp copy 제거, 다른 migration/history repair/reset/API/hosted 작업 없음. Apply 기록 `/private/tmp/task10-schema1-guard-apply.log`.
+
+최종 독립 QA 전체40 SQL suites **1103/1103 PASS**, 모든 runner exit0/명시적 rollback/hash drift0, affected race4/4 PASS 및 owned fixtures cleanup0. 실제 schema1 응답은 `active_account`, `has_result=false`, `has_source_metadata=false`; schema2 replay/public27 및 legacy hold15 유지. 보호 digest `ce9ef4b37d29422d9d8cd8cb3c9d9bba`, auth0/history28/max20261003061830/probe0. Owner postgres/SECURITY DEFINER/빈 search_path/기존 ACL 동일. Logs `/private/tmp/task10-qa-schema1-final-summary.json`, `task10-qa-schema1-final-shop_guest_import_bootstrap.log`, `task10-qa-schema1-final-race.log`, `task10-qa-schema1-final-state.log` 및 같은 prefix의 per-suite logs. Rust365/fmt/diff, Desktop327/build PASS는 해당 source 불변으로 재사용한다.
+
+Fresh independent Reviewer `reviewer_schema1_privacy_final`은 privacy 수정 및 prepared artifacts CLEAR 판정했다. Public scene9 assertion은 cycle ID 포함 recursive deny와 첫/반복 조회 전후 settlement/reset receipt/device canonical/ACK fingerprint를 보강했다. API/e2e 준비 검사는 syntax 및 exact missing-image fail-closed가 확인됐고 실제 E2E가 아님을 명시한다. Task9 actual RPC→native worker/cache→explicit sharing/public scene, current append/late-old API 통합 및 rendering은 미구현·미실행이다. 그 증거 전에는 Task9/전체5–10 완료를 주장하지 않는다.
+
+남은 정확한 환경 승인 범위는 CLI2.119.0 bundled image `ghcr.io/supabase/cli/postgrest:v16.4-r0@sha256:63a8d4acfdeb107b6568f4582759c78072100ef07951a7fbe58c9a51241138a7` 다운로드와 run-specific loopback-only API 시작/owned cleanup이다. Plan cache-miss 중단 조건에 따라 pull/start는 아직 하지 않았다. 기존 DB/volume/port와 unrelated resources를 변경하지 않는다. Push도 재시도하지 않는다.

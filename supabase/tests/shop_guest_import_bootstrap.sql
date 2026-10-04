@@ -233,19 +233,28 @@ select is((select count(*)::integer from private.shop_guest_bootstrap_receipt
   'replay and conflict leave one immutable imported receipt');
 
 select set_config('request.jwt.claim.sub', '00000000-0000-4000-a000-000000000001', true);
+create temporary table shop_guest_bootstrap_public_result as
 with source as (
   select pg_temp.shop_guest_import_native_empty_request() as request
-), public_result as (
-  select public.import_guest_shop(
-    (request#>>'{snapshot,import_id}')::uuid, request
-  ) as value
-  from source
 )
+select public.import_guest_shop(
+  (request#>>'{snapshot,import_id}')::uuid, request
+) as value
+from source;
+select 'SCHEMA1_PUBLIC_RPC_DIAGNOSTIC=' || jsonb_build_object(
+  'status', value->>'status',
+  'import_id', value->>'import_id',
+  'has_result', value ? 'result',
+  'has_source_metadata', value ? 'source_metadata'
+)::text
+from shop_guest_bootstrap_public_result;
 select ok(
-  value->>'status' = 'active_account' and not (value ? 'result'),
+  (select value->>'status' = 'active_account'
+      and not (value ? 'result')
+      and not (value ? 'source_metadata')
+   from shop_guest_bootstrap_public_result),
   'the public held-only RPC does not expose a private imported result'
-)
-from public_result;
+);
 
 select ok(
   not has_table_privilege('anon', 'private.shop_guest_bootstrap_receipt', 'SELECT')
@@ -599,3 +608,4 @@ select ok(
 
 select * from finish();
 rollback;
+\echo SHOP_GUEST_IMPORT_V2_ROLLBACK_COMPLETED
