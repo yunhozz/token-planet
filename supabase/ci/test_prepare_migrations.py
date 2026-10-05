@@ -302,7 +302,6 @@ class WorkflowAndReadmeTests(unittest.TestCase):
             self.assertIn(docker_override, workflow[guard:image_pull])
         self.assertIn("docker context show", workflow[guard:image_pull])
         self.assertIn("unix:///", workflow[guard:image_pull])
-        self.assertEqual(workflow.count("docker pull "), 1)
 
         lowered = workflow.lower()
         for forbidden in (

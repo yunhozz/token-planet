@@ -558,11 +558,44 @@ class ProductDockerGuardTests(unittest.TestCase):
                     "lookup": "owned", "state": status, "health": health, "exit_code": exit_code,
                 })
 
+    def test_unapproved_operation_family_preserves_only_closed_enum(self):
+        cases = [(["logs", "password-JWT-log-sentinel"], "LOGS"),
+                 (["container", "logs", "password-JWT-log-sentinel"], "CONTAINER_LOGS"),
+                 (["container", "wait", "password-JWT-log-sentinel"], "CONTAINER_WAIT"),
+                 (["network", "disconnect", "password-JWT-log-sentinel"], "NETWORK_DISCONNECT"),
+                 (["container", "password-JWT-log-sentinel"], "CONTAINER_OTHER"),
+                 (["password-JWT-log-sentinel", "resource-sentinel"], "UNKNOWN")]
+        for args, operation in cases:
+            with self.subTest(operation=operation):
+                sidecar = self.workdir / ".product-docker-guard" / "rejections.jsonl"
+                sidecar.unlink(missing_ok=True)
+                self.events.write_text("")
+                result = self.invoke(args)
+                self.assertEqual(result.returncode, 125)
+                expected = {"phase": "start", "code": "DOCKER_COMMAND_IS_NOT_APPROVED", "operation": operation}
+                self.assertEqual(json.loads(sidecar.read_text()), expected)
+                self.assertIn(expected, self.diagnostic_rows())
+                self.assertEqual(self.docker_events(), [])
+                for sentinel in ("password-JWT-log-sentinel", "resource-sentinel"):
+                    self.assertNotIn(sentinel, sidecar.read_text() + result.stdout + result.stderr)
+
+    def test_operation_schema_accepts_only_generic_rejection_fixed_enum(self):
+        script = "import json, sys; from product_docker_guard import normalize_diagnostics; print(json.dumps(normalize_diagnostics(sys.argv[1].encode())))"
+        good = {"phase": "start", "code": "DOCKER_COMMAND_IS_NOT_APPROVED", "operation": "CONTAINER_LOGS"}
+        invalid = [dict(good, operation="password-JWT-log-sentinel"), dict(good, operation=True),
+                   dict(good, code="GUARD_IO_FAILED"), dict(good, argv="password-JWT-log-sentinel")]
+        for row, expected in [(good, [good])] + [(row, [{"phase": "start", "code": "EVIDENCE_INVALID"}]) for row in invalid]:
+            with self.subTest(row=row):
+                result = subprocess.run([sys.executable, "-c", script, json.dumps(row) + "\n"], cwd=GUARD.parent, capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0)
+                self.assertEqual(json.loads(result.stdout), expected)
+                self.assertNotIn("password-JWT-log-sentinel", result.stdout + result.stderr)
+
     def test_start_diagnostic_exports_only_normalized_rejection_codes(self):
         rejected = self.invoke(["pull", "password-JWT-log-sentinel"])
         self.assertEqual(rejected.returncode, 125)
         rows = self.diagnostic_rows()
-        self.assertIn({"phase": "start", "code": "DOCKER_COMMAND_IS_NOT_APPROVED"}, rows)
+        self.assertIn({"phase": "start", "code": "DOCKER_COMMAND_IS_NOT_APPROVED", "operation": "PULL"}, rows)
         self.assertNotIn("password-JWT-log-sentinel", json.dumps(rows))
         sidecar = self.workdir / ".product-docker-guard" / "rejections.jsonl"
         sidecar.write_text('{"phase":"start","code":"password-JWT-log-sentinel"}\n')
@@ -679,7 +712,10 @@ sys.exit(guard.main(["invalid"]))
                                         cwd=GUARD.parent, capture_output=True, text=True)
                 self.assertEqual(result.returncode, 125, result.stderr)
                 self.assertTrue(sidecar.is_file(), "guard rejection evidence was not written")
-                self.assertEqual(json.loads(sidecar.read_text()), {"phase": "start", "code": code})
+                expected = {"phase": "start", "code": code}
+                if code == "DOCKER_COMMAND_IS_NOT_APPROVED":
+                    expected["operation"] = "UNKNOWN"
+                self.assertEqual(json.loads(sidecar.read_text()), expected)
                 self.assertEqual(sidecar.stat().st_mode & 0o777, 0o600)
                 self.assertNotIn(message, sidecar.read_text())
 

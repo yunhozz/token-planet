@@ -10,11 +10,37 @@ import tempfile
 import textwrap
 import unittest
 
+from product_docker_guard import HELPERS, POSTGRES_IMAGE
+
 
 RUNNER = Path(__file__).with_name("run.sh")
 
 
 class WorkflowArtifactTests(unittest.TestCase):
+    def test_workflow_precaches_only_pinned_postgres_and_helper_ecr_images(self):
+        workflow = RUNNER.parents[2] / ".github/workflows/supabase-migrations.yml"
+        before_runner = workflow.read_text().split("      - name: Replay migrations and SQL suites", 1)[0]
+        commands = re.findall(r"(?m)^\s+(?:run: )?(docker pull .+)$", before_runner)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            events = root / "pulls.jsonl"
+            docker = root / "docker"
+            docker.write_text("#!" + shutil.which("python3") + "\n"
+                              "import json, os, sys\n"
+                              "with open(os.environ['PULL_EVENTS'], 'a') as stream:\n"
+                              "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n")
+            docker.chmod(0o755)
+            result = subprocess.run(["bash", "-euc", "\n".join(commands)], capture_output=True, text=True,
+                                    env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                                             PULL_EVENTS=str(events)))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            pulls = [json.loads(line) for line in events.read_text().splitlines()]
+        expected_helpers = ["public.ecr.aws/supabase/realtime:v2.140.3",
+                            "public.ecr.aws/supabase/storage-api:v1.79.28",
+                            "public.ecr.aws/supabase/gotrue:v2.197.0"]
+        self.assertEqual([helper["candidates"][0] for helper in HELPERS], expected_helpers)
+        self.assertEqual(pulls, [["pull", POSTGRES_IMAGE]] + [["pull", image] for image in expected_helpers])
+
     def test_upload_selects_exact_safe_diagnostic_artifacts(self):
         workflow = RUNNER.parents[2] / ".github/workflows/supabase-migrations.yml"
         text = workflow.read_text()
@@ -681,7 +707,7 @@ else:
         diagnostic = self.artifacts / "diagnostics.jsonl"
         self.assertTrue(diagnostic.is_file(), "guard code artifact is missing")
         rows = [json.loads(line) for line in diagnostic.read_text().splitlines()]
-        self.assertIn({"phase": "start", "code": "DOCKER_COMMAND_IS_NOT_APPROVED"}, rows)
+        self.assertIn({"phase": "start", "code": "DOCKER_COMMAND_IS_NOT_APPROVED", "operation": "PULL"}, rows)
         self.assertNotIn("DOCKER_COMMAND_IS_NOT_APPROVED", (self.artifacts / "start.log").read_text())
         self.assertIn("[unclassified CLI output redacted]", (self.artifacts / "start.log").read_text())
 

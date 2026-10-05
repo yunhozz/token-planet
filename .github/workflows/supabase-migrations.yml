@@ -59,6 +59,12 @@ jobs:
       - name: Pull the pinned Supabase Postgres image
         run: docker pull public.ecr.aws/supabase/postgres:17.6.1.171
 
+      - name: Pull the pinned Supabase database setup helper images
+        run: |
+          docker pull public.ecr.aws/supabase/realtime:v2.140.3
+          docker pull public.ecr.aws/supabase/storage-api:v1.79.28
+          docker pull public.ecr.aws/supabase/gotrue:v2.197.0
+
       - name: Replay migrations and SQL suites
         env:
           SUPABASE_TELEMETRY_DISABLED: "1"

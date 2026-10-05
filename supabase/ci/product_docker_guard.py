@@ -169,15 +169,50 @@ DIAGNOSTIC_INSPECT_TIMEOUT_SECONDS = 2
 DIAGNOSTIC_INSPECT_OUTPUT_LIMIT = 65536
 
 
+OPERATION_ROOTS = {name: name.upper() for name in (
+    "logs wait exec start stop restart rm kill inspect create run pull push build ps info version "
+    "events stats top port attach pause unpause rename update commit save load tag export import history diff"
+).split()}
+OPERATION_GROUPS = {
+    "container": "attach commit cp create diff exec export inspect kill logs ls pause port prune rename restart rm run start stats stop top unpause update wait",
+    "network": "connect create disconnect inspect ls prune rm",
+    "volume": "create inspect ls prune rm",
+    "image": "build history import inspect load ls prune pull push rm save tag",
+    "system": "df events info prune",
+}
+OPERATION_PAIRS = {(group, command): group.upper() + "_" + command.upper()
+                   for group, commands in OPERATION_GROUPS.items() for command in commands.split()}
+OPERATION_FAMILIES = frozenset(OPERATION_ROOTS.values()) | frozenset(OPERATION_PAIRS.values()) | frozenset(
+    group.upper() + "_OTHER" for group in OPERATION_GROUPS) | {"UNKNOWN"}
+
+
+def operation_family(args):
+    if not args:
+        return "UNKNOWN"
+    pair = OPERATION_PAIRS.get(tuple(args[:2]))
+    if pair is not None:
+        return pair
+    if args[0] in OPERATION_GROUPS:
+        return args[0].upper() + "_OTHER"
+    return OPERATION_ROOTS.get(args[0], "UNKNOWN")
+
+
+def valid_rejection_record(value):
+    if (not isinstance(value, dict) or set(value) not in ({"phase", "code"}, {"phase", "code", "operation"})
+            or not isinstance(value["phase"], str) or value["phase"] not in EVIDENCE_PHASES
+            or not isinstance(value["code"], str) or value["code"] not in DIAGNOSTIC_CODES):
+        return False
+    return ("operation" not in value or (value["code"] == "DOCKER_COMMAND_IS_NOT_APPROVED"
+            and isinstance(value["operation"], str) and value["operation"] in OPERATION_FAMILIES))
+
+
 def evidence_records(raw):
     if len(raw) > EVIDENCE_LIMIT:
         raise ValueError
     records = []
     for line in raw.decode("utf-8").splitlines():
         value = json.loads(line)
-        if (not isinstance(value, dict) or set(value) != {"phase", "code"}
-                or not isinstance(value["phase"], str) or value["phase"] not in EVIDENCE_PHASES
-                or not isinstance(value["code"], str) or value["code"] not in DIAGNOSTIC_CODES):
+        if not valid_rejection_record(value):
             raise ValueError
         records.append(value)
     if len(records) > 64:
@@ -208,7 +243,7 @@ def evidence_open(context, name, flags):
         os.close(root)
 
 
-def record_rejection(context, code):
+def record_rejection(context, code, operation=None):
     if context is None or context.get("phase") not in EVIDENCE_PHASES or code not in DIAGNOSTIC_CODES:
         return
     descriptor = None
@@ -220,7 +255,12 @@ def record_rejection(context, code):
         raw = os.read(descriptor, EVIDENCE_LIMIT + 1)
         if len(evidence_records(raw)) >= 64:
             return
-        record = (json.dumps({"phase": context["phase"], "code": code}, sort_keys=True) + "\n").encode("ascii")
+        value = {"phase": context["phase"], "code": code}
+        if operation is not None:
+            value["operation"] = operation
+        if not valid_rejection_record(value):
+            return
+        record = (json.dumps(value, sort_keys=True) + "\n").encode("ascii")
         if len(raw) + len(record) <= EVIDENCE_LIMIT:
             os.write(descriptor, record)
     except (OSError, ValueError, TypeError, UnicodeError):
@@ -390,9 +430,8 @@ def normalize_diagnostics(raw):
         for row in rows:
             if not isinstance(row, dict):
                 raise ValueError
-            if set(row) == {"phase", "code"}:
-                if (not isinstance(row["phase"], str) or row["phase"] not in EVIDENCE_PHASES
-                        or not isinstance(row["code"], str) or row["code"] not in DIAGNOSTIC_CODES):
+            if set(row) in ({"phase", "code"}, {"phase", "code", "operation"}):
+                if not valid_rejection_record(row):
                     raise ValueError
             elif set(row) == {"lookup", "state", "health", "exit_code"}:
                 if (not isinstance(row["lookup"], str) or row["lookup"] not in LOOKUPS
@@ -1090,7 +1129,8 @@ def main(args):
         path, state = load_state(context)
         return handle_command(args, context, path, state)
     except GuardError as error:
-        record_rejection(context, error.code)
+        family = operation_family(args) if error.code == "DOCKER_COMMAND_IS_NOT_APPROVED" else None
+        record_rejection(context, error.code, family)
         print("product Docker guard rejected operation code=" + error.code, file=sys.stderr)
         return 125
     except OSError:
