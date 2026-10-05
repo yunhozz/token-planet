@@ -71,6 +71,8 @@ jobs:
           name: supabase-migration-results
           path: |
             ${{ runner.temp }}/supabase-migration-results/manifest.json
+            ${{ runner.temp }}/supabase-migration-results/diagnostics.jsonl
+            ${{ runner.temp }}/supabase-migration-results/reset-diagnostics.json
             ${{ runner.temp }}/supabase-migration-results/*.log
           if-no-files-found: ignore
           retention-days: 7

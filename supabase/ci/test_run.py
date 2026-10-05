@@ -1,3 +1,4 @@
+import glob
 import json
 import os
 from pathlib import Path
@@ -11,6 +12,34 @@ import unittest
 
 
 RUNNER = Path(__file__).with_name("run.sh")
+
+
+class WorkflowArtifactTests(unittest.TestCase):
+    def test_upload_selects_exact_safe_diagnostic_artifacts(self):
+        workflow = RUNNER.parents[2] / ".github/workflows/supabase-migrations.yml"
+        text = workflow.read_text()
+        upload = text.split("uses: actions/upload-artifact@v4", 1)[1]
+        block = re.search(r"(?m)^          path: \|\n((?:            .+\n)+)", upload)
+        self.assertIsNotNone(block, "upload artifact path block missing")
+        patterns = [line.strip() for line in block.group(1).splitlines()]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            results = root / "supabase-migration-results"
+            results.mkdir()
+            expected = {"manifest.json", "start.log", "diagnostics.jsonl", "reset-diagnostics.json"}
+            for name in expected:
+                (results / name).write_text("sanitized")
+            (results / "raw-inspect.json").write_text("credential-sentinel")
+            workdir = root / "token-planet-ci.fixture"
+            workdir.mkdir()
+            (workdir / "start.raw.log").write_text("credential-sentinel")
+            selected = set()
+            for pattern in patterns:
+                expanded = pattern.replace("${{ runner.temp }}", str(root))
+                selected.update(Path(path).relative_to(results).as_posix() for path in glob.glob(expanded, recursive=True))
+            self.assertEqual(selected, expected)
+            self.assertIn("${{ runner.temp }}/supabase-migration-results/diagnostics.jsonl", patterns)
+            self.assertIn("${{ runner.temp }}/supabase-migration-results/reset-diagnostics.json", patterns)
 
 
 class RunnerTests(unittest.TestCase):
