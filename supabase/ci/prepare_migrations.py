@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Stage migrations in dependency order with a CI-only synthetic history."""
+"""Stage migrations in whole filename UTF-8 byte order with a CI-only synthetic history."""
 
 import argparse
 import hashlib
@@ -121,7 +121,7 @@ def _source_snapshot(source):
             }
         )
 
-    files.sort(key=lambda item: item["source_version"])
+    files.sort(key=lambda item: item["source_filename"].encode("utf-8"))
     return files
 
 
@@ -179,7 +179,7 @@ def _verify_snapshot_still_current(source, initial):
 
 
 def prepare(source: Path, output: Path) -> dict:
-    """Copy source SQL bytes in lexical version order and write a manifest."""
+    """Copy source SQL bytes in whole filename UTF-8 byte order and write a manifest."""
     source, output = _validate_directories(source, output)
     source_files = _source_snapshot(source)
 

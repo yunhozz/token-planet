@@ -56,11 +56,11 @@ class PrepareMigrationsTests(unittest.TestCase):
         self.assert_cli_succeeds()
         return json.loads((self.output / "manifest.json").read_text())
 
-    def test_prepare_orders_version_strings_and_preserves_sql_bytes(self):
+    def test_prepare_orders_whole_filenames_by_utf8_bytes_and_preserves_sql_bytes(self):
         fixtures = {
-            "202610010001_parent.sql": b"create table parent(id int);\n",
+            "202610010001_가_parent.sql": b"create table parent(id int);\n",
             "20261001000101_child.sql": b"alter table parent add column child int;\n",
-            "202610010002_parent.sql": b"create table parent_two(id int);\n",
+            "202610010002_é_parent.sql": b"create table parent_two(id int);\n",
             "20261001000200_child.sql": b"alter table parent_two add column child int;\n",
         }
         for filename, contents in reversed(list(fixtures.items())):
@@ -73,10 +73,10 @@ class PrepareMigrationsTests(unittest.TestCase):
         self.assertEqual(
             [entry["source_filename"] for entry in manifest["entries"]],
             [
-                "202610010001_parent.sql",
                 "20261001000101_child.sql",
-                "202610010002_parent.sql",
+                "202610010001_가_parent.sql",
                 "20261001000200_child.sql",
+                "202610010002_é_parent.sql",
             ],
         )
         self.assertEqual(
@@ -94,19 +94,33 @@ class PrepareMigrationsTests(unittest.TestCase):
         self.assertEqual(
             [path.name for path in sorted(self.output.glob("*.sql"))],
             [
-                "20000101000001_202610010001_parent.sql",
-                "20000101000002_20261001000101_child.sql",
-                "20000101000003_202610010002_parent.sql",
-                "20000101000004_20261001000200_child.sql",
+                "20000101000001_20261001000101_child.sql",
+                "20000101000002_202610010001_가_parent.sql",
+                "20000101000003_20261001000200_child.sql",
+                "20000101000004_202610010002_é_parent.sql",
             ],
         )
         for entry in manifest["entries"]:
+            self.assertEqual(entry["source_version"], entry["source_filename"].split("_", 1)[0])
             source_bytes = fixtures[entry["source_filename"]]
             staged_path = self.output / entry["staged_filename"]
             self.assertEqual(staged_path.read_bytes(), source_bytes)
             self.assertEqual(
                 entry["sha256"], hashlib.sha256(source_bytes).hexdigest()
             )
+
+    def test_repository_manifest_preserves_shop_prerequisite_filename_order(self):
+        self.assert_cli_succeeds(source=REPO_ROOT / "supabase/migrations")
+        manifest = json.loads((self.output / "manifest.json").read_text())
+        versions = [entry["source_version"] for entry in manifest["entries"]
+                    if entry["source_version"].startswith(("202610010001", "202610010002"))]
+        self.assertEqual(versions, [
+            "20261001000100", "20261001000101", "20261001000102", "20261001000103",
+            "20261001000104", "20261001000200", "20261001000201", "20261001000202",
+            "20261001000203", "20261001000204", "20261001000205", "20261001000206",
+            "20261001000207", "20261001000208",
+        ])
+        self.assert_cli_succeeds("verify", source=REPO_ROOT / "supabase/migrations")
 
     def test_prepare_rejects_empty_source(self):
         result = self.assert_cli_rejects()
