@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/../.." && pwd -P)"
 SOURCE_MIGRATIONS="$REPO_ROOT/supabase/migrations"
 SUPABASE_BIN="${SUPABASE_BIN:-$(command -v supabase || true)}"
+DOCKER_BIN="$(command -v docker || true)"
+PYTHON_BIN="$(command -v python3 || true)"
 POSTGRES_IMAGE="public.ecr.aws/supabase/postgres:17.6.1.171"
 DB_PORT=56432
 SHADOW_PORT=56430
@@ -61,6 +63,14 @@ for database_override in DATABASE_URL PGHOST PGHOSTADDR PGPORT PGDATABASE PGUSER
 done
 if [[ -z "$SUPABASE_BIN" || "$SUPABASE_BIN" != /* || ! -x "$SUPABASE_BIN" ]]; then
   printf 'error: SUPABASE_BIN must be an absolute executable path\n' >&2
+  exit 2
+fi
+if [[ -z "$DOCKER_BIN" || "$DOCKER_BIN" != /* || ! -x "$DOCKER_BIN" ]]; then
+  printf 'error: Docker executable path could not be resolved\n' >&2
+  exit 2
+fi
+if [[ -z "$PYTHON_BIN" || "$PYTHON_BIN" != /* || ! -x "$PYTHON_BIN" ]]; then
+  printf 'error: Python executable path could not be resolved\n' >&2
   exit 2
 fi
 
@@ -328,6 +338,124 @@ pathlib.Path(sys.argv[2]).write_text("\n".join(safe) + ("\n" if safe else ""))
 PY
 }
 
+collect_start_diagnostics() {
+  local diagnostic_dir
+  diagnostic_dir="$(mktemp -d "$WORKDIR/start-diagnostics.XXXXXXXX")" || return 0
+  TOKEN_PLANET_REAL_DOCKER="$DOCKER_BIN" \
+    TOKEN_PLANET_GUARD_PROJECT_ID="$PROJECT_ID" \
+    TOKEN_PLANET_GUARD_WORKDIR="$WORKDIR" \
+    TOKEN_PLANET_GUARD_NETWORK_ID="$NETWORK_ID" \
+    TOKEN_PLANET_GUARD_NETWORK_NAME="$NETWORK_NAME" \
+    TOKEN_PLANET_GUARD_PHASE=diagnostic \
+    "$PYTHON_BIN" "$SCRIPT_DIR/product_docker_guard.py" --diagnose-start \
+    >"$diagnostic_dir/records.jsonl" 2>"$diagnostic_dir/diagnostic.stderr" || :
+  "$PYTHON_BIN" - "$SCRIPT_DIR" "$diagnostic_dir/records.jsonl" "$ARTIFACTS_DIR/diagnostics.jsonl" \
+    >"$diagnostic_dir/export.stdout" 2>"$diagnostic_dir/export.stderr" <<'PY' || :
+import json
+import os
+import sys
+sys.path.insert(0, sys.argv[1])
+from product_docker_guard import normalize_diagnostics, read_private_file
+try:
+    raw = read_private_file(sys.argv[2], 8192)
+except (OSError, ValueError):
+    raw = b""
+rows = normalize_diagnostics(raw)
+try:
+    descriptor = os.open(sys.argv[3], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        for row in rows:
+            stream.write(json.dumps(row, sort_keys=True) + "\n")
+except OSError:
+    pass
+PY
+  return 0
+}
+
+collect_reset_diagnostics() {
+  "$PYTHON_BIN" - --reset-diagnostics "$SCRIPT_DIR" "$WORKDIR" "$ARTIFACTS_DIR/reset-diagnostics.json" <<'PY'
+import json
+import os
+import re
+import stat
+import sys
+sys.path.insert(0, sys.argv[2])
+from product_docker_guard import evidence_records, read_evidence_file, read_private_file
+workdir, destination = sys.argv[3:]
+row = {"guard_codes": [], "last_announced_migration": None, "sqlstate": None,
+       "diagnostic_status": "ok", "error_class": "unknown"}
+try:
+    records = evidence_records(read_evidence_file({"workdir": workdir}, "rejections.jsonl", 8192))
+    row["guard_codes"] = sorted({record["code"] for record in records if record["phase"] == "reset"})
+except FileNotFoundError:
+    pass
+except (OSError, ValueError, TypeError, UnicodeError):
+    row["diagnostic_status"] = "invalid"
+raw = None
+descriptor = None
+try:
+    descriptor = os.open(os.path.join(workdir, "reset.raw.log"), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    info = os.fstat(descriptor)
+    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid()
+            or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+        row["diagnostic_status"] = "invalid"
+    elif info.st_size > 65536:
+        row["diagnostic_status"] = "truncated"
+    else:
+        candidate = os.read(descriptor, 65537)
+        if len(candidate) > 65536 or any(len(line) > 4096 for line in candidate.splitlines()):
+            row["diagnostic_status"] = "truncated"
+        else:
+            raw = candidate.decode("utf-8")
+except FileNotFoundError:
+    row["diagnostic_status"] = "unavailable"
+except (OSError, ValueError, UnicodeError):
+    row["diagnostic_status"] = "invalid"
+finally:
+    if descriptor is not None:
+        os.close(descriptor)
+if raw is not None:
+    try:
+        manifest_limit = 1048576
+        manifest = json.loads(read_private_file(os.path.join(workdir, "supabase/migrations/manifest.json"), manifest_limit))
+        filenames = {entry["staged_filename"] for entry in manifest["entries"]}
+        if any(not isinstance(name, str) or not re.fullmatch(r"\d{14}_[A-Za-z0-9_.-]+\.sql", name) for name in filenames):
+            raise ValueError
+    except FileNotFoundError:
+        filenames = set()
+        row["diagnostic_status"] = "unavailable"
+    except (OSError, ValueError, KeyError, TypeError, UnicodeError):
+        filenames = set()
+        row["diagnostic_status"] = "invalid"
+    credential = re.compile(r"(?:\b(?:url|key|secret|password|token)\s*[:=]|service[_ -]?role|anon\s+key|postgres(?:ql)?://|\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\b)", re.I)
+    sqlstates = set()
+    for line in raw.splitlines():
+        if credential.search(line):
+            continue
+        announcement = re.fullmatch(r"Applying migration ([A-Za-z0-9_.-]+\.sql)\.\.\.", line)
+        if announcement and announcement.group(1) in filenames:
+            row["last_announced_migration"] = announcement.group(1)
+        error = re.fullmatch(r"ERROR: .+ \(SQLSTATE ([A-Z0-9]{5})\)", line)
+        if error:
+            sqlstates.add(error.group(1))
+    if len(sqlstates) == 1:
+        row["sqlstate"] = next(iter(sqlstates))
+    elif len(sqlstates) > 1 and row["diagnostic_status"] == "ok":
+        row["diagnostic_status"] = "ambiguous"
+if row["guard_codes"]:
+    row["error_class"] = "guard_rejection_observed"
+if row["sqlstate"]:
+    row["error_class"] = "guard_and_sql_error_observed" if row["guard_codes"] else "sql_error_observed"
+try:
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+        stream.write(json.dumps(row, sort_keys=True) + "\n")
+except OSError:
+    pass
+PY
+  return 0
+}
+
 record_cleanup_inspect_failure() {
   local kind="$1"
   local stderr_file="$2"
@@ -351,10 +479,25 @@ record_cleanup_inspect_failure() {
 cleanup_on_exit() {
   local original_status="$?"
   local cleanup_status=0
+  local preserve_helper_evidence=0
   trap - EXIT INT TERM
   set +e
 
   if [[ -n "$WORKDIR" && "$CLI_START_ATTEMPTED" == 1 ]]; then
+    if TOKEN_PLANET_REAL_DOCKER="$DOCKER_BIN" \
+      TOKEN_PLANET_GUARD_PROJECT_ID="$PROJECT_ID" \
+      TOKEN_PLANET_GUARD_WORKDIR="$WORKDIR" \
+      TOKEN_PLANET_GUARD_NETWORK_ID="$NETWORK_ID" \
+      TOKEN_PLANET_GUARD_NETWORK_NAME="$NETWORK_NAME" \
+      TOKEN_PLANET_GUARD_PHASE=cleanup \
+      "$PYTHON_BIN" "$SCRIPT_DIR/product_docker_guard.py" --cleanup-helpers >>"$CLEANUP_LOG" 2>&1; then
+      printf 'cleanup_status=PASS kind=helper code=recorded_helpers_recovered\n' >>"$CLEANUP_LOG"
+    else
+      printf 'cleanup_status=FAIL kind=helper code=recovery_failed\n' >>"$CLEANUP_LOG"
+      cleanup_status=1
+      preserve_helper_evidence=1
+    fi
+
     local inspect_file="$WORKDIR/container-cleanup.json"
     local target="$CONTAINER_NAME"
     if docker container inspect --format '{{json .}}' "$target" >"$inspect_file" 2>"$WORKDIR/container-cleanup.stderr"; then
@@ -429,7 +572,9 @@ cleanup_on_exit() {
     fi
   fi
 
-  if [[ -n "$WORKDIR" && -d "$WORKDIR" && "$(basename -- "$WORKDIR")" == token-planet-ci.* ]]; then
+  if [[ "$preserve_helper_evidence" == 1 ]]; then
+    printf 'Preserved helper recovery evidence in %s\n' "$WORKDIR" >>"$CLEANUP_LOG"
+  elif [[ -n "$WORKDIR" && -d "$WORKDIR" && "$(basename -- "$WORKDIR")" == token-planet-ci.* ]]; then
     if ! rm -rf -- "$WORKDIR"; then
       printf 'Failed to remove generated work directory\n' >>"$CLEANUP_LOG"
       cleanup_status=1
@@ -598,11 +743,34 @@ if ! check_network_options "$WORKDIR/network-inspect.json" >"$WORKDIR/network-op
 fi
 printf 'Verified bridge host binding is 127.0.0.1.\n' >>"$NETWORK_LOG"
 
+GUARD_BIN="$WORKDIR/.product-docker-guard/bin"
+if ! mkdir -p -- "$GUARD_BIN"; then
+  fail 1 "could not prepare the product Docker guard"
+fi
+cat >"$GUARD_BIN/docker" <<EOF
+#!/bin/sh
+exec "$PYTHON_BIN" "$SCRIPT_DIR/product_docker_guard.py" "\$@"
+EOF
+if ! chmod 700 "$GUARD_BIN/docker"; then
+  fail 1 "could not prepare the product Docker guard"
+fi
+
 CLI_START_ATTEMPTED=1
-if (cd "$WORKDIR" && "$SUPABASE_BIN" start --network-id "$NETWORK_ID" --exclude "$EXCLUDED_SERVICES") >"$WORKDIR/start.raw.log" 2>&1; then
+if (
+  cd "$WORKDIR" &&
+  PATH="$GUARD_BIN:$PATH" \
+  TOKEN_PLANET_REAL_DOCKER="$DOCKER_BIN" \
+  TOKEN_PLANET_GUARD_PROJECT_ID="$PROJECT_ID" \
+  TOKEN_PLANET_GUARD_WORKDIR="$WORKDIR" \
+  TOKEN_PLANET_GUARD_NETWORK_ID="$NETWORK_ID" \
+  TOKEN_PLANET_GUARD_NETWORK_NAME="$NETWORK_NAME" \
+  TOKEN_PLANET_GUARD_PHASE=start \
+  "$SUPABASE_BIN" start --network-id "$NETWORK_ID" --exclude "$EXCLUDED_SERVICES"
+) >"$WORKDIR/start.raw.log" 2>&1; then
   :
 else
   start_status="$?"
+  collect_start_diagnostics >/dev/null 2>&1 || :
   sanitize_cli_log "$WORKDIR/start.raw.log" "$ARTIFACTS_DIR/start.log"
   fail "$start_status" "Supabase local database start failed"
 fi
@@ -633,11 +801,22 @@ VOLUME_OWNED=1
 # Reset may replace the container or volume. Cleanup must re-verify by the generated
 # project name and immutable project/workdir labels if reset exits partway through.
 CONTAINER_ID=""
-if (cd "$WORKDIR" && "$SUPABASE_BIN" db reset --local --no-seed --network-id "$NETWORK_ID") >"$WORKDIR/reset.raw.log" 2>&1; then
+if (
+  cd "$WORKDIR" &&
+  PATH="$GUARD_BIN:$PATH" \
+  TOKEN_PLANET_REAL_DOCKER="$DOCKER_BIN" \
+  TOKEN_PLANET_GUARD_PROJECT_ID="$PROJECT_ID" \
+  TOKEN_PLANET_GUARD_WORKDIR="$WORKDIR" \
+  TOKEN_PLANET_GUARD_NETWORK_ID="$NETWORK_ID" \
+  TOKEN_PLANET_GUARD_NETWORK_NAME="$NETWORK_NAME" \
+  TOKEN_PLANET_GUARD_PHASE=reset \
+  "$SUPABASE_BIN" db reset --local --no-seed --network-id "$NETWORK_ID"
+) >"$WORKDIR/reset.raw.log" 2>&1; then
   :
 else
   reset_status="$?"
-  sanitize_cli_log "$WORKDIR/reset.raw.log" "$ARTIFACTS_DIR/reset.log"
+  collect_reset_diagnostics >/dev/null 2>&1 || :
+  { printf '[reset CLI output redacted; see reset-diagnostics.json]\n' >"$ARTIFACTS_DIR/reset.log"; } 2>/dev/null || :
   fail "$reset_status" "local migration reset failed"
 fi
 sanitize_cli_log "$WORKDIR/reset.raw.log" "$ARTIFACTS_DIR/reset.log"

@@ -134,3 +134,186 @@ Planner의 공식 pinned source 조사에서 `formatPortBindingFlag()`는 `56432
 - SIGTERM P2 수정 후 독립 full static QA84/84(39.628초), 원본32/cache baseline 불변, Reviewer 재검토 통과. frozen spike SHA `3ed470d077678dacb14bf5e489082633049e9d133790fd722180760d929d0c17`.
 - sandbox artifact `/private/tmp/token-planet-ci-hostip-spike-20261004-03`는 Docker Unix socket permission denied preflight에서 종료했고 workdir를 제거했다. start/reset 호출은 없었다.
 - CEO 상승 one-shot artifact `/private/tmp/token-planet-ci-hostip-spike-20261004-04`: network option 확인 PASS, CLI start 한 번 exit1, binding 검사까지 도달하지 못함, reset0회. cleanup summary는 container/volume absent, network/workdir removed다. 재시도하지 않는다. raw CLI output과 정확한 resource identity는 임시경로 cleanup으로 보존되지 않아 실패 원인/독립 exact-resource 검증에 증거 gap이 있다. 실제 explicit loopback 성공은 미입증이며 전체 product replay/SQL40은 수행하지 않았다. 추가 실행 없이 읽기전용 상태 확인과 실패 원인 진단 계획이 필요하다.
+- 2026-10-05 사용자 승인: 안전 진단 보완 후 새 disposable project 1회 재시도 허용. 진단 TDD3RED→focused24GREEN, 독립fullQA87/87(42.706초) 및 Reviewer 통과 후 CEO 상승 실행.
+- artifact `/private/tmp/token-planet-ci-hostip-spike-20261005-01`: project `token-planet-ci-968a087e0b0b45c8ad024453`, network `345d78b5d59fe07e401e97f2b10f06cf945f34e6bb972ccf1c34ff8fdd31f4b8`. network PASS, start1회 exit1, actual binding 미관측, reset0회. container/volume absent, network/workdir removed 요약 보존. 새 승인 재시도는 소진됐으며 추가 start 금지.
+- 안전 classifier는 존재하고 start 실패 때 호출됐지만 매치되지 않은/빈 출력은 아무 분류도 기록하지 않는 증거 gap이 남았다. 따라서 이번 artifact는 실패 원인을 확인하지 못했다. raw output은 보존하지 않았다. exact Docker state/events 읽기전용 확인과 진단 fallback 보완 검토가 다음 단계이며 전체 migration31/SQL40 replay는 미실행이다.
+- CEO 상승 읽기전용 Docker events 확인: 이번 exact project에는 DB container create/start/healthy 후 cleanup kill/stop/destroy 이벤트가 있었고 다른 project container는 없었다. 이는 artifact의 cleanup 전 `container=absent`만으로 create 미호출을 추정할 수 없음을 보여준다. CLI start exit1의 원인은 여전히 미확인이다.
+- 후속 승인 범위는 로컬 진단 fallback 수정과 fake TDD/full QA/Reviewer뿐이다. stdout/stderr empty/unclassified 및 byte/line count, adapter marker present/absent를 cleanup 전에 항상 기록하며 원문 CLI/State.Error는 제외한다. 세 번째 disposable start는 별도 사용자 승인 전 금지한다.
+- fallback TDD3RED(6assertion 실패)→focused26GREEN, 독립fullQA89/89(41.702초), 원본32/cache baseline/10file hash 불변, Reviewer 추가finding없음. frozen spike SHA `e40044ac86ff52e1788698b11aa10e69cec8f57b141c7dfa1b5a671b8d73d4f5`.
+- counts는 decoded 문자열의 UTF-8 재인코딩 크기와 stream 전체 line 수다. marker presence는 create 시도 기록이며 성공 증명이 아니다. 원인은 여전히 미확인이다. 세 번째 runtime은 실행하지 않았으며 별도 사용자 승인 전 멈춘다.
+- 사용자 `ㅇㅇ` 승인 후 2026-10-05 세 번째 fresh 시도 artifact `/private/tmp/token-planet-ci-hostip-spike-20261005-02`, frozen e40044ac... 실행. project `token-planet-ci-4a5ecdf3604d472bb1aa99fb`, network `a5cb3ac07bd19925561191626fa551e5de8571682159eb5ff07c429f44166097`. start1회 exit1/reset0회/binding 미관측. container/volume create marker는 present, stdout unclassified95bytes/1line, stderr unclassified67bytes/3lines. cleanup 전 container absent, cleanup은 volume/container absent 및 network/workdir removed를 기록했다. 원문 미보존으로 operational cause는 여전히 미확인이다.
+- Lead 상승 읽기전용 확인에서 exact container/volume/network 각각 명확한 not-found, TCP56432 listener 없음(lsof exit1/출력없음)을 확인했다. 추가 start/reset 재시도하지 않으며 전체31migration/40SQL replay는 미실행이다.
+
+## 2026-10-05 bounded 정적 보완 승인
+
+- 고정 CLI source에서 fresh volume은 PostgreSQL health 이후 `runFreshDbSetup`을 실행하고, `[auth].enabled`, `[storage].enabled`, `[realtime].enabled`가 setup 경로를 제어함을 확인했다. 생성 TOML은 `[api].enabled=false`만 명시해 나머지 기본값과의 설정 불일치가 있다. 이는 확인된 정적 계약 차이지만, 보존된 `unclassified` 출력만으로 최근 세 번의 `start` 실패 원인이라고 단정하지 않는다.
+- 제품 runner `supabase/ci/run.sh`는 표준 Supabase CLI를 사용하며 host-port adapter를 거치지 않는다. 제품 replay의 Auth bootstrap은 유지하고 이번 변경에서 제품 `run.sh`나 원본 migration/config/tests는 수정하지 않는다.
+- CEO 승인 범위는 빈 host-port spike 전용이다. `supabase/ci/host_port_spike.py`의 임시 설정에서 Auth/Storage/Realtime를 각각 명시적으로 비활성화하고, preflight가 TOML 계약을 검증해 값 누락·변조 시 CLI/Docker 호출 전에 거절한다. 기존 API 비활성, PostgreSQL 17/image pin, DB/shadow port, migrations 활성, seed 비활성 및 빈 migrations 디렉터리는 보존한다.
+- 승인된 순서: 설정 계약 회귀 테스트 작성→실패 확인→최소 구현→관련 Python test 및 `bash -n`/`git diff --check` 등 필요한 정적 검사. 생성된 spike의 런타임 실행, 이미지 pull, DB reset, commit은 승인 범위 밖이다.
+- spike는 제품 migration이나 SQL suite가 없는 host-binding 확인용이므로 Auth 비활성화가 제품 runner로 전파되지 않아야 한다. 정적 검증만으로 이전 실패 원인, loopback binding 성공, 전체 31 migration 및 SQL suite 수용을 주장하지 않는다.
+
+## 2026-10-05 승인된 start-only 모드
+
+- 목표는 재시도 전에 disposable host-port spike가 `supabase start` 한 번만 수행하고 reset/replay는 호출하지 않게 하는 것이다. 이 변경도 실제 Docker mutation을 수행하므로 코드/가짜 검증만 진행하고 별도 사용자 승인 전 실행하지 않는다.
+- 승인 인터페이스: CLI `--start-only` 및 `run_spike(..., start_only=False)`. flag 생략 시 기존 start→binding/ownership check→reset→binding/ownership check→공통 cleanup 순서를 보존한다.
+- start-only는 기존 start 성공 후 actual HostIp, network attachment, container/volume ownership을 확인한 뒤 reset 호출만 건너뛴다. 조기 return은 금지하며 cleanup/error 처리와 handler 복원은 기존 공통 경로를 따른다. artifact에 `spike_mode=start_only` 또는 `spike_mode=start_reset`을 기록한다.
+- TDD: CLI/function forwarding 및 start-only 성공·실패 시나리오를 먼저 추가해 실패를 확인한다. start-only 성공은 `start` 1회·reset/replay 0회·정확한 owned cleanup을 확인하고, start 실패는 후속 호출 없이 cleanup을 확인한다. cleanup 자체가 실패하면 모드는 성공으로 끝나지 않아야 한다. default 경로의 기존 start+reset 테스트도 계속 통과해야 한다.
+- scope는 `supabase/ci/host_port_spike.py`, `supabase/ci/test_host_port_spike.py`와 이 기록만 포함한다. 제품 `run.sh`, 원본 migration/config/tests는 수정하지 않는다. 런타임 실행, 이미지 pull, DB reset/replay, commit은 승인되지 않았다.
+- 코드/가짜 검증이 끝난 뒤 제안할 단일 런타임 호출은 pinned CLI `2.119.0`, 캐시된 PostgreSQL `17.6.1.171`, 새 빈 UUID 프로젝트, ports `127.0.0.1:56432` 및 shadow `56430`, Auth/Storage/Realtime 비활성 설정을 사용한다. start 1회 후 실제 binding을 검사하고 exact owned container/volume/network/workdir만 cleanup한다. 실패 시 1회에서 멈추며 reset/replay와 pull은 하지 않는다. artifact path `/private/tmp/token-planet-ci-hostip-start-only-20261005-01`는 실행 직전 부재 또는 빈 상태여야 한다.
+- 구현 TDD는 focused RED에서 `--start-only` 거부/API 부재 등 기대한 assertion 실패 6건, GREEN에서 동일 6건 통과로 확인했다. 독립 fake-only QA에서 spike 34건 및 전체 `supabase/ci` 97건 통과, `git diff --check` 통과를 확인했다. 이 검증은 실제 Supabase CLI/Docker/runtime 동작이나 이전 `start` 실패 원인을 입증하지 않는다.
+
+## 2026-10-05 승인된 start-only 런타임 결과
+
+- 사용자 승인에 따른 단 1회 실행이 exit 0으로 끝났다. artifact `/private/tmp/token-planet-ci-hostip-start-only-20261005-01/spike.log`는 `spike_mode=start_only`, `network_status=PASS binding=127.0.0.1`, `phase=start status=PASS`, container/volume/network/workdir cleanup 모두 PASS, `spike_status=PASS`를 기록한다.
+- 이번 실행에서 loopback start와 exact owned resource cleanup 성공을 확인했다. 이전 `start` 실패 원인은 미확인이고, 전체 migration 및 SQL replay는 미실행이다.
+
+## 2026-10-05 CI runner Docker guard 통합 설계
+
+- 목표: 제품 CI runner의 표준 Supabase CLI `start`/`db reset` 흐름에서 Auth/Storage/Realtime DB bootstrap을 보존하면서, 소유 Postgres publish를 loopback으로 제한하고 모든 pull 및 foreign Docker mutation을 차단한다. 외부 migration/config/SQL test 입력은 변경하지 않는다.
+- Workspace는 사용자가 선택한 `/Users/yunho/Desktop/project/token-planet` 현재 `master` checkout이다. 기존 dirty 변경을 보존하며 새 worktree나 commit은 만들지 않는다.
+- 승인 경계: 허용 파일은 `supabase/ci/run.sh`, 관련 CI Python guard/helper와 fake tests, 이 계획 문서다. Supabase CLI/Docker/runtime, network mutation, image pull, DB reset/replay, commit은 구현 검증 단계에서 실행하지 않는다. full replay는 별도 사용자 승인 전 미실행이다.
+- 설계: 새 `supabase/ci/product_docker_guard.py`를 start/reset CLI 자식의 임시 PATH shim으로만 연결한다. CLI 실행 전에 real Docker의 절대 경로를 고정한다. runner가 직접 수행하는 loopback bridge 생성, 실제 binding/ownership 검사, exact cleanup은 기존 unshimmed 경로를 유지한다. 기존 `host_port_adapter.py`에서는 순수 `adapt_docker_argv()` DB create 변환만 재사용하고 spike의 기존 `main()` 정책은 바꾸지 않는다.
+- DB create는 generated project/container/workdir/network/image/mount/labels 및 56432:5432 publish 계약을 모두 검사한 경우에만 `127.0.0.1:56432:5432`로 바꾸고 `--pull=never`를 추가한다. DB volume create/remove 및 container start/remove는 해당 run의 정확한 generated 이름/ID와 Supabase project/workdir labels를 inspect해 소유권을 확인한다.
+- pinned CLI 2.119.0 fresh-volume setup은 `--exclude`와 독립적으로 Realtime→Storage→Auth 순서로 실행한다. Helper argv는 정확히 `realtime eval`의 `realtime-dev` tenant health expression, `node dist/scripts/migrate-call.js`, `gotrue migrate`이다. 각 helper의 exact image candidate, key-only environment key set, owned network, 두 project labels, `--rm`, mount/port 부재를 검증하고 `--pull=never` 및 unique `--cidfile`을 추가한다. helper cleanup은 cidfile의 단일 container ID를 inspect해 exact project/compose labels, allowed image, owned network, no-publish/no-mount를 확인한 후 그 ID만 제거한다. credentials와 원문 argv는 artifact에 기록하지 않는다.
+- Helper image는 CLI `v2.119.0`의 공식 `Dockerfile` pinned tag와 default registry resolver로 제한한다: Auth `gotrue:v2.197.0`, Realtime `realtime:v2.140.3`, Storage `storage-api:v1.79.28`; 각각 public.ecr.aws mirror, ghcr.io, Docker Hub의 정확한 3개 후보만 허용한다. Runner는 fresh workdir에 helper pin이나 `.env`를 쓰지 않고 외부 nonempty `SUPABASE_*` override를 거절한다. Cache miss 때 CLI의 `docker pull`은 guard가 거절하며, 실제 pull로 이어지지 않는다.
+- Reset PG15+는 named DB container와 volume을 제거한 뒤 Postgres를 재생성하고 fresh setup을 다시 실행한다. reset의 remove/create는 exact identity 검사와 기존 post-reset actual HostIp/network/ownership 검사를 유지한다. CLI start rollback의 `dockerRemoveAll`은 project label로 다중 container를 stop한 다음 container/volume/network prune을 수행하지만, prune은 exact ownership을 보장하지 않으므로 제품 guard가 거절한다. pinned `rollbackStart`는 rollback 실패를 stderr에 남기고 원래 start 실패를 보존하며, runner의 기존 exact inspect→remove cleanup이 최종 정리를 담당한다. 미분류 command, Docker global option/alias, pull, prune, network mutation, 임의 run/create는 fail closed한다.
+- 공식 pinned source 근거: [db-setup.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/db-setup.ts), [realtime-env.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/realtime-env.ts), [docker-run.args.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/docker-run.args.ts), [Dockerfile](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/shared/services/Dockerfile), [docker-registry.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/docker-registry.ts), [recreate-local-database.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/recreate-local-database.ts), [container-lifecycle.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/container-lifecycle.ts), [docker-remove-all.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/docker-remove-all.ts), [rollback.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/rollback.ts).
+
+### 추가로 확인한 literal Docker 계약
+
+- Postgres `create`는 pinned builder의 고정 순서로 구성된다: `--name`, key-only env(`POSTGRES_PASSWORD`, `POSTGRES_HOST`, `JWT_SECRET`, `JWT_EXP`; `POSTGRES_HOST` 값은 literal `/var/run/postgresql`), `supabase_db_<project>:/var/lib/postgresql/data`, 단일 `56432:5432` publish, healthcheck (`pg_isready -U postgres -h 127.0.0.1 -p 5432`, interval 10s, timeout 2s, retries 3), restart `unless-stopped`, Linux의 `host.docker.internal:host-gateway`, owned network, aliases `db`/`db.supabase.internal`, CLI project/compose/workdir labels, entrypoint `sh`, pinned Postgres image, `-c`와 단일 CLI-generated PG15+ init script다. `--pull=never`를 추가하고 유일한 publish를 `127.0.0.1:56432:5432`로 rewrite한다. 생성된 PG17 config에서 tmpfs, volumes-from, exposed ports, security opts는 없다.
+- CLI가 Postgres secret file을 전달하는 source-backed operation은 `cp - <created-db-id>:/`이며, 이어서 `start <created-db-id>`를 실행한다. PG17 reset은 `container rm -f supabase_db_<project>`와 `volume rm -f supabase_db_<project>` 후 새 volume/container/cp/start 흐름을 수행한다. Volume create는 `volume create --label com.supabase.cli.project=<project> --label com.docker.compose.project=<project> supabase_db_<project>`다. Runner가 bridge를 CLI 밖에서 생성하므로 guarded CLI는 그 network ID inspect만 필요하다. Guard는 create 결과 ID를 기록하고 동일 ID에만 cp/start를 허용한다. reset rm은 exact generated DB name 또는 recorded ID를 받아 소유성 검증 후 immutable recorded ID로만 제거한다.
+- Helper env key sets는 Realtime `PORT DB_HOST DB_PORT DB_USER DB_PASSWORD DB_NAME DB_AFTER_CONNECT_QUERY DB_ENC_KEY API_JWT_SECRET API_JWT_JWKS METRICS_JWT_SECRET APP_NAME SECRET_KEY_BASE ERL_AFLAGS DNS_NODES RLIMIT_NOFILE SEED_SELF_HOST RUN_JANITOR MAX_HEADER_LENGTH`, Storage `DB_INSTALL_ROLES DB_MIGRATIONS_FREEZE_AT ANON_KEY SERVICE_KEY PGRST_JWT_SECRET DATABASE_URL FILE_SIZE_LIMIT STORAGE_BACKEND STORAGE_FILE_BACKEND_PATH TENANT_ID REGION GLOBAL_S3_BUCKET`, Auth `API_EXTERNAL_URL GOTRUE_LOG_LEVEL GOTRUE_DB_DRIVER GOTRUE_DB_DATABASE_URL GOTRUE_SITE_URL GOTRUE_JWT_SECRET`다. 공식 spelling은 `SEED_SELF_HOST`다. Storage/Auth DB URLs target generated DB container on port 5432/database `postgres`, using roles `supabase_storage_admin`/`supabase_auth_admin`.
+- CLI container-state inspection is exactly `container inspect <db-name-or-id> --format '{{json .State}}'`; network inspection is `network inspect <owned-network-id>` and volume inspection is `volume inspect <db-volume-name>`. These read-only calls accept no extra fields/formats/targets. Source: [docker-lifecycle.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/docker-lifecycle.ts).
+- Literal command sources: [docker-create-args.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/docker-create-args.ts), [postgres.service.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/postgres.service.ts), [internal-db-connection.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/internal-db-connection.ts), and [container-lifecycle.ts](https://raw.githubusercontent.com/supabase/cli/v2.119.0/apps/cli/src/command-internal/db-bootstrap/container-lifecycle.ts).
+
+- Reset의 `restartSatelliteServices()`는 `restart supabase_<storage|auth|realtime|pooler>_<project>`를 concurrent 실행하고, nonzero stderr의 `no such container|no such object|no container with name or id`만 허용된 부재로 처리한다. Runner는 이 서비스를 전부 exclude하므로 guard는 reset phase의 exact generated 이름만 read-only state inspect하고 정확한 not-found 응답을 확인한 경우 tolerated not-found를 반환한다. 실제 `restart`는 forwarding하지 않으며 기존 container 또는 inspect 오류는 fail closed한다. Concurrent probe는 guard state를 변경하지 않는다.
+- 이어지는 Kong 계약은 `container inspect supabase_kong_<project> --format '{{json .State}}'`뿐이다. 부재/비실행은 CLI no-op이며, 실행 중이면 CLI가 요청하는 `exec <kong-name> kong reload --nginx-conf /home/kong/custom_nginx.template`를 guard가 거절한다. 다른 service mutation/target/alias/option은 허용하지 않는다. 공식 pinned 근거: [restart-services.ts](https://github.com/supabase/cli/blob/v2.119.0/apps/cli/src/command-internal/db-bootstrap/restart-services.ts), [container-cli.ts](https://github.com/supabase/cli/blob/v2.119.0/apps/cli/src/command-internal/container-cli.ts), [docker-lifecycle.ts](https://github.com/supabase/cli/blob/v2.119.0/apps/cli/src/command-internal/docker-lifecycle.ts), [docker-ids.ts](https://github.com/supabase/cli/blob/v2.119.0/apps/cli/src/command-internal/docker-ids.ts).
+
+### 승인된 구현 계획
+
+1. **Guard 계약 TDD:** 새 product guard 테스트에 DB create loopback/cache-only 변환, 각 3 helper의 exact images/argv/env/network/labels 및 registry candidate를 fixture로 추가한다. explicit pull, arbitrary image/command/option, `run` alias, prune, network mutation, 외부 target, Docker global overrides는 fake real Docker에 도달하지 않는 RED 테스트를 먼저 확인한다. 그 뒤 source contract만 허용하는 strict dispatcher를 구현한다.
+2. **Helper ownership TDD:** unique cidfile 생성, 정상 `--rm` 후 not-found 처리, 잔존 helper의 exact inspect/remove, 손상 cidfile·inspect 실패·foreign ID·잘못된 labels/image/network/mount/ports 거절을 테스트한다. 다중 대상 검증은 전부 성공하기 전 mutation을 0회 수행한다.
+3. **Runner integration TDD:** `test_run.py`의 fake CLI가 start/reset 경로에서 docker shim을 통해 Postgres create와 helper jobs를 실행하게 한다. 두 phase의 argv/env/order, pull/prune 거절, reset container 교체, start/reset partial failure, 최초 exit 보존, 다음 단계 중단, helper→container→volume→network exact cleanup을 확인한다. 실제 Supabase CLI/Docker는 호출하지 않는다.
+4. **Verification:** focused guard/run tests와 CI 전체 Python suite, `bash -n supabase/ci/run.sh`, `git diff --check`, migration/config/tests byte/hash 불변을 확인한다. QA 뒤 독립 Reviewer가 최종 전체 diff와 foreign-resource 경계를 검토한다. 실제 replay 통과, helper image cache 존재, live cleanup은 주장하지 않는다.
+
+- 위험/한계: unknown CLI Docker call은 허용하지 않아 fake/source coverage가 빠뜨린 command가 있으면 disposable run은 fail closed할 수 있다. Cache miss는 의도적으로 pull 없이 실패한다. CLI rollback prune를 거부한 뒤 실패 시 helper는 `--rm`, inline cidfile cleanup 및 runner EXIT의 기록 helper 재검증/재시도에 의존한다. EXIT은 phase/helper/image ledger와 cidfile을 검증하고 모든 pending helper의 소유성을 확인한 뒤 exact ID만 DB/volume/network보다 먼저 제거한다. helper recovery 실패 시 원래 CLI exit을 보존하고 cleanup 실패를 보고하며 workdir의 ledger/cidfile 증거를 남긴다. 정적 검증은 실제 DB bootstrap, loopback binding 또는 전체 replay를 증명하지 않는다.
+- 자체 검토: plan scope와 task ownership은 위 허용 CI files에 한정했다. Auth DB bootstrap flag/command를 수정하지 않으며, broad prune나 passthrough allow rule을 사용하지 않는다. start/reset migration 결과는 향후 별도 승인 runtime이 필요하다.
+
+## 2026-10-05 실패 진단 안전 증거 보강
+
+- 목표: CLI start 실패 원인을 다음 승인된 replay에서 더 좁힐 수 있도록, product Docker guard의 고정 거절 코드와 소유권이 확인된 DB 상태 요약만 artifact에 남긴다. 이번 변경은 CI fake/static 검증만 수행하며 CLI/Docker/runtime, pull, reset/replay는 실행하지 않는다.
+- Workspace는 사용자가 지정한 `/Users/yunho/Desktop/project/token-planet`의 `master` 주 checkout이다. 기존 dirty 변경과 미추적 파일을 보존하며 새 worktree를 만들지 않는다.
+- 허용 파일은 `supabase/ci/run.sh`, `supabase/ci/product_docker_guard.py`, `supabase/ci/test_run.py`, `supabase/ci/test_product_docker_guard.py`, 이 계획 문서다. 원본 migration/config/SQL tests, spike, adapter 변경은 범위 밖이다.
+- Guard의 거절은 선언된 고정 code enum으로 표현한다. 검증된 temp workdir의 private sidecar에는 `phase`와 `code`만 기록하고, runner는 schema/enum 검증 후 정규화된 `diagnostics.jsonl`로 내보낸다. CLI raw stdout/stderr를 넓게 허용하지 않는다. Sidecar sink나 schema가 안전하게 확인되지 않으면 원문 없이 진단 증거 부재/무효 상태만 기록하며 원래 CLI exit를 보존한다.
+- DB ownership 거절은 판정 predicate를 바꾸지 않고 고정 code로만 세분화한다: `DB_INSPECT_IDENTITY_REJECTED`, `DB_INSPECT_IMAGE_REJECTED`, `DB_INSPECT_LABELS_REJECTED`, `DB_INSPECT_NETWORK_MODE_REJECTED`, `DB_INSPECT_NETWORK_ATTACHMENT_COUNT_REJECTED`, `DB_INSPECT_NETWORK_ATTACHMENT_ID_REJECTED`, `DB_INSPECT_NETWORK_ATTACHMENT_INVALID`, `DB_INSPECT_PUBLISH_REJECTED`, `DB_INSPECT_VOLUME_MOUNT_REJECTED`, `DB_INSPECT_INVALID`, `DB_INSPECT_COMMAND_FAILED`. Artifact에는 검사한 실제 metadata나 값은 남기지 않는다.
+- `supabase start` 실패 직후 runner는 recorded DB ID를 대상으로 read-only inspect한다. 정확한 generated 이름/ID, Supabase project/compose/workdir labels, pinned Postgres image, owned network 및 volume mount를 확인한 경우에만 `State.Status`, `State.Health.Status`, 정수 `State.ExitCode`를 enum/타입 검사 후 남긴다. binding 결과나 health 성공은 ownership의 전제가 아니다. 정확한 not-found, inspect 실패, 잘못된 응답, ownership 불일치는 고정 `lookup` code만 남긴다. 원문 inspect JSON, argv/env, stdout/stderr, container/health logs, `State.Error`, IDs, credentials는 artifact에 기록하지 않는다.
+- Inspect는 2초 timeout과 stdout/stderr 합계 65,536 byte hard limit을 사용한다. timeout·초과 출력·malformed 응답은 고정 실패 분류로 귀결하고 cleanup은 계속한다. 출력 제한은 전체 결과를 무제한 메모리에 받은 뒤 길이만 검사하는 방식으로 구현하지 않는다. 진단 프로세스나 artifact sink 실패는 원래 start exit와 cleanup을 보존하며 원시 오류를 출력하지 않는다. Artifact sink 자체가 쓸 수 없을 때 진단 artifact가 빠질 수 있다는 점은 acceptance 한계로 기록한다.
+- TDD 순서: (1) 고정 guard code/sidecar schema 및 sink 오류·손상 회귀, (2) owned/unavailable/foreign/malformed DB inspect 결과와 metadata allowlist, (3) start exit 유지·후속 reset 차단·exact cleanup 및 artifact 비밀 sentinel 회귀를 먼저 RED로 확인하고 구현 후 GREEN으로 바꾼다. 이어 전체 `supabase/ci` offline suite, Python/Bash syntax 및 `git diff --check`를 수행한다. QA가 승인된 offline/static 범위를 독립 실행하고, Reviewer가 QA 후 전체 diff의 데이터 노출/ownership 경계를 독립 검토한다.
+- 수용 기준: artifact에는 고정 code와 `lookup/state/health/exit_code` allowlist만 포함한다. Guard/inspect 원문과 credentials가 남지 않고, ownership이 검증되지 않은 container 상태는 출력되지 않는다. 실패 진단은 원래 CLI exit·정확한 cleanup을 바꾸지 않으며 migration/replay 성공이나 이전 runtime 실패 원인을 확정했다고 주장하지 않는다.
+- 독립 QA/Reviewer disposition: `host_port_spike.py`의 기존 실패 진단은 이번 addendum의 승인 파일 범위 밖이며 그대로 보존한다. 별도 경로에는 무제한 inspect subprocess, network/volume 미검증 상태 요약, generated container ID artifact가 남아 있어 별도 hardening 작업으로 다룬다. 이는 제품 runner의 승인된 guard 진단 수용 결과에 포함하지 않는다.
+- 2026-10-05 승인된 replay 결과: `bash supabase/ci/run.sh --artifacts-dir /private/tmp/token-planet-ci-full-replay-20261005-02`는 `supabase start`에서 실패했다. [diagnostics artifact](/private/tmp/token-planet-ci-full-replay-20261005-02/diagnostics.jsonl)는 `DATABASE_CONTAINER_OWNERSHIP_COULD_NOT_BE_VERIFIED`, `DOCKER_COMMAND_IS_NOT_APPROVED`, `lookup=ownership_unverified`만 기록해 구체적인 metadata 불일치는 확인되지 않았다. loopback/network·port preflight, Docker engine, cached pinned Postgres image 검사는 통과했고 cleanup은 helper→container→volume→network 순서로 성공했다. `db reset`, migrations, SQL tests에는 도달하지 않았다. 이후 추가한 세부 ownership code는 offline QA/Reviewer까지 통과했으며 이번 실행에는 아직 사용되지 않았다.
+- 2026-10-05 추가 승인 replay (`...-03`, `...-04`)도 `supabase start`에서 실패했다. [03 artifact](/private/tmp/token-planet-ci-full-replay-20261005-03/diagnostics.jsonl)는 `DB_INSPECT_NETWORK_REJECTED`, `DOCKER_COMMAND_IS_NOT_APPROVED`, `lookup=ownership_unverified`를, [04 artifact](/private/tmp/token-planet-ci-full-replay-20261005-04/diagnostics.jsonl)는 `DB_INSPECT_NETWORK_ATTACHMENT_REJECTED`, `DOCKER_COMMAND_IS_NOT_APPROVED`, `lookup=ownership_unverified`를 기록했다. 두 번 모두 cleanup은 helper→container→volume→network 순서로 성공했고 reset/migrations/SQL tests에는 도달하지 않았다.
+- 이후 network mode, attachment 구조, attachment 개수, 단일 ID 불일치를 고정 코드로 세분화했다. 판정은 여전히 정확히 하나의 generated network ID attachment를 요구하며 raw metadata는 기록하지 않는다. malformed/count/ID fixture, positive exact-contract fixture를 포함한 offline suite 160건·독립 QA·Reviewer가 통과했다. 사용자는 개발용 disposable DB를 백업 없이 초기화해도 된다고 승인했다. 다음 replay는 생성된 임시 volume으로 진행한다.
+
+## 2026-10-05 DB 시작 전 네트워크 설정과 시작 후 연결 검증
+
+**목표:** 생성 직후에는 소유 network 설정을 검증하고, Docker start 성공 직후에는 실제 attachment ID를 엄격히 확인해 disposable DB 전체 CI replay를 진행한다.
+
+**근거:** `...-05` replay는 `supabase start`에서 `DB_INSPECT_NETWORK_ATTACHMENT_ID_REJECTED`로 실패했고 reset/migrations/SQL tests에는 도달하지 않았다. Moby는 생성 시 HostConfig의 network를 이름으로 정규화해 빈 endpoint 설정을 만들고, `allocateNetwork`/`connectToNetwork`에서 시작 시 NetworkID를 기록한다 ([생성 설정](https://github.com/moby/moby/blob/master/daemon/container_operations.go#L2804-L2862), [시작 연결](https://github.com/moby/moby/blob/master/daemon/container_operations.go#L2895-L2908), [attachment ID 기록](https://github.com/moby/moby/blob/master/daemon/container_operations.go#L3403-L3406)). 따라서 생성 전후 검사를 분리하되 소유권 확인은 유지한다.
+
+**범위:** Coder가 아래 파일만 수정한다: `supabase/ci/run.sh`, `supabase/ci/product_docker_guard.py`, `supabase/ci/test_run.py`, `supabase/ci/test_product_docker_guard.py`. 기존 dirty 변경, 원본 migration/config/SQL tests, `host_port_spike.py`, adapter 및 비임시 DB는 범위 밖이다. 새 Docker mutation, network repair, pull, persistent/hosted DB 접근을 추가하지 않는다.
+
+**계약:**
+
+- Runner의 start/reset/cleanup/diagnostic 네 guard 호출마다 `TOKEN_PLANET_GUARD_NETWORK_NAME="$NETWORK_NAME"`을 전달한다. Guard는 network name을 필수로 받고 `token-planet-ci-net-<project의 동일 24자리 hex suffix>` 형식과 기존 generated full network ID를 함께 검증한다.
+- 인터페이스는 `verify_db_ownership(context, state, *, pre_start=False) -> None`으로 둔다. 기본은 strict 검증이다.
+- `pre_start=True`는 `cp`와 `start` 직전에만 명시적으로 쓴다. `State.Status == "created"`, `State.Running is False`, 정확한 `HostConfig.NetworkMode == context["network"]`, 단일 `NetworkSettings.Networks` entry의 key가 `context["network_name"]`인 조건을 확인한다. entry는 mapping이고 `NetworkID`는 명시된 문자열 `""` 또는 정확한 owned full ID여야 한다. identity/image/labels/mount/publish 검사는 전부 그대로 유지한다.
+- Start 명령이 0으로 끝난 직후 기본 strict 검증을 실행한다. 단일 well-formed attachment의 key가 생성된 network name이고 `NetworkID`가 exact owned ID인지 확인한 뒤에만 `state["started"][phase] = True`를 저장한다. Start 실패는 기존 exit를 보존하고 성공 bookkeeping은 하지 않는다.
+- Reset DB 제거와 start 진단은 기본 strict 계약을 유지한다. strict 검증은 하나의 key가 generated network name과 일치하는 attachment만 허용한다. pre-start 허용은 ledger나 inspect 내용에서 추론하지 않는다. 실패 시 추가 Docker mutation이나 metadata 원문 출력을 하지 않는다. 새 거절 사유가 필요하면 고정 diagnostic code 및 allowlist를 함께 갱신한다.
+
+### Task: 네트워크 수명주기 계약 TDD
+
+**인터페이스:** 기존 generated name/ID, guard ledger, Docker argv allowlist를 소비한다. 산출물은 모든 guard 호출에서 name 전파, 명시적 pre-start 검사, start 직후 strict 검사와 start/reset 회귀다.
+
+- [ ] Fake Docker가 create 직후 network 이름 key와 빈 `NetworkID`, `State.Status="created"`, `Running=false`를 반환하고 start 성공 시 exact ID attachment로 전환하도록 fixture를 확장한다.
+- [ ] `test_prestart_network_accepts_owned_name_and_empty_or_exact_id`: 두 허용 ID 값 각각으로 cp/start가 성공하고, start 후 strict inspect가 ledger 성공 기록보다 먼저 실행되는지 확인한다.
+- [ ] `test_prestart_network_rejects_invalid_configuration_before_mutation`: wrong mode/key/ID, missing/null/non-string ID, extra network, malformed record, non-created state, `Running=true`마다 해당 cp/start mutation이 없음을 확인한다.
+- [ ] `test_prestart_network_context_requires_generated_name`: name 누락, 공백, 다른 project suffix를 거절하고 Docker mutation이 없음을 확인한다.
+- [ ] `test_prestart_network_retains_all_common_ownership_checks`: ID/name/image/labels/mount/publish 거절이 cp/start mutation을 막는지 확인한다.
+- [ ] `test_prestart_network_poststart_requires_exact_attachment_before_ledger`: start가 성공해도 후속 inspect의 빈/누락/foreign/추가/잘못된 key·attachment 또는 inspect 오류는 실패하고 `started[phase]`가 false인지 확인한다.
+- [ ] `test_prestart_network_failed_start_preserves_failure`: Docker start 실패 exit와 실패 bookkeeping을 확인한다.
+- [ ] `test_prestart_network_reset_removal_remains_strict` 및 `test_prestart_network_diagnostic_remains_strict`: reset 제거/진단이 empty, foreign ID 또는 잘못된 network-name key를 거절하고 상태 metadata를 노출하지 않는지 확인한다.
+- [ ] `test_prestart_network_runner_propagates_name_in_all_guard_paths`: start/reset/cleanup/diagnostic의 generated name 전달과 양 DB 생성 주기의 create→cp→start→strict inspect 순서를 확인한다.
+- [ ] RED를 확인한다: `python3 -m unittest discover -s supabase/ci -p 'test_product_docker_guard.py' -k pre_start -v` 및 `python3 -m unittest discover -s supabase/ci -p 'test_run.py' -k network_name -v`. 이 선택자는 실제 fixture의 `test_pre_start_...` 및 `test_guard_network_name_...` 이름을 대상으로 한다. 환경/fixture 오류는 유효한 RED가 아니다.
+- [ ] 최소 구현 후 같은 두 focused 명령을 실행하고, 전체 offline 회귀 `python3 -m unittest discover -s supabase/ci -p 'test_*.py' -v`, `bash -n supabase/ci/run.sh`, `git diff --check`를 통과시킨다.
+
+### 독립 검증과 수용
+
+- [ ] QA가 최종 변경 상태에서 focused 테스트, 전체 offline suite, shell/diff 검사를 독립 실행하고 start/reset fail-closed 경계를 확인한다.
+- [ ] QA가 승인된 disposable DB 권한으로 다음 전체 재생을 실행한다: `bash /Users/yunho/Desktop/project/token-planet/supabase/ci/run.sh --artifacts-dir /private/tmp/token-planet-ci-full-replay-20261005-06`. Artifact 디렉터리는 비어 있어야 한다.
+- [ ] 전체 start/reset, 원본 순서의 migration 재생, synthetic history 대조, SQL suite 결과 및 정확한 생성 리소스 cleanup을 기록한다. 원본 migration/config/SQL test 입력의 이전 hash와 비교한다. offline GREEN을 실제 replay 성공으로 취급하지 않는다.
+- [ ] QA 뒤 독립 Reviewer가 최종 전체 diff에서 name/ID 연결, explicit pre-start 선택, strict post-start 검사와 bookkeeping 순서, reset 제거, 진단 정보 제한, foreign-resource mutation 차단을 확인한다. 수정사항이 생기면 해당 QA와 최종 Reviewer 범위를 갱신한다.
+- [ ] CEO는 모든 수용 기준과 finding이 해결된 뒤 완료를 판단한다. Commit/push는 요청되지 않았다.
+
+**위험과 한계:** pre-start 허용은 명시적으로 지정된 단계에만 적용하며 reset 제거와 진단은 strict다. 검사와 mutation 사이의 기존 경쟁 조건은 남고, start 직후 attachment 소유권은 DB health 성공을 보장하지 않는다. 실제 daemon/cache/CLI 차이가 있으면 고정 진단과 미충족 수용 기준을 보고한다.
+
+## 2026-10-05 Helper 부재 응답 호환성 보강
+
+- Attempt-07은 `HELPER_OWNERSHIP_INSPECTION_FAILED`→`HELPER_CLEANUP_COULD_NOT_BE_VERIFIED`로 실패했다. 기록된 realtime helper ID의 read-only inspect 결과는 exit 1, stdout hex `0a`(`b"\n"`), stderr `Error response from daemon: No such container: <recorded-id>\n`이었다. 기존 guard는 stdout이 빈 `No such object` 응답만 부재로 인정해 이 응답을 거절했다. Runner는 DB/volume/network를 정리했으나 helper cleanup을 검증하지 못해 ledger와 workdir를 보존했다.
+- 최소 수정은 관측한 exit/stdout/stderr의 정확한 tuple만 부재 응답으로 추가하는 것이다. 기존 tuple과 존재하는 helper의 전체 ownership 검증을 유지한다. 다른 ID, 추가 출력, 다른 exit 등은 거절하며, 부재가 확인된 helper는 remove 없이 기존 cleaned 처리 경로를 사용한다.
+- Reviewer가 helper network 목록에서 잘못된 항목을 건너뛰는 P2 결함도 발견했다. 수정은 모든 항목이 mapping이며 `NetworkID`가 문자열인지 확인한 뒤 단일 owned attachment를 허용한다. `owned + null` inline/recovery fixture는 수정 전 RED, 수정 뒤 exit 125·no removal·pending ledger 보존을 확인했다.
+- 최종 독립 QA: focused guard 59건, 전체 offline suite 172건, Bash 문법, tracked diff 및 untracked guard/test 공백 검사가 통과했다. Reviewer는 두 ownership 경계와 계획 선택자를 재확인했고 최종 변경에서 추가 finding이 없다고 보고했다. Offline 결과는 runtime 성공을 증명하지 않는다.
+- 사용자의 직접 승인 후 Attempt-08은 DB start, loopback binding, 31개 migration staging/검증까지 통과했지만 `db reset`에서 exit 1로 실패했다. `reset.log`의 19개 unclassified 줄은 민감정보 보호를 위해 모두 가려져 원인을 구분할 수 없었고, SQLSTATE·migration 진행 위치·reset-phase guard code artifact가 없다. Raw reset log와 workdir는 runner cleanup에서 삭제됐다.
+- Runner cleanup은 helper recovery, generated DB container, volume, network 제거를 PASS로 기록했다. 추가 read-only 확인에서 Attempt-07의 정확한 DB/helper container ID, volume, network와 Attempt-08의 생성 리소스가 모두 부재함을 확인했다. Attempt-07의 보존 workdir는 제거했고 sanitized artifacts는 남겼다.
+- 아직 전체 migration replay, synthetic history 대조, SQL suite 및 입력 hash 비교가 완료되지 않았다. 다음 disposable replay 전에 아래 reset 진단을 구현·QA·Reviewer 검토하고, 그 정확한 새 시도에 대해 사용자의 직접 승인을 받는다. 미도달 단계나 증거 공백이 있으면 replay 완료를 선언하지 않는다.
+
+**자체 검토:** stdout을 추정하지 않고 관측된 `0a`로 고정했다. 원인·수정·Coder 결과·독립 runtime 수용을 구분했으며 기존 DB 권한이나 mutation 범위를 넓히지 않았다.
+
+## 2026-10-05 Reset 실패 진단 보강
+
+**목표:** 다음 직접 승인된 replay에서 reset 단계의 guard 거절과 명시적 SQL 오류 관측을 구분하면서 원래 실패 exit와 cleanup을 보존한다.
+
+**범위:** `supabase/ci/run.sh`, `supabase/ci/test_run.py`만 수정한다. 원문 필터를 넓히거나 Docker mutation을 추가하지 않는다.
+
+**계약:** Reset 실패 직후 `reset_status`를 먼저 저장하고 cleanup 전에 `collect_reset_diagnostics`를 호출한다. 진단 파일은 `reset-diagnostics.json`으로 두고 다음 정보만 허용한다.
+
+- `guard_codes`: 검증된 private sidecar의 reset phase 고정 enum code만 허용한다.
+- `last_announced_migration`: 정확한 `Applying migration <staged_filename>...` 줄이며 staging manifest의 `staged_filename` 집합에 있을 때만 기록한다. 이는 시도 공지이지 적용 성공/실패의 단정이 아니다.
+- `sqlstate`: 전체 줄이 정확한 `ERROR: <discarded message> (SQLSTATE XXXXX)` 형식과 일치할 때만 5자리 대문자 영숫자를 기록한다. 실제 CLI 출력 형식이 확인되지 않았으므로 다른 형식은 추정하지 않는다. 상충하는 코드가 여러 개면 `null`로 둔다.
+- `diagnostic_status`: `ok`, `unavailable`, `invalid`, `truncated`, `ambiguous` 중 하나.
+- `error_class`: `unknown`, `guard_rejection_observed`, `sql_error_observed`, `guard_and_sql_error_observed` 중 하나. 증거가 없는 값은 빈 배열 또는 `null`로 둔다.
+
+Raw reset 입력은 소유자·regular file·symlink 여부를 확인하고 최대 65,536 bytes, 한 줄 4,096 bytes로 제한한다. Migration manifest도 private regular file, 현재 사용자 소유, mode 0600, 단일 link, `O_NOFOLLOW | O_NONBLOCK`으로 열고 최대 1 MiB까지만 읽는다. Credential/JWT 표식이 있는 줄은 추출하지 않는다. SQL text, raw error, IDs, credentials, 미분류 문자열, traceback은 기록하지 않는다. 진단·sanitizer·artifact sink 실패는 격리하며 원래 reset exit와 cleanup을 바꾸지 않는다. 진단 실패 시 raw fallback은 없다.
+
+### TDD와 수용
+
+- [x] RED/GREEN: reset-phase sidecar enum, 정확한 manifest migration 진행 줄, strict SQLSTATE, credential/JWT exclusion, 원문 sentinel 부재를 검증했다.
+- [x] RED/GREEN: oversized/corrupt/symlink 입력과 diagnostic/sink 오류에서 reset exit 37, cleanup, history/SQL 차단을 확인했다.
+- [x] Reviewer P2 수정: manifest `Path.read_text()`가 FIFO에서 cleanup을 막는 RED를 재현하고, bounded nonblocking private-file reader로 교체했다. FIFO/symlink/oversized/missing 회귀를 추가했다.
+- [x] 독립 QA: reset focused 5/5, 전체 offline 176/176, `bash -n`, `git diff --check` 통과.
+- [x] 독립 Reviewer: manifest read 경계와 privacy/exit/cleanup을 재검토해 P2 해결 및 추가 finding 없음으로 확인했다.
+- [x] 사용자 직접 승인으로 Attempt-09를 한 번 실행했다. CLI/Docker/image/loopback·port preflight 및 31개 migration staging은 통과했지만 `db reset`은 exit 1로 실패했다. `reset-diagnostics.json`은 `diagnostic_status=ok`, `error_class=guard_rejection_observed`, `guard_codes=[EXCLUDED_SERVICE_ABSENCE_COULD_NOT_BE_VERIFIED]`, `last_announced_migration=20000101000031_20261004013811_guest_import_schema1_private_receipt_guard.sql`, `sqlstate=null`을 기록했다. 마지막 공지는 적용 성공을 입증하지 않는다.
+- [x] Attempt-09 manifest SHA-256은 `f29caaa0fcdf897e142c199a7545c6fad5ade842db4b0bd73294240309c75b85`이며 현재 source migration 31개 hash 모두와 일치했다. Cleanup log 및 읽기전용 inspect로 exact generated DB container, volume, network와 workdir의 부재를 확인했다. History verification 및 SQL/TAP suite에는 도달하지 않았다.
+- [x] Read-only inspect로 excluded storage target의 관측 응답을 확인했다: exit 1, stdout hex `0a`, stderr `Error response from daemon: No such container: <generated-name>\n`. Guard는 기존 `Error: No such object: <target>\n` tuple만 받아 이 차이를 `EXCLUDED_SERVICE_ABSENCE_COULD_NOT_BE_VERIFIED`로 거절했다.
+- [x] 최소 guard 수정: generated excluded service 4종에 대해 기존 정확 tuple과 Attempt-09에서 관측한 정확한 Docker tuple `(exit=1, stdout=b"\\n", stderr=Error response from daemon: No such container: <same target>\\n)`만 허용한다. 양 tuple 모두 기존 CLI 호환 응답을 돌려주며 실제 `restart` 호출은 전달하지 않는다.
+- [x] TDD: 수정 전 네 target 모두 새 tuple에서 거절됐다. focused test는 두 tuple을 네 target에 적용하고 13개 near-miss, foreign target, existing target, inspect 실패, wrong phase를 거절하며 read-only inspect만 실행함을 확인한다.
+- [x] 독립 QA: excluded-service focused 5/5, 전체 offline suite 178/178, `bash -n`, tracked diff 및 untracked guard/test whitespace 검사를 통과했다.
+- [x] 독립 Reviewer: 두 exact tuple 외에 허용 범위가 늘지 않고 restart가 전달되지 않음을 확인했다. 추가 finding 없음.
+- [x] Attempt-10 직접 승인 후 `/private/tmp/token-planet-ci-full-replay-20261005-10`에서 정확히 한 번 실행했다. Exit 0, 31 migrations, versions `20000101000001`–`20000101000031` 및 history 대조 PASS를 확인했다.
+- [x] 40개 SQL pgTAP suite 전부 PASS, 총 1,103 assertions·0 failures. Migration staging verification은 reset 전·후와 SQL tests 후 모두 통과했다.
+- [x] Helper, generated DB container/volume/network cleanup PASS. Exact ID/name read-only inspection에서 모든 생성 리소스 부재, temporary workdir 삭제를 확인했다.
+- [x] Attempt-10 manifest SHA-256은 `f29caaa0fcdf897e142c199a7545c6fad5ade842db4b0bd73294240309c75b85`; source migration 31개 hash가 모두 일치한다. Runner/guard/prepare/adapter/host-port source hash와 git HEAD도 실행 전후 동일했다.
+
+예정 offline 명령:
+
+```bash
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s supabase/ci -p 'test_run.py' -k reset
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s supabase/ci -p 'test_*.py'
+bash -n supabase/ci/run.sh
+git diff --check
+```
+
+Attempt-10에서 migration replay, history 대조, SQL suite와 cleanup acceptance가 모두 완료됐다. Sanitized runtime evidence는 `/private/tmp/token-planet-ci-full-replay-20261005-10`에 보존했다. 성공한 reset에는 `reset-diagnostics.json`이 생기지 않았고 원문 reset output은 artifact에 기록하지 않는다. 코드와 문서 변경은 아직 commit하지 않았다.
+
+**자체 검토:** 실제 CLI 출력 형식을 확인했다고 주장하지 않는다. Guard code와 SQLSTATE는 관측 증거이며 둘 다 있으면 rollback 과정의 2차 거절일 수 있어 최초 원인을 단정하지 않는다. 진단 부재도 SQL 성공을 뜻하지 않는다.

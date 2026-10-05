@@ -90,6 +90,21 @@ class SpikePreparationTests(unittest.TestCase):
         self.assertEqual(output.getvalue(), "spike_status=PASS\n")
         run_spike.assert_called_once_with(str(self.artifacts))
 
+    def test_main_forwards_start_only_flag(self):
+        output = io.StringIO()
+        with patch.object(host_port_spike, "run_spike", return_value={"status": "PASS"}) as run_spike:
+            with redirect_stderr(io.StringIO()), redirect_stdout(output):
+                try:
+                    result = host_port_spike.main([
+                        "--artifacts-dir", str(self.artifacts), "--start-only",
+                    ])
+                except SystemExit as error:
+                    self.fail(f"main rejected --start-only: {error}")
+
+        self.assertEqual(result, 0)
+        self.assertEqual(output.getvalue(), "spike_status=PASS\n")
+        run_spike.assert_called_once_with(str(self.artifacts), start_only=True)
+
     def test_main_rejects_unknown_arguments(self):
         with patch.object(host_port_spike, "run_spike") as run_spike:
             with redirect_stderr(io.StringIO()):
@@ -131,6 +146,16 @@ class SpikePreparationTests(unittest.TestCase):
 
         host_port_spike.cleanup_spike(workdir)
         self.assertFalse(workdir.exists())
+
+    def test_generated_config_disables_auth_storage_and_realtime(self):
+        workdir, _, config_path = host_port_spike.prepare_spike(self.artifacts)
+        config = Path(config_path).read_text()
+
+        for section in ("auth", "storage", "realtime"):
+            with self.subTest(section=section):
+                self.assertIn(f"[{section}]\nenabled = false\n", config)
+
+        host_port_spike.cleanup_spike(workdir)
 
 
 class SpikePreflightTests(unittest.TestCase):
@@ -285,6 +310,36 @@ class SpikePreflightTests(unittest.TestCase):
 
         self.assertTrue(any(call["args"][1:2] == ["network"] for call in calls))
 
+    def test_rejects_invalid_service_enabled_flags_before_external_commands(self):
+        config_path = Path(self.workdir) / "supabase" / "config.toml"
+        original = config_path.read_text()
+        invalid_configs = []
+        for section in ("auth", "storage", "realtime"):
+            expected = f"[{section}]\nenabled = false\n"
+            invalid_configs.extend((
+                (section, "missing", original.replace(expected, f"[{section}]\n")),
+                (section, "true", original.replace(expected, f"[{section}]\nenabled = true\n")),
+                (section, "wrong type", original.replace(expected, f'[{section}]\nenabled = "false"\n')),
+            ))
+
+        for section, value, invalid_config in invalid_configs:
+            with self.subTest(section=section, value=value):
+                config_path.write_text(invalid_config)
+                run, calls = self.fake_runner()
+                probed = []
+
+                with self.assertRaises(RuntimeError):
+                    host_port_spike.preflight_spike(
+                        self.workdir,
+                        self.project_id,
+                        environ=self.environ,
+                        run=run,
+                        port_probe=lambda ports: probed.append(tuple(ports)),
+                    )
+
+                self.assertEqual(calls, [])
+                self.assertEqual(probed, [])
+
     def test_rejects_busy_loopback_port_before_mutation(self):
         run, calls = self.fake_runner()
 
@@ -325,6 +380,15 @@ class SpikeLifecycleTests(unittest.TestCase):
         self.binding_after_reset = "127.0.0.1"
         self.fail_start = False
         self.fail_reset = False
+        self.start_stdout = ""
+        self.start_stderr = ""
+        self.start_exit_code = 1
+        self.failed_container_id = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+        self.failed_container_error = "bind: address already in use password=must-not-appear"
+        self.fail_container_inspect = False
+        self.fail_container_remove = False
+        self.container_absent_after_start_failure = False
+        self.start_markers = (True, True)
         self.cli_calls = []
         self.docker_calls = []
         self.network = None
@@ -366,7 +430,19 @@ class SpikeLifecycleTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, stdout="2.119.0\n", stderr="")
             if args[1:2] == ["start"]:
                 if self.fail_start:
-                    return subprocess.CompletedProcess(args, 1, stdout="", stderr="start failed")
+                    self._simulate_cli_creation(env, "start", markers=self.start_markers)
+                    if not self.container_absent_after_start_failure:
+                        self.container = self._container_json(
+                            env["TOKEN_PLANET_CI_PROJECT_ID"], cwd, self.network["Name"],
+                            f"supabase_db_{env['TOKEN_PLANET_CI_PROJECT_ID']}", self.binding_after_start,
+                            self.failed_container_id,
+                        )
+                        self.container["State"] = {
+                            "Status": "exited", "ExitCode": 17, "Error": self.failed_container_error,
+                        }
+                    return subprocess.CompletedProcess(
+                        args, self.start_exit_code, stdout=self.start_stdout, stderr=self.start_stderr,
+                    )
                 self._simulate_cli_creation(env, "start")
                 self.container = self._container_json(
                     env["TOKEN_PLANET_CI_PROJECT_ID"], cwd, self.network["Name"],
@@ -423,6 +499,10 @@ class SpikeLifecycleTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, stdout=json.dumps(self.network), stderr="")
             return subprocess.CompletedProcess(args, 1, stdout="", stderr=f"Error: No such network: {docker_args[-1]}")
         if docker_args[:2] == ["container", "inspect"]:
+            if self.fail_container_inspect and any(
+                call["args"][1:2] == ["start"] for call in self.cli_calls
+            ):
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="permission denied")
             if self.container:
                 return subprocess.CompletedProcess(args, 0, stdout=json.dumps(self.container), stderr="")
             return subprocess.CompletedProcess(args, 1, stdout="", stderr=f"Error: No such object: {docker_args[-1]}")
@@ -431,6 +511,8 @@ class SpikeLifecycleTests(unittest.TestCase):
                 return subprocess.CompletedProcess(args, 0, stdout=json.dumps(self.volume), stderr="")
             return subprocess.CompletedProcess(args, 1, stdout="", stderr=f"Error: No such volume: {docker_args[-1]}")
         if docker_args[:3] == ["container", "rm", "-f"]:
+            if self.fail_container_remove:
+                return subprocess.CompletedProcess(args, 1, stdout="", stderr="remove denied")
             self.container = None
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         if docker_args[:2] == ["volume", "rm"]:
@@ -441,15 +523,17 @@ class SpikeLifecycleTests(unittest.TestCase):
             return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
         return subprocess.CompletedProcess(args, 99, stdout="", stderr=f"unexpected Docker command {docker_args[:2]}")
 
-    def _simulate_cli_creation(self, env, phase):
+    def _simulate_cli_creation(self, env, phase, *, markers=(True, True)):
         self.generated_workdir = Path(env["TOKEN_PLANET_CI_WORKDIR"])
         cli_path = env["PATH"].split(os.pathsep)[0]
         self.assertTrue((Path(cli_path) / "docker").is_file())
         self.assertEqual(env["TOKEN_PLANET_REAL_DOCKER"], str(self.docker.resolve()))
         self.assertTrue(env["TOKEN_PLANET_CI_CREATE_MARKER"].endswith(f"{phase}-container-create-seen"))
         self.assertTrue(env["TOKEN_PLANET_CI_VOLUME_CREATE_MARKER"].endswith(f"{phase}-volume-create-seen"))
-        Path(env["TOKEN_PLANET_CI_CREATE_MARKER"]).touch()
-        Path(env["TOKEN_PLANET_CI_VOLUME_CREATE_MARKER"]).touch()
+        if markers[0]:
+            Path(env["TOKEN_PLANET_CI_CREATE_MARKER"]).touch()
+        if markers[1]:
+            Path(env["TOKEN_PLANET_CI_VOLUME_CREATE_MARKER"]).touch()
         project_id = env["TOKEN_PLANET_CI_PROJECT_ID"]
         self.volume = {
             "Name": f"supabase_db_{project_id}",
@@ -459,12 +543,24 @@ class SpikeLifecycleTests(unittest.TestCase):
             },
         }
 
-    def _run(self):
+    def _run(self, artifacts_dir=None, *, start_only=False):
+        arguments = {
+            "environ": self.environ,
+            "run": self.fake_runner,
+            "port_probe": lambda ports: None,
+        }
+        if start_only:
+            try:
+                return host_port_spike.run_spike(
+                    self.artifacts if artifacts_dir is None else artifacts_dir,
+                    start_only=True,
+                    **arguments,
+                )
+            except TypeError as error:
+                self.fail(f"run_spike does not support start_only: {error}")
         return host_port_spike.run_spike(
-            self.artifacts,
-            environ=self.environ,
-            run=self.fake_runner,
-            port_probe=lambda ports: None,
+            self.artifacts if artifacts_dir is None else artifacts_dir,
+            **arguments,
         )
 
     def test_start_wildcard_binding_fails_before_reset_and_cleans_only_owned_resources(self):
@@ -482,6 +578,104 @@ class SpikeLifecycleTests(unittest.TestCase):
             (self.artifacts / "spike.log").read_text(),
         )
 
+    def test_failed_start_reports_redacted_diagnostics_and_exact_resource_state_before_cleanup(self):
+        self.fail_start = True
+        self.start_stdout = "host-port adapter rejected Docker operation: unexpected create option\n"
+        self.start_stderr = (
+            "bind: address already in use password=do-not-log "
+            "postgresql://user:secret@example.invalid/db?token=also-secret\n"
+        )
+
+        with self.assertRaises(RuntimeError):
+            self._run()
+
+        log = (self.artifacts / "spike.log").read_text()
+        project_id = self.cli_calls[1]["env"]["TOKEN_PLANET_CI_PROJECT_ID"]
+        expected_name = f"supabase_db_{project_id}"
+        self.assertIn(f"run_identity project_id={project_id} network_id=network-id-spike", log)
+        self.assertIn(f"container_name={expected_name}", log)
+        self.assertIn(f"container_id={self.failed_container_id}", log)
+        self.assertIn("container_state status=exited exit_code=17 error=port_conflict", log)
+        stdout_bytes = len(self.start_stdout.encode("utf-8"))
+        stderr_bytes = len(self.start_stderr.encode("utf-8"))
+        self.assertIn(
+            f"diagnostic=port_conflict source=stderr message=database host port is already in use bytes={stderr_bytes} lines=1",
+            log,
+        )
+        self.assertIn(f"diagnostic=adapter_reject category=create_option source=stdout bytes={stdout_bytes} lines=1", log)
+        self.assertIn("phase=start adapter_markers container_create=present volume_create=present", log)
+        for secret in ("do-not-log", "secret", "also-secret", "must-not-appear", "permission denied"):
+            self.assertNotIn(secret, log)
+        self.assertLess(log.index("container_state status=exited"), log.index("cleanup_status=PASS kind=container"))
+        docker_commands = [call[:3] for call in self.docker_calls]
+        self.assertLess(docker_commands.index(["container", "inspect", "--format"]), docker_commands.index(["container", "rm", "-f"]))
+        self.assertFalse(any(call[1:3] == ["db", "reset"] for call in (entry["args"] for entry in self.cli_calls)))
+
+    def test_failed_start_records_container_absence_without_raw_cli_output(self):
+        self.fail_start = True
+        self.container_absent_after_start_failure = True
+        self.start_stderr = "private token=must-not-appear"
+
+        with self.assertRaises(RuntimeError):
+            self._run()
+
+        log = (self.artifacts / "spike.log").read_text()
+        self.assertIn("start_failure container=absent", log)
+        self.assertNotIn("must-not-appear", log)
+        self.assertNotIn("container_state", log)
+
+    def test_failed_start_records_empty_and_unclassified_output_counts_without_raw_text(self):
+        self.fail_start = True
+        self.start_stdout = "private-token=never-record-this\nsecond private line\n"
+        self.start_stderr = ""
+
+        with self.assertRaises(RuntimeError):
+            self._run()
+
+        log = (self.artifacts / "spike.log").read_text()
+        self.assertIn(
+            f"diagnostic=unclassified source=stdout bytes={len(self.start_stdout.encode('utf-8'))} lines=2",
+            log,
+        )
+        self.assertIn("diagnostic=empty source=stderr bytes=0 lines=0", log)
+        self.assertNotIn("private-token", log)
+        self.assertNotIn("never-record-this", log)
+
+    def test_failed_start_records_each_adapter_marker_combination_before_cleanup(self):
+        self.fail_start = True
+        for container_seen, volume_seen in ((False, False), (False, True), (True, False), (True, True)):
+            with self.subTest(container_seen=container_seen, volume_seen=volume_seen):
+                self.start_markers = (container_seen, volume_seen)
+                artifacts = self.root / f"artifacts-{int(container_seen)}-{int(volume_seen)}"
+                artifacts.mkdir()
+                with self.assertRaises(RuntimeError):
+                    self._run(artifacts)
+
+                log = (artifacts / "spike.log").read_text()
+                container_state = "present" if container_seen else "absent"
+                volume_state = "present" if volume_seen else "absent"
+                marker_line = (
+                    "phase=start adapter_markers "
+                    f"container_create={container_state} volume_create={volume_state}"
+                )
+                self.assertIn(marker_line, log)
+                self.assertLess(log.index(marker_line), log.index("cleanup_status=PASS kind=container"))
+
+    def test_failed_start_inspect_error_is_redacted_and_cleanup_keeps_first_error(self):
+        self.fail_start = True
+        self.start_stderr = "database container exited"
+        self.fail_container_inspect = True
+        self.fail_container_remove = True
+
+        with self.assertRaisesRegex(RuntimeError, "Supabase start failed; cleanup also reported 1 error"):
+            self._run()
+
+        log = (self.artifacts / "spike.log").read_text()
+        self.assertIn("start_failure container=unavailable reason=inspect_failed", log)
+        self.assertIn("cleanup_status=FAIL kind=container", log)
+        self.assertNotIn("permission denied", log)
+        self.assertNotIn("remove denied", log)
+
     def test_success_checks_start_and_reset_then_cleans_owned_resources(self):
         result = self._run()
 
@@ -493,6 +687,104 @@ class SpikeLifecycleTests(unittest.TestCase):
         self.assertIsNone(self.container)
         self.assertIsNone(self.volume)
         self.assertIsNone(self.network)
+
+    def test_default_mode_records_start_reset_artifact_mode(self):
+        self._run()
+
+        self.assertIn("spike_mode=start_reset", (self.artifacts / "spike.log").read_text())
+
+    def test_start_only_runs_start_once_checks_actual_resources_and_cleans_exact_owned_resources(self):
+        result = self._run(start_only=True)
+
+        self.assertEqual(result["status"], "PASS")
+        cli_phases = [
+            call["args"][1]
+            for call in self.cli_calls
+            if call["args"][1] in ("start", "db")
+        ]
+        self.assertEqual(cli_phases, ["start"])
+        self.assertTrue(any(
+            call[:2] == ["container", "inspect"]
+            for call in self.docker_calls
+        ), "start-only must inspect the actual database binding and ownership")
+        self.assertIn(["container", "rm", "-f", "container-start-id"], self.docker_calls)
+        project_id = next(call["env"]["TOKEN_PLANET_CI_PROJECT_ID"] for call in self.cli_calls if call["args"][1] == "start")
+        self.assertIn(["volume", "rm", f"supabase_db_{project_id}"], self.docker_calls)
+        self.assertIn(["network", "rm", "network-id-spike"], self.docker_calls)
+        self.assertIsNone(self.container)
+        self.assertIsNone(self.volume)
+        self.assertIsNone(self.network)
+        self.assertIsNotNone(self.generated_workdir)
+        self.assertFalse(self.generated_workdir.exists())
+        summary = (self.artifacts / "spike.log").read_text()
+        self.assertIn("spike_mode=start_only", summary)
+        self.assertIn("phase=start status=PASS", summary)
+
+    def test_start_only_rejects_non_loopback_actual_binding_and_cleans_resources(self):
+        self.binding_after_start = "0.0.0.0"
+
+        with self.assertRaisesRegex(RuntimeError, "database published binding is not 127.0.0.1"):
+            self._run(start_only=True)
+
+        cli_phases = [
+            call["args"][1]
+            for call in self.cli_calls
+            if call["args"][1] in ("start", "db")
+        ]
+        self.assertEqual(cli_phases, ["start"])
+        self.assertIsNone(self.container)
+        self.assertIsNone(self.volume)
+        self.assertIsNone(self.network)
+        summary = (self.artifacts / "spike.log").read_text()
+        self.assertIn("spike_mode=start_only", summary)
+        self.assertIn("phase=start status=FAIL code=postgres_binding", summary)
+
+    def test_start_only_start_failure_skips_later_cli_calls_and_cleans_owned_resources(self):
+        self.fail_start = True
+
+        with self.assertRaisesRegex(RuntimeError, "Supabase start failed"):
+            self._run(start_only=True)
+
+        cli_phases = [
+            call["args"][1]
+            for call in self.cli_calls
+            if call["args"][1] in ("start", "db")
+        ]
+        self.assertEqual(cli_phases, ["start"])
+        self.assertIn(["container", "rm", "-f", self.failed_container_id], self.docker_calls)
+        project_id = next(call["env"]["TOKEN_PLANET_CI_PROJECT_ID"] for call in self.cli_calls if call["args"][1] == "start")
+        self.assertIn(["volume", "rm", f"supabase_db_{project_id}"], self.docker_calls)
+        self.assertIn(["network", "rm", "network-id-spike"], self.docker_calls)
+        self.assertIsNone(self.container)
+        self.assertIsNone(self.volume)
+        self.assertIsNone(self.network)
+        self.assertIsNotNone(self.generated_workdir)
+        self.assertFalse(self.generated_workdir.exists())
+        summary = (self.artifacts / "spike.log").read_text()
+        self.assertIn("spike_mode=start_only", summary)
+        self.assertIn("spike_status=FAIL", summary)
+
+    def test_start_only_cleanup_failure_keeps_overall_run_failed(self):
+        self.fail_container_remove = True
+
+        with self.assertRaisesRegex(RuntimeError, "spike cleanup reported 1 error"):
+            self._run(start_only=True)
+
+        cli_phases = [
+            call["args"][1]
+            for call in self.cli_calls
+            if call["args"][1] in ("start", "db")
+        ]
+        self.assertEqual(cli_phases, ["start"])
+        self.assertIsNotNone(self.container)
+        self.assertIsNone(self.volume)
+        self.assertIsNone(self.network)
+        self.assertIsNotNone(self.generated_workdir)
+        self.assertFalse(self.generated_workdir.exists())
+        summary = (self.artifacts / "spike.log").read_text()
+        self.assertIn("spike_mode=start_only", summary)
+        self.assertIn("cleanup_status=FAIL kind=container", summary)
+        self.assertIn("spike_status=FAIL code=cleanup", summary)
 
     def test_reset_wildcard_binding_fails_and_cleans_owned_resources(self):
         self.binding_after_reset = "0.0.0.0"
