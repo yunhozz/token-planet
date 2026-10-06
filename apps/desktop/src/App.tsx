@@ -1036,7 +1036,7 @@ function App() {
       <div className="world-layout">
         {!detail ? <>
           <section className="world-visual" aria-label="나의 행성">
-            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={visiblePlanetObjects} equippedCosmetics={[]} avatarEquipment={currentShopState?.avatar_equipment} compact animate={detail} interactive publicOnly={false} incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
+            <PlanetScene key={planet.current_cycle_id} stage={planet.stage} progress={planet.progress_to_next} avatar={profile!.avatar} objects={visiblePlanetObjects} equippedCosmetics={[]} avatarEquipment={currentShopState?.avatar_equipment} compact animate={detail} interactive popoverSpeech={macosPopup} publicOnly={false} incomplete={planet.incomplete} cycleId={planet.current_cycle_id} />
           </section>
           <section className="planet-summary" aria-label="행성 요약">
             <div className="planet-summary-heading">
