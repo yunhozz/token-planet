@@ -1,4 +1,4 @@
-import { type CSSProperties, useEffect, useId, useMemo, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AvatarSprite } from "./AvatarSprite";
 import { PlanetObjectSprite } from "./PlanetObjectSprite";
 import type { AvatarEquipment, EquippedCosmetic, PlanetAvatar, PlanetObject } from "../types/usage";
@@ -40,7 +40,22 @@ export function objectName(kind: string) {
   return names[kind] ?? "행성 오브젝트";
 }
 
-export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false, interactive = false, publicOnly = false, incomplete = false, cycleId = "", highlightedCosmeticSku = null, avatarEquipment }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean; interactive?: boolean; publicOnly?: boolean; incomplete?: boolean; cycleId?: string; highlightedCosmeticSku?: string | null; avatarEquipment?: AvatarEquipment }) {
+export function positionSpeechBubble(sceneWidth: number, sceneHeight: number, bubbleWidth: number, bubbleHeight: number, anchorX: number, anchorY: number, inset = 8) {
+  const tailSpace = Math.max(8, inset);
+  const clamp = (value: number, minimum: number, maximum: number) => Math.max(minimum, Math.min(value, maximum));
+  const left = clamp(anchorX - bubbleWidth / 2, inset, sceneWidth - bubbleWidth - inset);
+  const above = anchorY - bubbleHeight - 10;
+  const below = anchorY + 10;
+  const tailSide = above < inset && below + bubbleHeight <= sceneHeight - inset ? "top" : "bottom";
+  const top = tailSide === "top"
+    ? clamp(below, tailSpace, sceneHeight - bubbleHeight - inset)
+    : clamp(above, inset, sceneHeight - bubbleHeight - tailSpace);
+  const tailLeft = Math.max(12, Math.min(anchorX - left, bubbleWidth - 12));
+  const fits = bubbleWidth <= sceneWidth - inset * 2 && bubbleHeight <= sceneHeight - inset - tailSpace;
+  return { left, top, tailLeft, tailSide, fits };
+}
+
+export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false, interactive = false, popoverSpeech = false, publicOnly = false, incomplete = false, cycleId = "", highlightedCosmeticSku = null, avatarEquipment }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean; interactive?: boolean; popoverSpeech?: boolean; publicOnly?: boolean; incomplete?: boolean; cycleId?: string; highlightedCosmeticSku?: string | null; avatarEquipment?: AvatarEquipment }) {
   const name = STAGE_NAMES[stage] ?? STAGE_NAMES[4];
   const clipId = `planet-clip-${useId().replace(/:/g, "")}`;
   const sceneRef = useRef<HTMLElement | null>(null);
@@ -64,6 +79,9 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   const previousDialogue = useRef<string | null>(null);
   const [speechLine, setSpeechLine] = useState<string | null>(null);
   const speechTimer = useRef<number | null>(null);
+  const [speechTarget, setSpeechTarget] = useState<DialogueTarget>("planet");
+  const canvasRef = useRef<HTMLDivElement | null>(null);
+  const speechRef = useRef<HTMLDivElement | null>(null);
   const motionActive = animate && !compact && isIntersecting && documentVisible && !reducedMotion;
   const motionState = compact ? "paused" : reducedMotion ? "reduced" : motionActive ? "active" : "paused";
   const tiles = useMemo(() => {
@@ -83,13 +101,51 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   );
   const highlightedStyleId = highlightedCosmeticSku ? styleIdForSku(highlightedCosmeticSku) : null;
   const avatarPoint = WALK_POINTS[avatarPosition];
+  const speechAnchor = speechTarget === "planet" ? { x: 180, y: 130 } : { x: avatarPoint.x + 10, y: avatarPoint.y };
   const interactionStyle = {
+    "--speech-anchor-left": `${speechAnchor.x / 3.6}%`,
+    "--speech-anchor-top": `${speechAnchor.y / 3.2}%`,
     "--avatar-hit-left": `${(avatarPoint.x + 10) / 3.6}%`,
     "--avatar-hit-top": `${(avatarPoint.y + 12) / 3.2}%`,
     "--avatar-bubble-left": `${(avatarPoint.x + 10) / 3.6}%`,
     "--avatar-bubble-top": `${avatarPoint.y / 3.2}%`,
     "--avatar-step-ms": `${avatarStepDuration}ms`,
   } as CSSProperties;
+
+  useLayoutEffect(() => {
+    const canvas = canvasRef.current;
+    const bubble = speechRef.current;
+    if (!popoverSpeech || !canvas || !bubble || !speechLine) return;
+    const position = () => {
+      const scene = canvas.getBoundingClientRect();
+      const visual = canvas.closest<HTMLElement>(".world-visual") ?? canvas;
+      const bounds = visual.getBoundingClientRect();
+      if (!scene.width || !scene.height || !bounds.width || !bounds.height) {
+        bubble.style.visibility = "hidden";
+        bubble.dataset.speechFit = "insufficient";
+        return;
+      }
+      // Use the popup's wide visual row, stopping before its core summary.
+      // The scene itself can be tiny without making readable text equally narrow.
+      bubble.style.maxWidth = `${Math.min(320, Math.max(0, bounds.width - 8))}px`;
+      const speech = bubble.getBoundingClientRect();
+      const placement = positionSpeechBubble(bounds.width, bounds.height, speech.width, speech.height,
+        scene.left - bounds.left + scene.width * speechAnchor.x / 360,
+        scene.top - bounds.top + scene.height * speechAnchor.y / 320, 4);
+      bubble.style.left = `${bounds.left - scene.left + placement.left}px`;
+      bubble.style.top = `${bounds.top - scene.top + placement.top}px`;
+      bubble.style.setProperty("--speech-tail-left", `${placement.tailLeft}px`);
+      bubble.style.visibility = placement.fits ? "visible" : "hidden";
+      bubble.dataset.speechFit = placement.fits ? "fit" : "insufficient";
+      bubble.dataset.tailSide = placement.tailSide;
+    };
+    position();
+    const observer = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(position);
+    observer?.observe(canvas);
+    observer?.observe(canvas.closest<HTMLElement>(".world-visual") ?? canvas);
+    observer?.observe(bubble);
+    return () => observer?.disconnect();
+  }, [popoverSpeech, speechLine, speechTarget, speechAnchor.x, speechAnchor.y]);
 
   useEffect(() => {
     const node = sceneRef.current;
@@ -248,6 +304,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
     }, Math.random);
     previousDialogue.current = line;
     if (newObjectKind) pendingNewObjectKind.current = null;
+    setSpeechTarget(target);
     setSpeechLine(line);
     if (speechTimer.current !== null) window.clearTimeout(speechTimer.current);
     speechTimer.current = window.setTimeout(() => {
@@ -267,7 +324,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
 
   return (
     <figure ref={sceneRef} className={`planet-figure ${compact ? "planet-figure--compact" : ""}`} data-motion={motionState}>
-      <div className="planet-scene-canvas">
+      <div ref={canvasRef} className="planet-scene-canvas">
         <svg className={`planet-svg${motionActive ? " planet-svg--floating" : ""}${motionActive && sceneEntering ? " planet-svg--entering" : ""}`} data-preview-style={highlightedStyleId ?? undefined} viewBox="0 0 360 320" role="img" aria-label={stage >= 4 ? `${name}, 최종 시대에서 발전이 계속됩니다` : `${name}, 다음 시대까지 ${Math.round(progress * 100)}%`} shapeRendering="crispEdges">
         <defs>
           <clipPath id={clipId}><circle cx="180" cy="157" r="107" /></clipPath>
@@ -321,7 +378,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
         {interactive && <div className="planet-interaction-layer" data-avatar-walking={avatarWalking ? "true" : "false"} style={interactionStyle}>
           <button type="button" className="planet-hit-area" aria-label="행성에게 말 걸기" onClick={() => speak("planet")} />
           <button type="button" className="avatar-hit-area" aria-label="아바타에게 말 걸기" onClick={() => speak("avatar")} />
-          {speechLine && <div className="planet-speech-bubble" role="status" aria-atomic="true">{speechLine}</div>}
+          {speechLine && <div ref={speechRef} className={`planet-speech-bubble${popoverSpeech ? " planet-speech-bubble--popover" : ""}`} data-speech-target={popoverSpeech ? speechTarget : undefined} role="status" aria-atomic="true">{speechLine}</div>}
         </div>}
       </div>
       {!compact && <figcaption className="planet-caption">{name}</figcaption>}

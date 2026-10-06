@@ -643,6 +643,7 @@ dependencies = [
  "tokio",
  "uuid",
  "walkdir",
+ "window-vibrancy",
 ]
 
 [[package]]

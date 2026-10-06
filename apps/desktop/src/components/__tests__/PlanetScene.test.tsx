@@ -2,7 +2,7 @@ import { act, fireEvent, render, screen, waitFor } from "@testing-library/react"
 import { createElement } from "react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { PlanetScene, planWalk, WALK_POINTS } from "../PlanetScene";
+import { PlanetScene, planWalk, WALK_POINTS, positionSpeechBubble } from "../PlanetScene";
 import { restDuration, stepDuration } from "../sceneMotion";
 
 afterEach(() => {
@@ -396,4 +396,71 @@ describe("planet speech interaction", () => {
     expect(screen.queryByRole("button", { name: "행성에게 말 걸기" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "아바타에게 말 걸기" })).not.toBeInTheDocument();
   });
+});
+
+it("anchors dialogue to the selected planet or avatar", () => {
+  const { container } = render(<PlanetScene stage={1} progress={0} interactive popoverSpeech />);
+  fireEvent.click(screen.getByRole("button", { name: "행성에게 말 걸기" }));
+  expect(screen.getByRole("status", { hidden: true })).toHaveAttribute("data-speech-target", "planet");
+  const layer = container.querySelector<HTMLElement>(".planet-interaction-layer")!;
+  expect(layer.style.getPropertyValue("--speech-anchor-left")).toBe("50%");
+  expect(layer.style.getPropertyValue("--speech-anchor-top")).toBe("40.625%");
+  fireEvent.click(screen.getByRole("button", { name: "아바타에게 말 걸기" }));
+  expect(screen.getByRole("status", { hidden: true })).toHaveAttribute("data-speech-target", "avatar");
+  expect(layer.style.getPropertyValue("--speech-anchor-left")).toBe(`${(WALK_POINTS[5].x + 10) / 3.6}%`);
+  expect(layer.style.getPropertyValue("--speech-anchor-top")).toBe(`${WALK_POINTS[5].y / 3.2}%`);
+});
+it("keeps speech and its tail inside scene bounds at the right edge", () => {
+  expect(positionSpeechBubble(200, 180, 120, 48, 190, 120))
+    .toEqual({ left: 72, top: 62, tailLeft: 108, tailSide: "bottom", fits: true });
+});
+it("places speech below a target when there is no space above", () => {
+  expect(positionSpeechBubble(200, 180, 120, 48, 100, 20))
+    .toEqual({ left: 40, top: 30, tailLeft: 60, tailSide: "top", fits: true });
+});
+
+it("keeps the legacy speech variant for default and detail scenes", () => {
+  const { container } = render(<PlanetScene stage={1} progress={0} interactive />);
+  fireEvent.click(screen.getByRole("button", { name: "행성에게 말 걸기" }));
+  const bubble = screen.getByRole("status");
+  expect(bubble).not.toHaveAttribute("data-speech-target");
+  expect(bubble).not.toHaveClass("planet-speech-bubble--popover");
+  expect(bubble.style.left).toBe("");
+  expect(container.querySelector<HTMLElement>(".planet-interaction-layer")!.style.getPropertyValue("--avatar-bubble-top"))
+    .toBe(`${WALK_POINTS[5].y / 3.2}%`);
+});
+it("uses available popup width for speech beside a 50 by 44 scene without entering the core summary", () => {
+  // A 180px readable bubble can occupy the 400px-wide visual row above the summary.
+  const placement = positionSpeechBubble(400, 44, 180, 30, 200, 18, 4);
+  expect(placement).toMatchObject({ left: 110, top: 4, tailLeft: 90, tailSide: "bottom", fits: true });
+  expect(placement.left + 180).toBeLessThanOrEqual(400);
+  expect(placement.top + 30 + 8).toBeLessThanOrEqual(44);
+});
+it("reports insufficient visual space instead of overlapping summary or shrinking speech text", () => {
+  expect(positionSpeechBubble(400, 20, 180, 30, 200, 10, 4).fits).toBe(false);
+});
+it("hides previously fitted popup speech when its measured scene collapses", () => {
+  let collapsed = false;
+  let resize: ResizeObserverCallback | undefined;
+  vi.stubGlobal("ResizeObserver", class {
+    constructor(callback: ResizeObserverCallback) { resize = callback; }
+    observe() {}
+    disconnect() {}
+  });
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (this: HTMLElement) {
+    const width = this.classList.contains("planet-speech-bubble") ? 180 : collapsed ? 0 : this.classList.contains("world-visual") ? 400 : 50;
+    const height = this.classList.contains("planet-speech-bubble") ? 30 : collapsed ? 0 : 44;
+    return { width, height, left: 0, top: 0, right: width, bottom: height, x: 0, y: 0, toJSON() {} };
+  });
+  render(<section className="world-visual"><PlanetScene stage={1} progress={0} interactive popoverSpeech /></section>);
+  fireEvent.click(screen.getByRole("button", { name: "행성에게 말 걸기" }));
+  const bubble = screen.getByRole("status");
+  expect(bubble.style.visibility).toBe("visible");
+  expect(bubble).toHaveAttribute("data-speech-fit", "fit");
+  act(() => {
+    collapsed = true;
+    resize?.([], {} as ResizeObserver);
+  });
+  expect(bubble.style.visibility).toBe("hidden");
+  expect(bubble).toHaveAttribute("data-speech-fit", "insufficient");
 });

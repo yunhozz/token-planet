@@ -17,29 +17,71 @@ RUNNER = Path(__file__).with_name("run.sh")
 
 
 class WorkflowArtifactTests(unittest.TestCase):
-    def test_workflow_precaches_only_pinned_postgres_and_helper_ecr_images(self):
+    def run_workflow_pulls(self, failures=0, failing_image=POSTGRES_IMAGE):
         workflow = RUNNER.parents[2] / ".github/workflows/supabase-migrations.yml"
         before_runner = workflow.read_text().split("      - name: Replay migrations and SQL suites", 1)[0]
-        commands = re.findall(r"(?m)^\s+(?:run: )?(docker pull .+)$", before_runner)
+        pull_steps = before_runner.split("      - name: Pull the pinned", 1)[1]
+        commands = []
+        for step in pull_steps.split("      - name:"):
+            block = step.split("        run: ", 1)[1]
+            commands.append(textwrap.dedent(block.split("|\n", 1)[1]) if block.startswith("|") else block.strip())
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             events = root / "pulls.jsonl"
             docker = root / "docker"
             docker.write_text("#!" + shutil.which("python3") + "\n"
-                              "import json, os, sys\n"
+                              "import json, os, pathlib, sys\n"
+                              "events = pathlib.Path(os.environ['PULL_EVENTS'])\n"
+                              "previous = events.read_text().splitlines() if events.exists() else []\n"
+                              "attempt = sum(json.loads(line) == sys.argv[1:] for line in previous)\n"
                               "with open(os.environ['PULL_EVENTS'], 'a') as stream:\n"
-                              "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n")
+                              "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+                              "if sys.argv[-1] == os.environ['PULL_FAILING_IMAGE'] and attempt < int(os.environ['PULL_FAILURES']):\n"
+                              "    print('toomanyrequests: Rate exceeded', file=sys.stderr)\n"
+                              "    sys.exit(1)\n")
             docker.chmod(0o755)
+            sleep = root / "sleep"
+            sleep.write_text("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$PULL_WAITS\"\n")
+            sleep.chmod(0o755)
             result = subprocess.run(["bash", "-euc", "\n".join(commands)], capture_output=True, text=True,
+                                    cwd=RUNNER.parents[2],
                                     env=dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
-                                             PULL_EVENTS=str(events)))
-            self.assertEqual(result.returncode, 0, result.stderr)
+                                             PULL_EVENTS=str(events), PULL_FAILURES=str(failures),
+                                             PULL_FAILING_IMAGE=failing_image,
+                                             PULL_WAITS=str(root / "waits")))
             pulls = [json.loads(line) for line in events.read_text().splitlines()]
+            delays = (root / "waits").read_text().splitlines() if (root / "waits").exists() else []
+        return result, pulls, delays
+
+    def test_workflow_precaches_only_pinned_postgres_and_helper_ecr_images(self):
+        result, pulls, delays = self.run_workflow_pulls()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(delays, [])
         expected_helpers = ["public.ecr.aws/supabase/realtime:v2.140.3",
                             "public.ecr.aws/supabase/storage-api:v1.79.28",
                             "public.ecr.aws/supabase/gotrue:v2.197.0"]
         self.assertEqual([helper["candidates"][0] for helper in HELPERS], expected_helpers)
         self.assertEqual(pulls, [["pull", POSTGRES_IMAGE]] + [["pull", image] for image in expected_helpers])
+
+    def test_workflow_retries_throttled_pull_with_exponential_delays(self):
+        images = [POSTGRES_IMAGE, "public.ecr.aws/supabase/realtime:v2.140.3",
+                  "public.ecr.aws/supabase/storage-api:v1.79.28",
+                  "public.ecr.aws/supabase/gotrue:v2.197.0"]
+        for image in images:
+            with self.subTest(image=image):
+                result, pulls, delays = self.run_workflow_pulls(failures=2, failing_image=image)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                expected = [["pull", pinned] for pinned in images]
+                position = images.index(image)
+                expected[position:position] = [["pull", image], ["pull", image]]
+                self.assertEqual(pulls, expected)
+                self.assertEqual(delays, ["5", "10"])
+
+    def test_workflow_stops_after_five_failed_pull_attempts(self):
+        result, pulls, delays = self.run_workflow_pulls(failures=99)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(pulls, [["pull", POSTGRES_IMAGE]] * 5)
+        self.assertEqual(delays, ["5", "10", "20", "40"])
 
     def test_upload_selects_exact_safe_diagnostic_artifacts(self):
         workflow = RUNNER.parents[2] / ".github/workflows/supabase-migrations.yml"

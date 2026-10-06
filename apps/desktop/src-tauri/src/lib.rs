@@ -127,19 +127,14 @@ fn transition_window_mode_with_visibility(
         .mode_transitioning
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
         .map_err(|_| "window transition already in progress".to_string())?;
-    let applied = apply_window_mode(&window, target, icon_rect, show);
-    let result = if applied.is_ok() {
+    let result = platform::window_appearance::apply_with_rollback(previous, target, |mode| {
+        apply_window_mode(&window, mode, icon_rect, show)?;
         state
             .window_mode
             .lock()
-            .map(|mut mode| *mode = target)
+            .map(|mut current| *current = mode)
             .map_err(|_| "window mode unavailable".to_string())
-    } else {
-        applied
-    };
-    if result.is_err() {
-        let _ = apply_window_mode(&window, previous, icon_rect, show);
-    }
+    });
     state.mode_transitioning.store(false, Ordering::SeqCst);
     result
 }
@@ -216,6 +211,8 @@ fn apply_window_mode(
                 .map_err(|_| "window position unavailable".to_string())?;
         }
     }
+
+    platform::window_appearance::apply(window, mode)?;
 
     if show {
         window

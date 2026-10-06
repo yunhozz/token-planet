@@ -149,6 +149,7 @@ beforeEach(() => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 it("opens the cosmetic shop in the current window and restores exploration on return", async () => {
@@ -2367,4 +2368,48 @@ it("ignores a signed removal result after the same account moves to a new cycle"
   expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-cycle-id", "cycle-2");
   expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+function shortMacPopup() {
+  vi.spyOn(navigator, "platform", "get").mockReturnValue("MacIntel");
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener() {}, removeEventListener() {} }));
+}
+
+it("shows_only_core_summary_in_short_popup", async () => {
+  shortMacPopup();
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  expect(screen.getByText("이번 행성 토큰")).toBeInTheDocument();
+  expect(screen.getByText("현재 시대")).toBeInTheDocument();
+  expect(screen.getByRole("progressbar", { name: "다음 시대 진행도" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "행성·그룹 자세히 보기" })).toBeInTheDocument();
+  expect(screen.queryByRole("region", { name: "수집 상태" })).not.toBeInTheDocument();
+  expect(document.querySelector(".usage-summary")).toBeNull();
+  expect(document.querySelector(".sync-status")).toBeNull();
+});
+
+it("short_popup_keeps_transition_retry", async () => {
+  shortMacPopup(); isTauriMock.mockReturnValue(true);
+  const previous = invokeMock.getMockImplementation()!;
+  invokeMock.mockImplementation(async (command: string, ...args: unknown[]) => {
+    if (command === "set_detail_view") throw "window size unavailable";
+    return previous(command, ...args);
+  });
+  render(<App />); await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("화면을 전환하지 못했습니다");
+  expect(screen.getByRole("button", { name: "다시 시도" })).toBeInTheDocument();
+  expect(document.querySelector(".app-shell--compact-popover")).not.toBeNull();
+});
+
+it("short_popup_opens_unchanged_detail_with_secondary_information", async () => {
+  shortMacPopup(); render(<App />); await screen.findByText("Orbit의 행성");
+  expect(document.querySelector(".usage-summary")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  expect(document.querySelector(".app-shell--detail")).not.toBeNull();
+  expect(document.querySelector(".app-shell--macos-popover")).toBeNull();
+  expect(document.querySelector(".usage-summary")).not.toBeNull();
+  expect(document.querySelector(".source-list")).not.toBeNull();
+  expect(document.querySelector(".sync-status")).not.toBeNull();
 });
