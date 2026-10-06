@@ -258,7 +258,7 @@ describe("planet landscape artwork", () => {
     const expectSharedGeometry = (selector: string, attributeNames: string[]) => {
       const geometry = (container: HTMLElement) => new Map(
         [...container.querySelectorAll(selector)].map((node) => {
-          const key = node.getAttribute("x") ?? node.getAttribute("d") ?? "";
+          const key = node.getAttribute("x") ?? node.getAttribute("d") ?? node.getAttribute("transform") ?? "";
           return [key, attributeNames.map((name) => node.getAttribute(name))];
         }),
       );
@@ -273,7 +273,7 @@ describe("planet landscape artwork", () => {
     };
 
     expectSharedGeometry(".planet-landscape-stars rect", ["x", "y", "width", "height"]);
-    expectSharedGeometry(".planet-landscape-ground-dressing rect", ["x", "y", "width", "height"]);
+    expectSharedGeometry(".planet-landscape-ground-dressing [data-landscape-dressing='grass']", ["transform"]);
     expectSharedGeometry(".planet-landscape-distant-ground path", ["d"]);
 
     first.unmount();

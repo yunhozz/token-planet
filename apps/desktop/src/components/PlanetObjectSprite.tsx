@@ -28,10 +28,10 @@ export function PlanetObjectSprite({ object, x, y, scale }: { object: PlanetObje
       artwork = <><path d="M2 -2V7M7 -2V7M12 -2V7M17 -2V7" stroke="#8e6f55" strokeWidth="2"/><path d="M0 0H20M0 5H20" stroke="#acbcc0" strokeWidth="2"/></>;
       break;
     case "road":
-      artwork = <><rect width="20" height="5" fill="#56646e"/><path d="M1 2H5M8 2H12M15 2H19" stroke="#edd494"/><path d="M0 0H20M0 5H20" stroke="#95a4a4"/></>;
+      artwork = <><rect y="-1" width="20" height="8" fill="#394c55"/><rect width="20" height="5" fill="#56646e"/><path d="M1 2H5M8 2H12M15 2H19" stroke="#edd494"/><path d="M0 0H20" stroke="#a2b4af"/><path d="M0 6H20" stroke="#293f49"/></>;
       break;
     case "path":
-      artwork = <><path d="M0 1H20V5H0Z" fill="#b08f70"/><path d="M1 2H5M8 4H13M16 2H19" stroke="#e0bc88"/></>;
+      artwork = <><path d="M0 0H20V7H0Z" fill="#806a50"/><path d="M0 1H20V5H0Z" fill="#b08f70"/><path d="M0 1H20" stroke="#d4b98a"/><path d="M2 3H5M8 4H12M16 2H18" stroke="#e0bc88"/><path d="M5 5H8M13 6H17" stroke="#927458"/></>;
       break;
     case "satellite":
       artwork = <><rect x="7" y="2" width="6" height="9" fill="#dfd9bb"/><path d="M-3 3H5V10H-3ZM15 3H23V10H15Z" fill="#4d7b9f" stroke="#88c9d0"/><path d="M10 2V-5H15" fill="none" stroke="#d0c4a2"/><rect x="9" y="5" width="2" height="2" fill="#e8bf79"/></>;
@@ -79,7 +79,12 @@ export function PlanetObjectSprite({ object, x, y, scale }: { object: PlanetObje
       artwork = <><path d="M0 17 10 -3 22 17Z" fill="#bd805c"/><path d="M8 17 12 6 17 17Z" fill="#463e3c"/><path d="M10 -3 6 7H8L12 -1Z" fill="#e8bd75"/><rect x="-2" y="17" width="26" height="1" fill="#785343"/></>;
       break;
     case "fern":
-      artwork = <><path d="M8 15V2H10V15ZM8 5H3V3H6V4H8ZM10 7H16V5H13V6H10ZM8 10H1V8H5V9H8ZM10 12H18V10H14V11H10Z" fill="#6ba66c"/><rect x="7" y="14" width="5" height="3" fill="#56794b"/></>;
+      artwork = <><path d="M1 16H19V18H1Z" fill="#3b6550" opacity=".55"/>
+        <path d="M9 16V5M8 16 4 9 1 7M12 16 16 9 19 7" fill="none" stroke="#456f4b" strokeWidth="2"/>
+        <path d="M9 7H6V4H8V5H9ZM11 8H14V5H12V6H11ZM8 11H3V8H5V9H8ZM12 12H17V9H15V10H12ZM7 14H1V11H4V12H7ZM13 15H19V12H16V13H13Z" fill="#6ba66c"/>
+        <path d="M6 4H8M3 8H5M1 11H4M12 5H14M15 9H17M16 12H19" stroke="#a0ca7b"/>
+        <path d="M9 16V6M11 16V9M6 15 4 11M14 15 16 11" stroke="#8fbd70"/>
+        <rect x="7" y="15" width="6" height="2" fill="#56794b"/></>;
       break;
     case "rock":
       artwork = <><rect width="12" height="7" fill="#87949b" /><rect x="3" y="-4" width="6" height="4" fill="#aeb7ae" /><rect x="1" y="5" width="10" height="2" fill="#566970" /><path d="M6 -1H8V2H7V4" fill="none" stroke="#6b7e87" /><rect className="planet-object-rock-glint" x="4" y="-3" width="2" height="2" fill="#e5ead7" /></>;

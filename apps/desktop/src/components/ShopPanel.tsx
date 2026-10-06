@@ -1,3 +1,4 @@
+import { formatTokenAmount } from "../lib/tokenFormatting";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ShopProductThumbnail } from "./ShopProductThumbnail";
 import type { PendingShopAction } from "../hooks/useShopActions";
@@ -64,7 +65,7 @@ const PRODUCT_EFFECT_LABELS: Record<NonNullable<ShopProduct["effect_type"]>, str
 };
 
 function formatTokens(value: number): string {
-  return `${Math.max(0, Math.floor(value)).toLocaleString("ko-KR")} 토큰`;
+  return `${formatTokenAmount(Math.max(0, Math.floor(value)))} 토큰`;
 }
 
 function estimatedPrice(product: ShopProduct, effects: ActiveEffects): number {
