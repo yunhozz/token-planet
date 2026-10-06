@@ -173,7 +173,7 @@ it("opens the cosmetic shop in the current window and restores exploration on re
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
   fireEvent.click(screen.getByRole("button", { name: "확대" }));
-  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="1-3"]')!);
   const originalViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
 
   fireEvent.click(screen.getByRole("button", { name: "행성 상점" }));
@@ -184,7 +184,7 @@ it("opens the cosmetic shop in the current window and restores exploration on re
 
   expect(await screen.findByRole("region", { name: "행성 풍경" })).toBeInTheDocument();
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
   expect(screen.getByRole("button", { name: "행성 상점" })).toHaveFocus();
 });
 
@@ -424,17 +424,18 @@ it("uses the flat landscape only in personal detail and keeps exploration when s
 
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="1-3"]')!);
   const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
   expect(selected).toHaveTextContent("정착·농경");
-  expect(selected).toHaveTextContent("4번째");
+  expect(within(selected).getByText("나무")).toBeInTheDocument();
+  expect(selected).toHaveTextContent("뿌리를 내리고 자라는 나무입니다.");
   const selectedViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
 
   fireEvent.click(screen.getByRole("tab", { name: "그룹" }));
   expect(container.querySelector(".planet-landscape")).not.toBeInTheDocument();
   fireEvent.click(await screen.findByRole("tab", { name: "내 행성" }));
 
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", selectedViewBox);
 });
 
@@ -465,7 +466,7 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
   await screen.findByRole("region", { name: "행성 풍경" });
   const initialZoom = Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom);
   fireEvent.click(screen.getByRole("button", { name: "확대" }));
-  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="1-3"]')!);
   expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
   const previewButton = await screen.findByRole("button", { name: "연못 미리보기" });
@@ -486,7 +487,7 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
   await screen.findByRole("region", { name: "행성 풍경" });
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
   expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(initialZoom);
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "false");
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toHaveAttribute("aria-pressed", "false");
 });
 
 it("clears exploration immediately while a world context is locked", async () => {
@@ -508,14 +509,14 @@ it("clears exploration immediately while a world context is locked", async () =>
   await screen.findByRole("region", { name: "행성 풍경" });
   const initialZoom = Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom);
   fireEvent.click(screen.getByRole("button", { name: "확대" }));
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
 
   await act(async () => { listeners.get("world-context-changing")?.({ payload: "cosmetic-shop" }); });
 
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
   expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(initialZoom);
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
 });
 
@@ -1653,7 +1654,7 @@ it("offers removal for a selected generated object in the local guest planet", a
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
 
   const selectedObject = screen.getByRole("region", { name: "선택한 오브젝트" });
   fireEvent.click(within(selectedObject).getByRole("button", { name: "자연물 제거" }));
@@ -1677,8 +1678,8 @@ it("offers removal for a selected generated object in the local guest planet", a
   });
   expect(applied[0].request_id).toEqual(expect.any(String));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
-  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toBeInTheDocument();
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
   expect(snapshot.planet.objects).toHaveLength(2);
 });
@@ -1800,7 +1801,7 @@ async function openNaturalRemoval(container: HTMLElement) {
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
   fireEvent.click(within(selected).getByRole("button", { name: "자연물 제거" }));
   return screen.findByRole("dialog", { name: "바위 제거 확인" });
@@ -1810,7 +1811,7 @@ async function openGuestNaturalRemoval(container: HTMLElement) {
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
   fireEvent.click(within(selected).getByRole("button", { name: "자연물 제거" }));
   return screen.findByRole("dialog", { name: "바위 제거 확인" });
@@ -1825,7 +1826,7 @@ it("does not apply a natural removal when its quote is canceled", async () => {
 
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
   expect(fixture.applied).toHaveLength(0);
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
 });
 
 it("keeps the natural object visible when the canonical removal result is insufficient", async () => {
@@ -1841,7 +1842,7 @@ it("keeps the natural object visible when the canonical removal result is insuff
   expect(await screen.findByRole("alert")).toHaveTextContent("잔액이 부족해 자연물을 제거하지 못했습니다.");
   expect(within(screen.getByRole("dialog", { name: "바위 제거 확인" })).getByRole("status"))
     .toHaveTextContent("잔액이 부족합니다.");
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
   expect(fixture.state.removed_natural_keys).toEqual([]);
 });
 
@@ -2020,8 +2021,8 @@ it("keeps a confirmed natural removal canonical when its result arrives after le
   fireEvent.click(await screen.findByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
 
-  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toBeInTheDocument();
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
@@ -2101,7 +2102,7 @@ it("ignores an old-cycle removal success after the guest has moved to a new cycl
   });
 
   expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-cycle-id", "cycle-2");
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
@@ -2226,7 +2227,7 @@ it("quotes and removes an authenticated user's natural object using canonical sh
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
 
   const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
   fireEvent.click(within(selection).getByRole("button", { name: "자연물 제거" }));
@@ -2244,7 +2245,7 @@ it("quotes and removes an authenticated user's natural object using canonical sh
     quote: { target: { kind: "remove_natural", key }, catalog_revision: 1, effect_revision: 0, price: 100_000 },
   });
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
-  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
   expect(snapshot.planet.objects).toHaveLength(1);
   expect(snapshot.planet.removed_natural_keys).toEqual([]);
 });
@@ -2276,7 +2277,7 @@ it("keeps signed receipt retry enabled after canonical refresh lowers the balanc
   expect(fixture.applied).toHaveLength(2);
   expect(fixture.applied[1]).toBe(originalRequest);
   expect(fixture.applied[1].request_id).toBe(fixture.applied[0].request_id);
-  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
 });
 
 it.each([
@@ -2288,7 +2289,7 @@ it.each([
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
 
   const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
   expect(within(selection).queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
@@ -2308,7 +2309,7 @@ it("keeps a signed natural object visible and reports a canonical insufficient-b
 
   expect(await screen.findByRole("alert")).toHaveTextContent("잔액이 부족해 자연물을 제거하지 못했습니다.");
   expect(screen.getByRole("dialog", { name: "바위 제거 확인" })).toHaveTextContent("현재 잔액 50,000 토큰");
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
   expect(fixture.state.removed_natural_keys).toEqual([]);
 });
 
@@ -2366,7 +2367,7 @@ it("ignores a signed removal result after the same account moves to a new cycle"
   });
 
   expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-cycle-id", "cycle-2");
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 

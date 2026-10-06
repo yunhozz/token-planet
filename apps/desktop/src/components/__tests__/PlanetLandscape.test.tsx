@@ -966,3 +966,15 @@ describe("canonical shop landscape integration", () => {
     expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
   });
 });
+
+it("places selection information in document flow below the scenery", async () => {
+  const { readFileSync } = await import(/* @vite-ignore */ "node:" + "fs");
+  const appCss = readFileSync("src/App.css", "utf8");
+  expect(appCss).toMatch(/\.app-shell--detail \.planet-landscape-object-detail\s*\{[^}]*position:\s*static/);
+});
+
+it("gives detail supporting information a consistent readable surface", async () => {
+  const { readFileSync } = await import(/* @vite-ignore */ "node:" + "fs");
+  const appCss = readFileSync("src/App.css", "utf8");
+  expect(appCss).toMatch(/\.app-shell--detail \.shop-effects-summary[^}]*border-radius:\s*16px/);
+});
