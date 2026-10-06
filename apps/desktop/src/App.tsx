@@ -1,3 +1,4 @@
+import { isPlanetObjectVisible } from "./components/planetObjectVisibility";
 import { FormattedTokens } from "./components/FormattedTokens";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
@@ -721,6 +722,7 @@ function App() {
             : !planet.can_reset
               ? "서버에서 초기화 대기 시간이 끝나지 않은 것으로 확인했습니다."
               : null;
+  const recentVisibleObject = planet.objects.filter(isPlanetObjectVisible).slice(-1)[0];
   const nextObjectProgress = objectProgress(planet.growth_credit, planet.stage);
   const availableWalletBalance = currentShopState?.available_balance ?? planet.wallet_balance;
   const removedNaturalIds = new Set([
@@ -1136,7 +1138,7 @@ function App() {
                 </div>
                 <div className="stage-progress object-progress">
                   <div className="progress-row"><span>다음 오브젝트까지</span><div className="progress-track progress-track--object" role="progressbar" aria-valuenow={Math.round(nextObjectProgress * 100)} aria-valuemin={0} aria-valuemax={100} aria-label="다음 오브젝트 생성 진행도"><span style={{ width: `${nextObjectProgress * 100}%` }} /></div><span>{Math.round(nextObjectProgress * 100)}%</span></div>
-                  <p className="recent-object">최근 생성: {planet.objects.length ? objectName(planet.objects[planet.objects.length - 1].kind) : "아직 없음"}</p>
+                  <p className="recent-object">최근 생성: {recentVisibleObject ? objectName(recentVisibleObject.kind) : "아직 없음"}</p>
                 </div>
               </section>
               <UsageSummary snapshot={view} />

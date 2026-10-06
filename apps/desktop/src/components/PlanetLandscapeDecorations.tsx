@@ -37,7 +37,6 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
   const era = eraIndex(stage);
   const groundTop = bounds.y;
   const groundBottom = Math.max(groundTop + bounds.height, viewBox.y + viewBox.height);
-  const roadY = groundTop + Math.floor(bounds.height * 0.68);
   const surfacePlacement = cosmeticLandscapeBounds(bounds, "surface", "flag");
   const forecourtPlacement = cosmeticLandscapeBounds(bounds, "forecourt", "pond");
   const ringPlacement = cosmeticLandscapeBounds(bounds, "ring", "thin_ring");
@@ -124,7 +123,7 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
           return <g key={x}><path d={`M ${x} ${groundTop - 64} v 30 m -11 -19 h 22 M ${x} ${groundTop - 50} l -18 -11 M ${x} ${groundTop - 50} l 18 -11`} /><rect x={x - 3} y={groundTop - 70} width="6" height="6" fill="#f1cf89" /></g>;
         })}
       </g>}
-      {era === 0 ? (
+      {era === 0 && (
         <g data-landscape-decoration="natural-stream" fill="none" shapeRendering="crispEdges">
           {visibleCells(viewBox, 360).map((cell) => {
             const x = cell * 360;
@@ -136,29 +135,11 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
             </g>;
           })}
         </g>
-      ) : (
-        <g data-landscape-decoration="era-road" fill="none" shapeRendering="crispEdges">
-          <path d={`M ${viewBox.x} ${roadY} h ${viewBox.width}`} stroke={era >= 3 ? "#394c55" : "#7d6b50"} strokeWidth={era >= 3 ? 20 : 16} />
-          {era >= 2 && visibleCells(viewBox, 560).map((cell) => {
-            const x = cell * 560 + 180;
-            const branchLength = 32 + positiveModulo(cell * 13, 25);
-            const direction = positiveModulo(cell, 2) === 0 ? -1 : 1;
-            const branches = `M ${x} ${roadY} v ${direction * branchLength} h ${direction * 24}`;
-            return <g key={cell}>
-              <path d={branches} stroke={era >= 3 ? "#394c55" : "#7d6b50"} strokeWidth="9" />
-              <path d={branches} stroke={era >= 3 ? "#64717b" : "#b08f60"} strokeWidth="5" />
-            </g>;
-          })}
-          <path d={`M ${viewBox.x} ${roadY} h ${viewBox.width}`} stroke={era >= 3 ? "#53616c" : "#ab8b5f"} strokeWidth={era >= 3 ? 14 : 10} />
-          <path d={`M ${viewBox.x} ${roadY - (era >= 3 ? 8 : 6)} h ${viewBox.width}`} stroke={era >= 4 ? "#80d2c8" : "#d1b57a"} strokeWidth="2" opacity=".65" />
-          {era >= 3 && visibleCells(viewBox, 32).map((cell) => <path key={cell} d={`M ${cell * 32} ${roadY} h 16`} stroke="#d3b875" strokeWidth="2" />)}
-        </g>
       )}
       <g className="planet-landscape-ground-dressing" shapeRendering="crispEdges">
         {grassCells.map((cell) => {
           const x = cell * 260 + 42 + positiveModulo(cell * 17, 52);
-          const rowY = groundTop + 100 + positiveModulo(cell * 53, Math.max(80, Math.floor(bounds.height * 0.43)));
-          const y = Math.abs(rowY - roadY) < 28 ? rowY + 40 : rowY;
+          const y = groundTop + 100 + positiveModulo(cell * 53, Math.max(80, Math.floor(bounds.height * 0.43)));
           return <g key={cell} transform={`translate(${x} ${y})`} data-landscape-dressing="grass">
             <path d="M0 8h31v3H0ZM8 13h39v2H8Z" fill="#294a49" opacity=".13" />
             <g className={`planet-landscape-grass--${positiveModulo(cell, 3)}`}>

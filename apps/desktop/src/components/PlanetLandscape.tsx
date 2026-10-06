@@ -1,3 +1,4 @@
+import { isPlanetObjectVisible } from "./planetObjectVisibility";
 import {
   type KeyboardEvent as ReactKeyboardEvent,
   type PointerEvent as ReactPointerEvent,
@@ -289,7 +290,7 @@ export function PlanetLandscape({
       .filter((key) => key.cycle_id === cycleId)
       .map((key) => `${key.cycle_id}:${key.stage}:${key.ordinal}`) ?? [],
   ), [activeShopState, cycleId]);
-  const visibleNaturalIds = useMemo(() => new Set(objects.map(landscapeObjectId)), [objects]);
+  const visibleNaturalIds = useMemo(() => new Set(objects.filter(isPlanetObjectVisible).map(landscapeObjectId)), [objects]);
   const visibleNaturalPlacements = useMemo(
     () => layout.objects.filter((placement) => visibleNaturalIds.has(placement.id)
       && !removedNaturalKeys.has(naturalKey(cycleId, placement.object))),

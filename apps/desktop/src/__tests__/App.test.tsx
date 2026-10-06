@@ -2437,3 +2437,22 @@ it("compacts planet and usage tokens while preserving growth credit precision", 
   expect(screen.getByText("1,234.125")).toBeInTheDocument();
   expect(screen.getAllByText("1M").length).toBeGreaterThan(0);
 });
+
+
+it("shows the latest visible growth object instead of a hidden recent kind", async () => {
+  const snapshot = structuredClone(localSnapshot);
+  snapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "tree", x: 30, y: 40, seed: 1 },
+    ...["road", "path", "rail", "fern"].map((kind, ordinal) => ({ stage: 3, ordinal, kind, x: 50, y: 40, seed: 2 })),
+  ];
+  const previous = invokeMock.getMockImplementation()!;
+  invokeMock.mockImplementation(async (command: string, ...args: unknown[]) => {
+    if (command === "current_usage" || command === "refresh_usage") return snapshot;
+    return previous(command, ...args);
+  });
+  const { container } = render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  expect(await screen.findByText("최근 생성: 나무")).toBeInTheDocument();
+  expect(container.querySelector(".recent-object")).not.toHaveTextContent("양치식물");
+});

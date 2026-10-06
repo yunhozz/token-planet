@@ -1,9 +1,10 @@
+import { layoutLandscape } from "../planetLandscapeLayout";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PlanetLandscape, planetLandscapeBounds, type PlanetExplorationState } from "../PlanetLandscape";
 import { PlanetLandscapeDecorations } from "../PlanetLandscapeDecorations";
-import { fitLandscape } from "../planetLandscapeCamera";
+import { fitLandscape, landscapeViewBox } from "../planetLandscapeCamera";
 import type { AvatarEquipment, LandscapeInstance, NaturalObjectKey, PlanetObject, ShopActionResult, ShopProduct, ShopRequest, ShopState } from "../../types/usage";
 
 class TestResizeObserver {
@@ -977,4 +978,52 @@ it("gives detail supporting information a consistent readable surface", async ()
   const { readFileSync } = await import(/* @vite-ignore */ "node:" + "fs");
   const appCss = readFileSync("src/App.css", "utf8");
   expect(appCss).toMatch(/\.app-shell--detail \.shop-effects-summary[^}]*border-radius:\s*16px/);
+});
+
+describe("hidden growth scenery", () => {
+  const hidden = ["road", "path", "rail", "fern"].map((kind, ordinal) => ({
+    stage: 3, ordinal: ordinal + 10, kind, x: 80 + ordinal, y: 60, seed: ordinal,
+  }));
+  const original = [...selectableObjects, ...hidden, ...Array.from({ length: 260 }, (_, ordinal) => ({
+    stage: 0, ordinal: ordinal + 100, kind: "fern", x: 50, y: 40, seed: ordinal,
+  }))];
+
+  it("excludes hidden objects from artwork and hit areas while preserving original layout", () => {
+    const { container, rerender } = render(<ControlledLandscape objects={original} />);
+    const viewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox")
+      ?? container.querySelector("svg")!.getAttribute("viewBox");
+    const tree = layoutLandscape(original).objects.find((placement) => placement.id === "1-3")!;
+    const treeSelector = '[data-landscape-object-id="1-3"] .planet-object-sprite';
+    expect(container.querySelector(treeSelector)).toHaveAttribute("transform", `translate(${tree.x} ${tree.y})`);
+    const rawBounds = planetLandscapeBounds(original);
+    const expectedView = landscapeViewBox(rawBounds, { width: 1200, height: 420 }, fitLandscape(rawBounds));
+    expect(viewBox).toBe(`${expectedView.x} ${expectedView.y} ${expectedView.width} ${expectedView.height}`);
+    expect(container.querySelectorAll("[data-landscape-object-id]")).toHaveLength(2);
+    for (const { ordinal } of hidden) {
+      expect(container.querySelector(`[data-landscape-object-id="3-${ordinal}"]`)).toBeNull();
+    }
+    rerender(<ControlledLandscape objects={selectableObjects} terrainObjects={original} />);
+    expect(container.querySelector("svg")!.getAttribute("viewBox")).toBe(viewBox);
+    expect(container.querySelector(treeSelector)).toHaveAttribute("transform", `translate(${tree.x} ${tree.y})`);
+  });
+
+  it.each(hidden)("clears selected $kind without moving its camera", (object) => {
+    const camera = { ...fitLandscape(planetLandscapeBounds(original)), zoom: 1.4 };
+    const onExplorationChange = vi.fn();
+    const { container } = render(<PlanetLandscape stage={3} progress={.5} avatar="masculine" objects={original}
+      cycleId="cycle-1" equippedCosmetics={[]} incomplete={false} exploration={{ camera, selectedObjectId: `3-${object.ordinal}` }}
+      onExplorationChange={onExplorationChange} />);
+    expect(screen.queryByRole("group", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
+    expect(container.querySelector(".planet-landscape-object-detail")).toBeNull();
+    expect(onExplorationChange).toHaveBeenCalledWith({ camera, selectedObjectId: null });
+  });
+
+  it.each([0, 1, 2, 3, 4])("removes era road decoration at stage %s", (stage) => {
+    const bounds = { x: 0, y: 0, width: 600, height: 320 };
+    const { container } = render(<svg><PlanetLandscapeDecorations stage={stage} bounds={bounds}
+      viewBox={{ x: 0, y: -220, width: 800, height: 540 }} equippedCosmetics={[]} /></svg>);
+    expect(container.querySelector('[data-landscape-decoration="era-road"]')).toBeNull();
+    expect(container.querySelector(".planet-landscape-ground")).toBeInTheDocument();
+    if (stage === 0) expect(container.querySelector('[data-landscape-decoration="natural-stream"]')).toBeInTheDocument();
+  });
 });
