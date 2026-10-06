@@ -260,3 +260,16 @@ describe("AvatarEquipmentLayers", () => {
     expect(markup).toContain('transform="translate(16 0) scale(-1 1)"');
   });
 });
+
+it("gives the base avatar separately shaded hair, face, clothes and footwear", () => {
+  const markup = renderToStaticMarkup(createElement(AvatarSprite, { avatar: "masculine" }));
+  const root = new DOMParser().parseFromString(markup, "image/svg+xml");
+  const colorsIn = (top: number, bottom: number) => new Set(Array.from(root.querySelectorAll("rect")).filter(rect => {
+    const y = Number(rect.getAttribute("y") ?? 0);
+    return y >= top && y < bottom;
+  }).map(rect => rect.getAttribute("fill")));
+  expect(colorsIn(1, 5).size).toBeGreaterThan(1); // hair highlights
+  expect(colorsIn(5, 7).size).toBeGreaterThan(1); // face and skin shading
+  expect(colorsIn(12, 17).size).toBeGreaterThan(2); // shirt seams, cuffs and hands
+  expect(colorsIn(17, 20).size).toBeGreaterThan(1); // trouser legs and shoes
+});

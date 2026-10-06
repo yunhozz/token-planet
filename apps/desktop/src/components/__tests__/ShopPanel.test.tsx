@@ -148,6 +148,25 @@ function mountPanel(state = shopState(), overrides: Partial<ShopPanelProps> = {}
 }
 
 describe("ShopPanel", () => {
+  it.each([
+    [-13.2, "0 토큰"],
+    [999.99, "999 토큰"],
+  ])("normalizes balance %s before compact display", (balance, expected) => {
+    const { view } = mountPanel(shopState({ available_balance: balance }));
+    expect(view.container.querySelector(".cosmetic-balance strong")).toHaveTextContent(expected);
+  });
+
+  it("displays a compact quote while submitting its exact integer price", async () => {
+    const state = shopState();
+    state.products[0] = { ...state.products[0], price: 239824 };
+    const { apply } = mountPanel(state);
+    fireEvent.click(screen.getByRole("button", { name: "연못 구매" }));
+    await screen.findByRole("dialog", { name: "연못 구매 확인" });
+    expect(screen.getByText("239.82K 토큰", { selector: "strong" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "구매 확정" }));
+    expect(apply.mock.calls[0][0].quote.price).toBe(239824);
+  });
+
   it("renders each canonical SKU once across the landscape and avatar categories", () => {
     const { view } = mountPanel();
 
@@ -341,8 +360,8 @@ describe("ShopPanel", () => {
     mountPanel(state);
 
     fireEvent.click(screen.getByRole("tab", { name: "아바타" }));
-    expect(screen.getByRole("button", { name: "왕관 구매" })).toHaveTextContent("425,000,000 토큰");
-    expect(screen.getByRole("button", { name: "홀로그램 관 구매" })).toHaveTextContent("425,000,001 토큰");
+    expect(screen.getByRole("button", { name: "왕관 구매" })).toHaveTextContent("425M 토큰");
+    expect(screen.getByRole("button", { name: "홀로그램 관 구매" })).toHaveTextContent("425M 토큰");
     expect(screen.getByText(/상점 할인 15%/)).toBeInTheDocument();
   });
 

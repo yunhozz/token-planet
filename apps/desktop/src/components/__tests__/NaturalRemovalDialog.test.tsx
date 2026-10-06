@@ -34,30 +34,38 @@ function renderDialog(overrides: Partial<ComponentProps<typeof NaturalRemovalDia
 }
 
 describe("NaturalRemovalDialog", () => {
+  it("keeps removal unaffordable when rounded balance equals rounded cost", () => {
+    const key = { ...target, stage: 1 };
+    const { container } = renderDialog({ target: key, quote: removalQuote(key, 239824), confirmedWalletBalance: 239823 });
+    expect(container).toHaveTextContent("최종 제거 비용 239.82K 토큰");
+    expect(container).toHaveTextContent("현재 잔액 239.82K 토큰");
+    expect(screen.getByRole("button", { name: "제거 확인" })).toBeDisabled();
+  });
+
   it.each([
-    [0, "자연", 100_000],
-    [1, "농경", 250_000],
-    [2, "도시", 500_000],
-    [3, "산업", 1_000_000],
-    [4, "우주", 2_000_000],
-  ])("shows the fixed base cost for generated stage %i", (stage, era, baseCost) => {
+    [0, "자연", 100_000, "100K"],
+    [1, "농경", 250_000, "250K"],
+    [2, "도시", 500_000, "500K"],
+    [3, "산업", 1_000_000, "1M"],
+    [4, "우주", 2_000_000, "2M"],
+  ])("shows the fixed base cost for generated stage %i", (stage, era, baseCost, displayCost) => {
     const stageTarget = { ...target, stage };
     const quote = removalQuote(stageTarget, baseCost);
     const dialog = renderDialog({ target: stageTarget, quote });
 
     expect(screen.getByRole("dialog", { name: "작은 분수 제거 확인" })).toBeInTheDocument();
     expect(dialog.container).toHaveTextContent(`생성 시대: ${era}`);
-    expect(dialog.container).toHaveTextContent(`기본 제거 비용 ${baseCost.toLocaleString("ko-KR")} 토큰`);
+    expect(dialog.container).toHaveTextContent(`기본 제거 비용 ${displayCost} 토큰`);
     expect(dialog.container).toHaveTextContent("현재 할인 0 토큰");
-    expect(dialog.container).toHaveTextContent(`최종 제거 비용 ${baseCost.toLocaleString("ko-KR")} 토큰`);
+    expect(dialog.container).toHaveTextContent(`최종 제거 비용 ${displayCost} 토큰`);
   });
 
   it("derives the displayed discount from the matching canonical quote", () => {
     const { container } = renderDialog({ quote: removalQuote(target, 375_000) });
 
-    expect(container).toHaveTextContent("기본 제거 비용 500,000 토큰");
-    expect(container).toHaveTextContent("현재 할인 125,000 토큰");
-    expect(container).toHaveTextContent("최종 제거 비용 375,000 토큰");
+    expect(container).toHaveTextContent("기본 제거 비용 500K 토큰");
+    expect(container).toHaveTextContent("현재 할인 125K 토큰");
+    expect(container).toHaveTextContent("최종 제거 비용 375K 토큰");
   });
 
   it("renders a refreshed quote without confirming it automatically", () => {
@@ -65,8 +73,8 @@ describe("NaturalRemovalDialog", () => {
 
     rerender(<NaturalRemovalDialog {...props} quote={removalQuote(target, 350_000)} />);
 
-    expect(container).toHaveTextContent("현재 할인 150,000 토큰");
-    expect(container).toHaveTextContent("최종 제거 비용 350,000 토큰");
+    expect(container).toHaveTextContent("현재 할인 150K 토큰");
+    expect(container).toHaveTextContent("최종 제거 비용 350K 토큰");
     expect(onConfirm).not.toHaveBeenCalled();
   });
 

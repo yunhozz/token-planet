@@ -1,3 +1,4 @@
+import { isPlanetObjectVisible } from "./planetObjectVisibility";
 import { type CSSProperties, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { AvatarSprite } from "./AvatarSprite";
 import { PlanetObjectSprite } from "./PlanetObjectSprite";
@@ -56,6 +57,7 @@ export function positionSpeechBubble(sceneWidth: number, sceneHeight: number, bu
 }
 
 export function PlanetScene({ stage, progress, avatar = "masculine", objects = [], equippedCosmetics = [], compact = false, animate = false, interactive = false, popoverSpeech = false, publicOnly = false, incomplete = false, cycleId = "", highlightedCosmeticSku = null, avatarEquipment }: { stage: number; progress: number; avatar?: PlanetAvatar; objects?: PlanetObject[]; equippedCosmetics?: Pick<EquippedCosmetic, "slot_id" | "sku">[]; compact?: boolean; animate?: boolean; interactive?: boolean; popoverSpeech?: boolean; publicOnly?: boolean; incomplete?: boolean; cycleId?: string; highlightedCosmeticSku?: string | null; avatarEquipment?: AvatarEquipment }) {
+  const visibleObjects = useMemo(() => objects.filter(isPlanetObjectVisible), [objects]);
   const name = STAGE_NAMES[stage] ?? STAGE_NAMES[4];
   const clipId = `planet-clip-${useId().replace(/:/g, "")}`;
   const sceneRef = useRef<HTMLElement | null>(null);
@@ -73,7 +75,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   const [sceneEntering, setSceneEntering] = useState(false);
   const sceneHasEntered = useRef(false);
   const [enteringObjects, setEnteringObjects] = useState<Set<string>>(() => new Set());
-  const knownObjectIds = useRef(new Set(objects.map(objectIdentity)));
+  const knownObjectIds = useRef(new Set(visibleObjects.map(objectIdentity)));
   const knownObjectCycleId = useRef(cycleId);
   const pendingNewObjectKind = useRef<string | null>(null);
   const previousDialogue = useRef<string | null>(null);
@@ -86,7 +88,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   const motionState = compact ? "paused" : reducedMotion ? "reduced" : motionActive ? "active" : "paused";
   const tiles = useMemo(() => {
     const result = new Map<string, { column: number; row: number; objects: PlanetObject[] }>();
-    for (const object of objects) {
+    for (const object of visibleObjects) {
       const column = Math.min(9, Math.floor(object.x / 10));
       const row = Math.min(4, Math.max(0, Math.floor((object.y - 28) / 11)));
       const key = `${column}-${row}`;
@@ -95,7 +97,7 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
       result.set(key, tile);
     }
     return result;
-  }, [objects]);
+  }, [visibleObjects]);
   const hasCosmetic = (slotId: string, styleId: string) => equippedCosmetics.some(
     (item) => item.slot_id === slotId && styleIdForSku(item.sku) === styleId,
   );
@@ -204,17 +206,17 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
   useEffect(() => {
     if (knownObjectCycleId.current !== cycleId) {
       knownObjectCycleId.current = cycleId;
-      knownObjectIds.current = new Set(objects.map(objectIdentity));
+      knownObjectIds.current = new Set(visibleObjects.map(objectIdentity));
       pendingNewObjectKind.current = null;
       return;
     }
-    const added = objects.filter((object) => !knownObjectIds.current.has(objectIdentity(object)));
-    objects.forEach((object) => knownObjectIds.current.add(objectIdentity(object)));
+    const added = visibleObjects.filter((object) => !knownObjectIds.current.has(objectIdentity(object)));
+    visibleObjects.forEach((object) => knownObjectIds.current.add(objectIdentity(object)));
     if (!publicOnly && added.length > 0) pendingNewObjectKind.current = added[added.length - 1].kind;
     if (motionActive && added.length) {
       setEnteringObjects((current) => new Set([...current, ...added.map(objectIdentity)]));
     }
-  }, [objects, motionActive, cycleId, publicOnly]);
+  }, [visibleObjects, motionActive, cycleId, publicOnly]);
 
   useEffect(() => {
     if (!motionActive || speechLine) {
@@ -342,7 +344,6 @@ export function PlanetScene({ stage, progress, avatar = "masculine", objects = [
           <path d="M64 146h49v-13h23v11h16v-18h25v-8h24v13h22v-11h28v24h49v140H64Z" fill={stage === 0 ? "#7bbd77" : "#9fc36f"}/>
           <path d="M64 209h51v-12h24v10h28v-16h21v13h33v-11h26v16h50v70H64Z" fill="#80b96d"/>
           {stage > 0 && <g fill="#cda36c"><path d="M76 178h218v8H76zM85 194h200v5H85z"/><path d="M104 163h5v38h-5zM156 163h5v38h-5zM210 163h5v38h-5zM262 163h5v38h-5z"/></g>}
-          {stage > 1 && <path d="M68 219h220v8H68zm30 5h8v38h-8zm70 0h8v38h-8zm72 0h8v38h-8z" fill="#a58a67"/>}
           {stage > 2 && <g fill="#5d6172"><path d="M95 132h17v31H95zM121 120h24v43h-24zM174 128h18v35h-18zM211 114h26v49h-26zM249 127h19v36h-19z"/><path d="M99 137h4v6h-4zm10 0h2v6h-2zm17-12h5v6h-5zm9 0h4v6h-4zm78-4h5v7h-5zm11 0h5v7h-5z" fill="#9fdbce"/></g>}
           {stage > 3 && <g fill="#d4e7cb"><path d="M169 96h9v28h-9zM173 84h2v12h-2zM157 101h9v5h-9zm24 0h9v5h-9z"/><path d="M243 91h18v5h-18zm6-5h6v15h-6z" fill="#65c9c7"/></g>}
           {hasCosmetic("sky", "star_cluster") && <g data-cosmetic="star_cluster" fill="#fff0ad"><rect x="99" y="95" width="6" height="6"/><rect x="111" y="81" width="4" height="4"/><rect x="126" y="101" width="3" height="3"/><rect x="141" y="88" width="5" height="5"/><rect x="154" y="105" width="3" height="3"/><rect x="119" y="116" width="4" height="4"/></g>}

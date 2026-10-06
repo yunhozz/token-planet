@@ -65,6 +65,18 @@ function mountShop(overrides: Partial<CosmeticShopState> = {}, support?: { slots
 }
 
 describe("CosmeticShop", () => {
+  it.each([
+    ["purchased", "별무리 구매 완료 · 잔액 239.82K 토큰"],
+    ["insufficient_balance", "500K 토큰이 필요합니다. 현재 잔액은 239.82K 토큰입니다."],
+  ] as const)("compacts the %s purchase result", async (status, message) => {
+    const { onPurchase } = mountShop();
+    onPurchase.mockResolvedValueOnce({ result: { purchase_id: "purchase-1", sku: "star_cluster_v2", status, price: 500000, available_balance: 239824 }, state: shopState, unavailable_reason: null });
+    fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
+    fireEvent.click(screen.getByRole("button", { name: "별무리 구매" }));
+    fireEvent.click(screen.getByRole("button", { name: "구매 확인" }));
+    expect(await screen.findByText(message)).toBeInTheDocument();
+  });
+
   it("lists supported catalog items and previews without equipping", () => {
     const { onEquip, onPurchase, onPreviewChange } = mountShop();
     fireEvent.click(screen.getByRole("button", { name: "행성 꾸미기" }));
@@ -94,8 +106,8 @@ describe("CosmeticShop", () => {
     fireEvent.click(screen.getByRole("button", { name: "천문대 구매" }));
 
     const dialog = screen.getByRole("dialog", { name: /구매 확인/ });
-    expect(within(dialog).getByText("5,000,000 토큰 차감")).toBeInTheDocument();
-    expect(within(dialog).getByText("구매 후 잔액 1,000,000 토큰")).toBeInTheDocument();
+    expect(within(dialog).getByText("5M 토큰 차감")).toBeInTheDocument();
+    expect(within(dialog).getByText("구매 후 잔액 1M 토큰")).toBeInTheDocument();
     fireEvent.click(within(dialog).getByRole("button", { name: "구매 확인" }));
     expect(onPurchase).toHaveBeenCalledWith("observatory");
   });

@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef } from "react";
-import { FormattedNumber } from "./FormattedNumber";
+import { FormattedTokens } from "./FormattedTokens";
 import type { NaturalObjectKey, ShopQuote } from "../types/usage";
 
 type NaturalRemovalDialogProps = {
@@ -104,16 +104,16 @@ export function NaturalRemovalDialog({
       </p>
       <h3 id={titleId}>{itemName} 제거 확인</h3>
       {baseCost !== null
-        ? <p>기본 제거 비용 <FormattedNumber value={baseCost} /> 토큰</p>
+        ? <p>기본 제거 비용 <FormattedTokens value={baseCost} /> 토큰</p>
         : <p role="status">생성 시대를 확인할 수 없습니다.</p>}
       {discount !== null && finalPrice !== null
         ? <>
-            <p>현재 할인 <FormattedNumber value={discount} /> 토큰</p>
-            <p>최종 제거 비용 <FormattedNumber value={finalPrice} /> 토큰</p>
+            <p>현재 할인 <FormattedTokens value={discount} /> 토큰</p>
+            <p>최종 제거 비용 <FormattedTokens value={finalPrice} /> 토큰</p>
           </>
         : <p role="status">최신 제거 견적을 확인해야 합니다.</p>}
       {hasConfirmedBalance
-        ? <p>현재 잔액 <FormattedNumber value={confirmedWalletBalance} /> 토큰</p>
+        ? <p>현재 잔액 <FormattedTokens value={confirmedWalletBalance} /> 토큰</p>
         : <p role="status">현재 잔액을 확인할 수 없습니다.</p>}
       {finalPrice !== null && hasConfirmedBalance && !canAfford && (
         <p className="cosmetic-shortfall" role="status">잔액이 부족합니다. 현재 잔액을 확인하세요.</p>

@@ -173,7 +173,7 @@ it("opens the cosmetic shop in the current window and restores exploration on re
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
   fireEvent.click(screen.getByRole("button", { name: "확대" }));
-  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="1-3"]')!);
   const originalViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
 
   fireEvent.click(screen.getByRole("button", { name: "행성 상점" }));
@@ -184,7 +184,7 @@ it("opens the cosmetic shop in the current window and restores exploration on re
 
   expect(await screen.findByRole("region", { name: "행성 풍경" })).toBeInTheDocument();
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
   expect(screen.getByRole("button", { name: "행성 상점" })).toHaveFocus();
 });
 
@@ -397,7 +397,7 @@ it("uses the canonical shop panel and keeps a confirmed landscape purchase in in
   fireEvent.click(within(shop).getByRole("button", { name: "연못 구매" }));
   fireEvent.click(await screen.findByRole("button", { name: "구매 확정" }));
 
-  await waitFor(() => expect(screen.getByText("7,000,000 토큰")).toBeInTheDocument());
+  await waitFor(() => expect(screen.getByText("7M 토큰")).toBeInTheDocument());
   fireEvent.click(within(shop).getByRole("tab", { name: "보유함" }));
   expect(await within(shop).findByText("연못")).toBeInTheDocument();
   expect(within(shop).getByText("변형 3 · 보관함")).toBeInTheDocument();
@@ -424,17 +424,18 @@ it("uses the flat landscape only in personal detail and keeps exploration when s
 
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="1-3"]')!);
   const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
   expect(selected).toHaveTextContent("정착·농경");
-  expect(selected).toHaveTextContent("4번째");
+  expect(within(selected).getByText("나무")).toBeInTheDocument();
+  expect(selected).toHaveTextContent("뿌리를 내리고 자라는 나무입니다.");
   const selectedViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
 
   fireEvent.click(screen.getByRole("tab", { name: "그룹" }));
   expect(container.querySelector(".planet-landscape")).not.toBeInTheDocument();
   fireEvent.click(await screen.findByRole("tab", { name: "내 행성" }));
 
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", selectedViewBox);
 });
 
@@ -465,7 +466,7 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
   await screen.findByRole("region", { name: "행성 풍경" });
   const initialZoom = Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom);
   fireEvent.click(screen.getByRole("button", { name: "확대" }));
-  fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="1-3"]')!);
   expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
   const previewButton = await screen.findByRole("button", { name: "연못 미리보기" });
@@ -486,7 +487,7 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
   await screen.findByRole("region", { name: "행성 풍경" });
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
   expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(initialZoom);
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toHaveAttribute("aria-pressed", "false");
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toHaveAttribute("aria-pressed", "false");
 });
 
 it("clears exploration immediately while a world context is locked", async () => {
@@ -508,14 +509,14 @@ it("clears exploration immediately while a world context is locked", async () =>
   await screen.findByRole("region", { name: "행성 풍경" });
   const initialZoom = Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom);
   fireEvent.click(screen.getByRole("button", { name: "확대" }));
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
 
   await act(async () => { listeners.get("world-context-changing")?.({ payload: "cosmetic-shop" }); });
 
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
   expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(initialZoom);
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
 });
 
@@ -717,7 +718,7 @@ it("refreshes the confirmed canonical shop state after sync finishes", async () 
   synced = true;
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
 
-  await waitFor(() => expect(within(shop).getByText("100,000 토큰", { exact: true })).toBeInTheDocument());
+  await waitFor(() => expect(within(shop).getByText("100K 토큰", { exact: true })).toBeInTheDocument());
   expect(reads).toBeGreaterThan(1);
 });
 
@@ -747,7 +748,7 @@ it("retries an unavailable canonical shop state when the user asks to refresh", 
   unavailable = false;
   fireEvent.click(screen.getByRole("button", { name: "상점 다시 확인" }));
   const shop = await screen.findByRole("region", { name: "행성 상점" });
-  await within(shop).findByText("300,000 토큰", { exact: true });
+  await within(shop).findByText("300K 토큰", { exact: true });
   expect(reads).toBe(2);
 });
 
@@ -773,7 +774,7 @@ it("coalesces shop state loading while opening the canonical shop screen", async
 
   await act(async () => { heldRead.resolve(canonicalShopState(200_000)); });
   const shop = await screen.findByRole("region", { name: "행성 상점" });
-  await within(shop).findByText("200,000 토큰", { exact: true });
+  await within(shop).findByText("200K 토큰", { exact: true });
 });
 
 it("filters context-changing events by the actual main window while the shop is open", async () => {
@@ -896,7 +897,7 @@ it("ignores a pending purchase result after the account changes", async () => {
 
   currentAccount = { ...currentAccount, user_id: "next-account", phase: "signed_in", world: null };
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
-  await waitFor(() => expect(within(screen.getByRole("region", { name: "행성 상점" })).getByText("9,000,000 토큰", { exact: true })).toBeInTheDocument());
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "행성 상점" })).getByText("9M 토큰", { exact: true })).toBeInTheDocument());
   shop = screen.getByRole("region", { name: "행성 상점" });
 
   await act(async () => {
@@ -907,7 +908,7 @@ it("ignores a pending purchase result after the account changes", async () => {
     await Promise.resolve();
   });
 
-  expect(within(shop).getByText("9,000,000 토큰", { exact: true })).toBeInTheDocument();
+  expect(within(shop).getByText("9M 토큰", { exact: true })).toBeInTheDocument();
   expect(within(shop).getByRole("button", { name: "연못 구매" })).toBeInTheDocument();
 });
 
@@ -988,7 +989,7 @@ it("ignores pending avatar equipment after the account changes", async () => {
 
   currentAccount = { ...currentAccount, user_id: "next-account", phase: "signed_in", world: null };
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
-  await waitFor(() => expect(within(screen.getByRole("region", { name: "행성 상점" })).getByText("9,000,000 토큰", { exact: true })).toBeInTheDocument());
+  await waitFor(() => expect(within(screen.getByRole("region", { name: "행성 상점" })).getByText("9M 토큰", { exact: true })).toBeInTheDocument());
   shop = screen.getByRole("region", { name: "행성 상점" });
   expect(within(shop).queryByRole("button", { name: "탐험가 모자 장착" })).not.toBeInTheDocument();
 
@@ -1020,12 +1021,12 @@ it("does not show the previous account shop state when the next account lookup f
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
   let shop = await screen.findByRole("region", { name: "행성 상점" });
-  await within(shop).findByText("600,000 토큰", { exact: true });
+  await within(shop).findByText("600K 토큰", { exact: true });
 
   currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null };
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
 
-  await waitFor(() => expect(screen.queryByText("600,000 토큰", { exact: true })).not.toBeInTheDocument());
+  await waitFor(() => expect(screen.queryByText("600K 토큰", { exact: true })).not.toBeInTheDocument());
   expect(await screen.findByRole("alert")).toHaveTextContent("서버에서 상점 상태를 불러오지 못했습니다.");
 });
 
@@ -1653,13 +1654,13 @@ it("offers removal for a selected generated object in the local guest planet", a
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
 
   const selectedObject = screen.getByRole("region", { name: "선택한 오브젝트" });
   fireEvent.click(within(selectedObject).getByRole("button", { name: "자연물 제거" }));
 
   const dialog = await screen.findByRole("dialog", { name: "바위 제거 확인" });
-  expect(dialog).toHaveTextContent("최종 제거 비용 100,000 토큰");
+  expect(dialog).toHaveTextContent("최종 제거 비용 100K 토큰");
   expect(invokeMock).toHaveBeenCalledWith("quote_shop_action", {
     target: { kind: "remove_natural", key: naturalKey },
   });
@@ -1677,8 +1678,8 @@ it("offers removal for a selected generated object in the local guest planet", a
   });
   expect(applied[0].request_id).toEqual(expect.any(String));
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
-  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toBeInTheDocument();
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
   expect(snapshot.planet.objects).toHaveLength(2);
 });
@@ -1800,7 +1801,7 @@ async function openNaturalRemoval(container: HTMLElement) {
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
   fireEvent.click(within(selected).getByRole("button", { name: "자연물 제거" }));
   return screen.findByRole("dialog", { name: "바위 제거 확인" });
@@ -1810,7 +1811,7 @@ async function openGuestNaturalRemoval(container: HTMLElement) {
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
   fireEvent.click(within(selected).getByRole("button", { name: "자연물 제거" }));
   return screen.findByRole("dialog", { name: "바위 제거 확인" });
@@ -1825,7 +1826,7 @@ it("does not apply a natural removal when its quote is canceled", async () => {
 
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
   expect(fixture.applied).toHaveLength(0);
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
 });
 
 it("keeps the natural object visible when the canonical removal result is insufficient", async () => {
@@ -1841,7 +1842,7 @@ it("keeps the natural object visible when the canonical removal result is insuff
   expect(await screen.findByRole("alert")).toHaveTextContent("잔액이 부족해 자연물을 제거하지 못했습니다.");
   expect(within(screen.getByRole("dialog", { name: "바위 제거 확인" })).getByRole("status"))
     .toHaveTextContent("잔액이 부족합니다.");
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
   expect(fixture.state.removed_natural_keys).toEqual([]);
 });
 
@@ -1865,7 +1866,7 @@ it("requires a new confirmation and request ID after the removal quote changes",
 
   expect(await screen.findByRole("alert")).toHaveTextContent("제거 비용이 변경되었습니다.");
   dialog = screen.getByRole("dialog", { name: "바위 제거 확인" });
-  expect(dialog).toHaveTextContent("최종 제거 비용 80,000 토큰");
+  expect(dialog).toHaveTextContent("최종 제거 비용 80K 토큰");
   expect(fixture.applied).toHaveLength(1);
   fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
 
@@ -1915,7 +1916,7 @@ it("keeps the same-ID receipt retry available after a refresh shows a lower bala
   fixture.setBalance(50_000);
   await act(async () => { listeners.get("cosmetic-shop-updated")?.({ payload: null }); });
   dialog = screen.getByRole("dialog", { name: "바위 제거 확인" });
-  await waitFor(() => expect(dialog).toHaveTextContent("현재 잔액 50,000 토큰"));
+  await waitFor(() => expect(dialog).toHaveTextContent("현재 잔액 50K 토큰"));
   const retry = within(dialog).getByRole("button", { name: "제거 확인" });
   expect(retry).toBeEnabled();
   fireEvent.click(retry);
@@ -2020,8 +2021,8 @@ it("keeps a confirmed natural removal canonical when its result arrives after le
   fireEvent.click(await screen.findByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
 
-  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
-  expect(container.querySelector('[data-object-list-id="1-3"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="1-3"]')).toBeInTheDocument();
   expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", originalViewBox);
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
@@ -2101,7 +2102,7 @@ it("ignores an old-cycle removal success after the guest has moved to a new cycl
   });
 
   expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-cycle-id", "cycle-2");
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
@@ -2226,13 +2227,13 @@ it("quotes and removes an authenticated user's natural object using canonical sh
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
 
   const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
   fireEvent.click(within(selection).getByRole("button", { name: "자연물 제거" }));
   const dialog = await screen.findByRole("dialog", { name: "바위 제거 확인" });
-  expect(dialog).toHaveTextContent("현재 잔액 100,000 토큰");
-  expect(dialog).toHaveTextContent("최종 제거 비용 100,000 토큰");
+  expect(dialog).toHaveTextContent("현재 잔액 100K 토큰");
+  expect(dialog).toHaveTextContent("최종 제거 비용 100K 토큰");
   expect(invokeMock).toHaveBeenCalledWith("quote_shop_action", {
     target: { kind: "remove_natural", key },
   });
@@ -2244,7 +2245,7 @@ it("quotes and removes an authenticated user's natural object using canonical sh
     quote: { target: { kind: "remove_natural", key }, catalog_revision: 1, effect_revision: 0, price: 100_000 },
   });
   await waitFor(() => expect(screen.queryByRole("dialog", { name: "바위 제거 확인" })).not.toBeInTheDocument());
-  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
   expect(snapshot.planet.objects).toHaveLength(1);
   expect(snapshot.planet.removed_natural_keys).toEqual([]);
 });
@@ -2267,7 +2268,7 @@ it("keeps signed receipt retry enabled after canonical refresh lowers the balanc
   fixture.setBalance(50_000);
   await act(async () => { listeners.get("cosmetic-shop-updated")?.({ payload: null }); });
   dialog = screen.getByRole("dialog", { name: "바위 제거 확인" });
-  await waitFor(() => expect(dialog).toHaveTextContent("현재 잔액 50,000 토큰"));
+  await waitFor(() => expect(dialog).toHaveTextContent("현재 잔액 50K 토큰"));
   const retry = within(dialog).getByRole("button", { name: "제거 확인" });
   expect(retry).toBeEnabled();
   fireEvent.click(retry);
@@ -2276,7 +2277,7 @@ it("keeps signed receipt retry enabled after canonical refresh lowers the balanc
   expect(fixture.applied).toHaveLength(2);
   expect(fixture.applied[1]).toBe(originalRequest);
   expect(fixture.applied[1].request_id).toBe(fixture.applied[0].request_id);
-  expect(container.querySelector('[data-object-list-id="0-0"]')).not.toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).not.toBeInTheDocument();
 });
 
 it.each([
@@ -2288,7 +2289,7 @@ it.each([
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
 
   const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
   expect(within(selection).queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
@@ -2307,8 +2308,8 @@ it("keeps a signed natural object visible and reports a canonical insufficient-b
   fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
 
   expect(await screen.findByRole("alert")).toHaveTextContent("잔액이 부족해 자연물을 제거하지 못했습니다.");
-  expect(screen.getByRole("dialog", { name: "바위 제거 확인" })).toHaveTextContent("현재 잔액 50,000 토큰");
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(screen.getByRole("dialog", { name: "바위 제거 확인" })).toHaveTextContent("현재 잔액 50K 토큰");
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
   expect(fixture.state.removed_natural_keys).toEqual([]);
 });
 
@@ -2366,7 +2367,7 @@ it("ignores a signed removal result after the same account moves to a new cycle"
   });
 
   expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-cycle-id", "cycle-2");
-  expect(container.querySelector('[data-object-list-id="0-0"]')).toBeInTheDocument();
+  expect(container.querySelector('[data-landscape-object-id="0-0"]')).toBeInTheDocument();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
 });
 
@@ -2412,4 +2413,46 @@ it("short_popup_opens_unchanged_detail_with_secondary_information", async () => 
   expect(document.querySelector(".usage-summary")).not.toBeNull();
   expect(document.querySelector(".source-list")).not.toBeNull();
   expect(document.querySelector(".sync-status")).not.toBeNull();
+});
+
+
+it("compacts planet and usage tokens while preserving growth credit precision", async () => {
+  const snapshot = structuredClone(localSnapshot);
+  snapshot.planet.current_planet_tokens = 13200;
+  snapshot.planet.lifetime_tokens = 239824;
+  snapshot.planet.growth_credit = 1234.125;
+  snapshot.usage.codex.total_tokens = 1000000;
+  snapshot.usage.confirmed_subtotal = 1000000;
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "get_sharing_state") return structuredClone(ownerState);
+    if (command === "current_usage" || command === "refresh_usage") return snapshot;
+    if (command === "list_world_members") return [];
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  expect(await screen.findByText("13.2K")).toBeInTheDocument();
+  expect(screen.getByText("239.82K")).toBeInTheDocument();
+  expect(screen.getByText("1,234.125")).toBeInTheDocument();
+  expect(screen.getAllByText("1M").length).toBeGreaterThan(0);
+});
+
+
+it("shows the latest visible growth object instead of a hidden recent kind", async () => {
+  const snapshot = structuredClone(localSnapshot);
+  snapshot.planet.objects = [
+    { stage: 0, ordinal: 0, kind: "tree", x: 30, y: 40, seed: 1 },
+    ...["road", "path", "rail", "fern"].map((kind, ordinal) => ({ stage: 3, ordinal, kind, x: 50, y: 40, seed: 2 })),
+  ];
+  const previous = invokeMock.getMockImplementation()!;
+  invokeMock.mockImplementation(async (command: string, ...args: unknown[]) => {
+    if (command === "current_usage" || command === "refresh_usage") return snapshot;
+    return previous(command, ...args);
+  });
+  const { container } = render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  expect(await screen.findByText("최근 생성: 나무")).toBeInTheDocument();
+  expect(container.querySelector(".recent-object")).not.toHaveTextContent("양치식물");
 });

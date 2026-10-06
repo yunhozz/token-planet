@@ -716,3 +716,94 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .app-shell--compact-popover .planet-summary { margin-bottom: 0; }
 
 .app-shell--macos-popover .planet-speech-bubble--popover { --speech-surface: Canvas; --gold: var(--rule); font-size: 12px; }
+
+/* Detail observatory: scenery first, quiet surfaces and readable controls. */
+.app-shell--detail {
+  --paper: #f2f5f3;
+  --mint: #80d6ba;
+  --water: #a3b0bc;
+  color: #f2f5f3;
+  background: #10151d;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+}
+.app-shell--detail .world-layout { width: min(100%, 1200px); }
+.app-shell--detail .topbar { padding-bottom: 20px; border-bottom: 1px solid #2c3745; }
+.app-shell--detail .detail-navigation { margin: 24px 0; }
+.app-shell--detail .detail-tabs { padding: 5px; border: 1px solid #2c3745; border-radius: 14px; background: #171e28; gap: 4px; }
+.app-shell--detail .detail-tabs button { border: 0; border-radius: 10px; min-height: 44px; color: #a3b0bc; background: transparent; box-shadow: none; font-size: 16px; }
+.app-shell--detail .detail-tabs button[aria-selected="true"] { color: #f2f5f3; background: #2c3947; box-shadow: 0 1px 4px #0004; }
+.app-shell--detail .planet-landscape { border: 1px solid #34414e; border-radius: 20px; background: #1b2430; overflow: hidden; }
+.app-shell--detail .planet-landscape-viewport { border-radius: 0; }
+.app-shell--detail .planet-landscape-object-detail { position: static; inset: auto; height: auto; display: grid; grid-template-columns: minmax(0, 1fr) 144px; align-items: center; gap: 24px; padding: 24px; overflow: visible; pointer-events: auto; background: #1b2430; border-top: 1px solid #34414e; }
+.app-shell--detail .planet-landscape-selection { width: auto; max-width: none; padding: 0; background: transparent; border: 0; box-shadow: none; border-radius: 0; }
+.app-shell--detail .planet-landscape-selection h2 { color: #f2f5f3; font-size: 20px; }
+.app-shell--detail .planet-landscape-selection p { color: #a3b0bc; font-size: 16px; }
+.app-shell--detail .planet-landscape-object-preview { width: 144px; height: 144px; flex: none; border-radius: 16px; border: 1px solid #34414e; background: #10151d; }
+.app-shell--detail .personal-quick-facts, .app-shell--detail .personal-information { width: 100%; margin-top: 24px; }
+.app-shell--detail .personal-quick-facts { padding: 24px; border: 1px solid #2c3745; border-radius: 18px; background: #1b2430; }
+.app-shell--detail .personal-quick-facts h1 { font-size: clamp(24px, 3vw, 28px); letter-spacing: -.04em; overflow-wrap: anywhere; }
+.app-shell--detail .planet-ledger { gap: 24px; }
+.app-shell--detail .ledger-value { font-size: 30px; font-variant-numeric: tabular-nums; color: #f2f5f3; overflow-wrap: anywhere; }
+.app-shell--detail .ledger-label, .app-shell--detail .reset-note { font-size: 14px; color: #a3b0bc; }
+.app-shell--detail .sharing-panel, .app-shell--detail .usage-summary, .app-shell--detail .source-card { border: 1px solid #2c3745; border-radius: 16px; background: #1b2430; box-shadow: none; }
+.app-shell--detail button { min-height: 44px; }
+.app-shell--detail button:focus-visible, .app-shell--detail [tabindex]:focus-visible { outline: 2px solid #80d6ba; outline-offset: 4px; }
+.app-shell--detail .progress-track { height: 8px; border: 0; border-radius: 4px; background: #34414e; }
+.app-shell--detail .progress-track span { border-radius: 4px; background: #80d6ba; }
+@media (max-width: 640px) {
+  .app-shell--detail { padding: 16px; }
+  .app-shell--detail .planet-landscape-object-detail { grid-template-columns: minmax(0, 1fr); padding: 20px; gap: 16px; }
+  .app-shell--detail .planet-landscape-object-preview { justify-self: center; }
+  .app-shell--detail .personal-quick-facts { padding: 20px; }
+  .app-shell--detail .planet-ledger { grid-template-columns: minmax(0, 1fr); }
+}
+@media (prefers-reduced-motion: reduce) {
+  .app-shell--detail *, .app-shell--detail *::before, .app-shell--detail *::after { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
+}
+.app-shell--detail .shop-effects-summary,
+.app-shell--detail .planet-action-panel { margin: 24px 0; padding: 24px; border: 1px solid #2c3745; border-radius: 16px; background: #1b2430; }
+.app-shell--detail .shop-effects-summary dl { gap: 16px 24px; }
+.app-shell--detail .shop-effects-summary dl > div { padding: 12px 0; border: 0; border-bottom: 1px solid #34414e; background: transparent; flex-wrap: wrap; }
+.app-shell--detail .shop-effects-summary dd { color: #e8bf79; white-space: normal; overflow-wrap: anywhere; }
+.app-shell--detail .shop-effects-summary-heading { flex-wrap: wrap; }
+.app-shell--detail .shop-effects-summary button { border: 1px solid #4a6f66; border-radius: 10px; color: #80d6ba; background: #213932; }
+.app-shell--detail .planet-landscape-controls button { border: 1px solid #526775; border-radius: 10px; background: #10151de8; font-weight: 600; }
+@media (max-width: 640px) {
+  .app-shell--detail .shop-effects-summary, .app-shell--detail .planet-action-panel { padding: 20px; }
+  .app-shell--detail .shop-effects-summary dl { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* Observatory controls share their surface with detail and connected screens. */
+:is(.app-shell--detail, .app-shell--feature-screen) button {
+  min-height: 44px;
+  border-radius: 12px;
+}
+:is(.app-shell--detail, .app-shell--feature-screen) :is(.feature-tool-menu, .cosmetic-item-actions, .cosmetic-confirm-actions, .growth-journal-pager) { gap: 8px; }
+:is(.app-shell--detail, .app-shell--feature-screen) :is(.feature-tool-menu button, .feature-screen-back, .detail-return-button, .cosmetic-secondary, .growth-journal-pager button, .error-retry) {
+  padding: 9px 14px;
+  border: 1px solid #405362;
+  color: #cbd8dc;
+  background: #1b2833;
+  box-shadow: 0 1px 2px #0003;
+}
+:is(.app-shell--detail, .app-shell--feature-screen) :is(.feature-tool-menu button, .feature-screen-back, .detail-return-button, .cosmetic-secondary, .growth-journal-pager button, .error-retry):hover:not(:disabled) {
+  border-color: #80d6ba;
+  color: #e6f5ed;
+  background: #273d43;
+}
+:is(.app-shell--detail, .app-shell--feature-screen) .feature-tool-menu button[aria-current="page"] {
+  border-color: #80d6ba;
+  color: #a7ead2;
+  background: #213d36;
+  box-shadow: inset 0 0 0 1px #80d6ba33;
+}
+:is(.app-shell--detail, .app-shell--feature-screen) :is(.primary-action, .sharing-action, .cosmetic-primary) { border: 1px solid #9ae0c4; background: #80d6ba; color: #142c2a; }
+:is(.app-shell--detail, .app-shell--feature-screen) :is(.cosmetic-tabs button, .detail-tabs button) { border-radius: 10px; }
+:is(.app-shell--detail, .app-shell--feature-screen) .icon-button { border-radius: 50%; border: 1px solid #405362; background: #1b2833; }
+:is(.app-shell--detail, .app-shell--feature-screen) .reset-button { border: 1px solid #b07870; background: #3c2c32; color: #ffc2ad; }
+:is(.app-shell--detail, .app-shell--feature-screen) button:focus-visible { outline: 2px solid #80d6ba; outline-offset: 4px; }
+:is(.app-shell--detail, .app-shell--feature-screen) button:disabled { opacity: .5; box-shadow: none; }
+:is(.app-shell--detail, .app-shell--feature-screen) button[aria-busy="true"] { border-color: #e8bf79; }
+:is(.app-shell--detail, .app-shell--feature-screen) .cosmetic-confirmation { border: 1px solid #758879; border-radius: 18px; background: #1b2430; box-shadow: 0 16px 48px #0008; }

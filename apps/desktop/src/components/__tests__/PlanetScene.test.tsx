@@ -464,3 +464,26 @@ it("hides previously fitted popup speech when its measured scene collapses", () 
   expect(bubble.style.visibility).toBe("hidden");
   expect(bubble).toHaveAttribute("data-speech-fit", "insufficient");
 });
+
+it.each([false, true])("filters hidden artwork and tile overflow in publicOnly=%s scenes", (publicOnly) => {
+  const kinds = ["tree", "rock", "water", "house", "factory", "road", "path", "rail", "fern"];
+  const objects = kinds.map((kind, ordinal) => ({ stage: 3, ordinal, kind, x: 10, y: 30, seed: ordinal }));
+  const { container } = render(<PlanetScene stage={3} progress={0} objects={objects} publicOnly={publicOnly} />);
+  expect([...container.querySelectorAll("[data-object-id]")].map((node) => node.getAttribute("data-object-id")))
+    .toEqual(["3-1", "3-2", "3-3", "3-4"]);
+  expect(container.querySelector("text")?.textContent).toBe("+1");
+});
+
+it.each(["road", "path", "rail", "fern"])("suppresses new %s entrance and dialogue", (kind) => {
+  const { container, rerender } = render(<PlanetScene stage={3} progress={0} objects={[]} animate interactive />);
+  rerender(<PlanetScene stage={3} progress={0} objects={[{ stage: 3, ordinal: 1, kind, x: 10, y: 30, seed: 1 }]} animate interactive />);
+  expect(container.querySelector(".planet-object--entering")).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "아바타에게 말 걸기" }));
+  expect(screen.getByRole("status")).not.toHaveTextContent("새로운 오브젝트가 생겼어!");
+  expect(container.querySelector(".planet-object--entering")).toBeNull();
+});
+
+it.each([2, 3, 4])("omits the compact era road at stage %s", (stage) => {
+  const { container } = render(<PlanetScene stage={stage} progress={0} />);
+  expect(container.querySelector('path[fill="#a58a67"]')).toBeNull();
+});

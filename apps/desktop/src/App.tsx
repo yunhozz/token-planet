@@ -1,3 +1,5 @@
+import { isPlanetObjectVisible } from "./components/planetObjectVisibility";
+import { FormattedTokens } from "./components/FormattedTokens";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
@@ -720,6 +722,7 @@ function App() {
             : !planet.can_reset
               ? "서버에서 초기화 대기 시간이 끝나지 않은 것으로 확인했습니다."
               : null;
+  const recentVisibleObject = planet.objects.filter(isPlanetObjectVisible).slice(-1)[0];
   const nextObjectProgress = objectProgress(planet.growth_credit, planet.stage);
   const availableWalletBalance = currentShopState?.available_balance ?? planet.wallet_balance;
   const removedNaturalIds = new Set([
@@ -1045,7 +1048,7 @@ function App() {
             </div>
             <div className="summary-token">
               <span className="ledger-label">이번 행성 토큰</span>
-              <strong className="ledger-value"><FormattedNumber value={planet.current_planet_tokens} /></strong>
+              <strong className="ledger-value"><FormattedTokens value={planet.current_planet_tokens} /></strong>
               {planet.incomplete && <span className="incomplete-label">일부 기록 확인 중</span>}
             </div>
             <div className="stage-progress stage-progress--summary">
@@ -1099,7 +1102,7 @@ function App() {
                 <div className="summary-era"><span>현재 시대</span><strong>{STAGE_NAMES[planet.stage] ?? STAGE_NAMES[4]}</strong></div>
                 <div className="summary-token">
                   <span className="ledger-label">이번 행성 토큰</span>
-                  <strong className="ledger-value"><FormattedNumber value={planet.current_planet_tokens} /></strong>
+                  <strong className="ledger-value"><FormattedTokens value={planet.current_planet_tokens} /></strong>
                   {planet.incomplete && <span className="incomplete-label">일부 기록 확인 중</span>}
                 </div>
                 <div className="stage-progress">
@@ -1119,8 +1122,8 @@ function App() {
                   <div><dt>상점 할인</dt><dd>{(currentShopState.effects.shop_discount_bps / 100).toFixed(2)}%</dd></div>
                   <div><dt>초기화 대기시간</dt><dd>{(currentShopState.effects.reset_cooldown_bps / 100).toFixed(2)}%</dd></div>
                   <div><dt>자연물 제거 할인</dt><dd>{(currentShopState.effects.natural_removal_discount_bps / 100).toFixed(2)}%</dd></div>
-                  <div><dt>시대 보상</dt><dd><FormattedNumber value={currentShopState.effects.era_reward_tokens} /> 토큰</dd></div>
-                  <div><dt>연속 보상</dt><dd><FormattedNumber value={currentShopState.effects.streak_reward_tokens} /> 토큰</dd></div>
+                  <div><dt>시대 보상</dt><dd><FormattedTokens value={currentShopState.effects.era_reward_tokens} /> 토큰</dd></div>
+                  <div><dt>연속 보상</dt><dd><FormattedTokens value={currentShopState.effects.streak_reward_tokens} /> 토큰</dd></div>
                 </dl>
                 <p>보상 기준 시간대 · {currentShopState.reward_state.reward_timezone}</p>
               </> : <p>{shopActions.error ?? "상점 효과를 확인하는 중입니다."}</p>}
@@ -1129,13 +1132,13 @@ function App() {
               <section className="planet-action-panel" aria-label="행성 기록">
                 <h2>행성 기록</h2>
                 <div className="planet-ledger">
-                  <div className="ledger-cell"><span className="ledger-label">누적 토큰 (개편 후)</span><strong className="ledger-value"><FormattedNumber value={planet.lifetime_tokens} /></strong>{planet.incomplete && <span className="incomplete-label">일부 기록 확인 중</span>}</div>
+                  <div className="ledger-cell"><span className="ledger-label">누적 토큰 (개편 후)</span><strong className="ledger-value"><FormattedTokens value={planet.lifetime_tokens} /></strong>{planet.incomplete && <span className="incomplete-label">일부 기록 확인 중</span>}</div>
                   <div className="ledger-cell"><span className="ledger-label">성장 점수</span><strong className="ledger-value"><FormattedNumber value={planet.growth_credit} maximumFractionDigits={12} /></strong>{planet.incomplete && <span className="incomplete-label">일부 기록 확인 중</span>}</div>
-                  <div className="ledger-cell"><span className="ledger-label">지갑 잔액</span><strong className="ledger-value"><FormattedNumber value={availableWalletBalance} /></strong></div>
+                  <div className="ledger-cell"><span className="ledger-label">지갑 잔액</span><strong className="ledger-value"><FormattedTokens value={availableWalletBalance} /></strong></div>
                 </div>
                 <div className="stage-progress object-progress">
                   <div className="progress-row"><span>다음 오브젝트까지</span><div className="progress-track progress-track--object" role="progressbar" aria-valuenow={Math.round(nextObjectProgress * 100)} aria-valuemin={0} aria-valuemax={100} aria-label="다음 오브젝트 생성 진행도"><span style={{ width: `${nextObjectProgress * 100}%` }} /></div><span>{Math.round(nextObjectProgress * 100)}%</span></div>
-                  <p className="recent-object">최근 생성: {planet.objects.length ? objectName(planet.objects[planet.objects.length - 1].kind) : "아직 없음"}</p>
+                  <p className="recent-object">최근 생성: {recentVisibleObject ? objectName(recentVisibleObject.kind) : "아직 없음"}</p>
                 </div>
               </section>
               <UsageSummary snapshot={view} />
