@@ -46,7 +46,7 @@ describe("NaturalRemovalDialog", () => {
     const dialog = renderDialog({ target: stageTarget, quote });
 
     expect(screen.getByRole("dialog", { name: "작은 분수 제거 확인" })).toBeInTheDocument();
-    expect(dialog.container).toHaveTextContent(`생성 시대: ${era} · 4번째 개체`);
+    expect(dialog.container).toHaveTextContent(`생성 시대: ${era}`);
     expect(dialog.container).toHaveTextContent(`기본 제거 비용 ${baseCost.toLocaleString("ko-KR")} 토큰`);
     expect(dialog.container).toHaveTextContent("현재 할인 0 토큰");
     expect(dialog.container).toHaveTextContent(`최종 제거 비용 ${baseCost.toLocaleString("ko-KR")} 토큰`);

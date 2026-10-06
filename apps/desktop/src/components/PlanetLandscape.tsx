@@ -54,6 +54,34 @@ import {
 } from "./planetLandscapeLayout";
 import { validatePlacement } from "./landscapeEditing";
 
+const OBJECT_DESCRIPTIONS: Record<string, string> = {
+  rock: "행성의 지형을 이루는 단단한 바위입니다. 풍경에 자연스러운 굴곡을 더합니다.",
+  water: "생명이 자라날 수 있는 물입니다. 행성의 풍경에 생기를 더합니다.",
+  tree: "뿌리를 내리고 자라는 나무입니다. 푸른 잎이 행성의 숲을 채웁니다.",
+  fern: "숲 바닥에서 자라는 양치식물입니다. 작은 잎들이 초록빛 풍경을 만듭니다.",
+  creature: "행성에 나타난 작은 생물입니다. 생태계가 자라나는 모습을 보여줍니다.",
+  camp: "사람들이 머물기 시작한 야영지입니다. 정착 생활의 첫 풍경을 만듭니다.",
+  crops: "작물을 기르는 경작지입니다. 땅을 가꾸며 정착 생활을 이어갑니다.",
+  cottage: "소박한 생활 공간인 오두막입니다. 행성에 작은 보금자리를 더합니다.",
+  path: "풍경 속 장소들을 잇는 오솔길입니다. 정착지 사이로 발길이 이어집니다.",
+  well: "물을 길어 올리는 우물입니다. 정착지의 일상을 뒷받침합니다.",
+  house: "주민들의 생활 공간인 집입니다. 집들이 모여 마을의 모습을 만듭니다.",
+  workshop: "도구와 물건을 만드는 작업장입니다. 마을에 생산 활동이 자리 잡습니다.",
+  plaza: "사람들이 모이는 광장입니다. 마을의 만남과 교류가 이루어지는 공간입니다.",
+  road: "도시의 여러 장소를 연결하는 도로입니다. 이동과 교류의 길을 넓힙니다.",
+  market: "물건을 사고파는 시장입니다. 마을의 생활과 교류에 활기를 더합니다.",
+  factory: "물건을 생산하는 공장입니다. 산업 시대의 풍경을 이루는 시설입니다.",
+  power: "도시에 에너지를 공급하는 전력 시설입니다. 산업 활동을 뒷받침합니다.",
+  rail: "먼 곳까지 이동할 수 있는 철도입니다. 도시와 도시를 연결합니다.",
+  tower: "도시 위로 높이 솟은 타워입니다. 성장한 문명의 모습을 보여줍니다.",
+  district: "여러 건물이 모인 도시 구역입니다. 행성의 생활 공간이 넓어집니다.",
+  laboratory: "새로운 기술을 탐구하는 연구 시설입니다. 행성의 다음 발전을 준비합니다.",
+  satellite: "행성 주변을 도는 위성입니다. 문명의 활동 범위가 우주로 이어집니다.",
+  rocket: "우주를 향한 출발을 준비하는 발사 시설입니다. 새로운 탐사의 시작점입니다.",
+  solar: "햇빛을 에너지로 바꾸는 태양 전지입니다. 첨단 문명의 활동을 뒷받침합니다.",
+  habitat: "우주에서 생활하는 궤도 거주지입니다. 행성 너머로 보금자리가 확장됩니다.",
+};
+
 const SKY_BAND_HEIGHT = 220;
 const DEFAULT_VIEWPORT: LandscapeViewport = { width: 1200, height: 420 };
 const LANDSCAPE_WALK_STOPS = 24;
@@ -495,9 +523,14 @@ export function PlanetLandscape({
 
   function selectPlacement(placement: LandscapePlacement) {
     onExplorationChange({
+      ...exploration,
       selectedObjectId: placement.id,
-      camera: focusLandscape(landscapeBounds, viewport, exploration.camera, placement.bounds),
     });
+  }
+
+  function clearSelection() {
+    viewportRef.current?.focus();
+    onExplorationChange({ ...exploration, selectedObjectId: null });
   }
 
   function worldPoint(clientX: number, clientY: number) {
@@ -811,6 +844,12 @@ export function PlanetLandscape({
   }
 
   function handleSceneKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (event.key === "Escape" && selected && shopDraft?.pointerId !== null) {
+      event.preventDefault();
+      event.stopPropagation();
+      clearSelection();
+      return;
+    }
     if (shopDraft?.pointerId === null) {
       if (event.key === "Escape") {
         event.preventDefault();
@@ -870,6 +909,12 @@ export function PlanetLandscape({
     <section
       className="planet-landscape"
       aria-label="행성 풍경"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && selected && !event.defaultPrevented) {
+          event.preventDefault();
+          clearSelection();
+        }
+      }}
       data-cycle-id={cycleId}
       data-incomplete={incomplete}
       data-motion-active={motionActive}
@@ -913,7 +958,7 @@ export function PlanetLandscape({
           />
           <g className="planet-landscape-objects">
             {visibleNaturalPlacements.map((placement) => {
-              const objectLabel = `${objectName(placement.object.kind)} ${placement.object.ordinal + 1}번째, ${STAGE_NAMES[placement.object.stage] ?? STAGE_NAMES[4]}`;
+              const objectLabel = `${objectName(placement.object.kind)}, ${STAGE_NAMES[placement.object.stage] ?? STAGE_NAMES[4]}`;
               const isSelected = placement.id === exploration.selectedObjectId;
               return (
                 <g
@@ -1023,46 +1068,57 @@ export function PlanetLandscape({
           </g>
         </svg>
       </div>
-      <section className="planet-landscape-object-list" role="region" aria-label="오브젝트 목록">
-        {visibleNaturalPlacements.length === 0
-          ? <p>아직 생성된 오브젝트가 없습니다.</p>
-          : <ol>
-            {visibleNaturalPlacements.map((placement) => {
-              const isSelected = placement.id === exploration.selectedObjectId;
-              return (
-                <li key={placement.id}>
-                  <button
-                    type="button"
-                    data-object-list-id={placement.id}
-                    aria-pressed={isSelected}
-                    onClick={() => selectPlacement(placement)}
-                  >
-                    <span>{objectName(placement.object.kind)} {placement.object.ordinal + 1}번째</span>
-                    <span>{STAGE_NAMES[placement.object.stage] ?? STAGE_NAMES[4]}</span>
-                  </button>
-                </li>
-              );
-            })}
-          </ol>}
-      </section>
-      {selected && <section className="planet-landscape-selection" role="region" aria-label="선택한 오브젝트" aria-live="polite">
-        <h2>{objectName(selected.object.kind)}</h2>
-        <p>{STAGE_NAMES[selected.object.stage] ?? STAGE_NAMES[4]}</p>
-        <p>{selected.object.ordinal + 1}번째 생성</p>
-        {onRequestNaturalRemoval && <button
-          type="button"
-          disabled={canRequestNaturalRemoval?.({
-            cycle_id: cycleId,
-            stage: selected.object.stage,
-            ordinal: selected.object.ordinal,
-          }) === false}
-          onClick={() => onRequestNaturalRemoval({
-            cycle_id: cycleId,
-            stage: selected.object.stage,
-            ordinal: selected.object.ordinal,
-          }, objectName(selected.object.kind))}
-        >자연물 제거</button>}
-      </section>}
+      {selected && <div className="planet-landscape-object-detail">
+        <section
+          className="planet-landscape-selection"
+          role="region"
+          aria-label="선택한 오브젝트"
+          aria-live="polite"
+          onPointerDown={(event) => event.stopPropagation()}
+          onPointerMove={(event) => event.stopPropagation()}
+          onPointerUp={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          onKeyDown={(event) => {
+            event.stopPropagation();
+            if (event.key === "Escape") {
+              event.preventDefault();
+              clearSelection();
+            }
+          }}
+        >
+          <div className="planet-landscape-selection-heading">
+            <h2>{objectName(selected.object.kind)}</h2>
+            <button type="button" aria-label="오브젝트 설명 닫기" onClick={clearSelection}>닫기</button>
+          </div>
+          <p>생성 시대: {STAGE_NAMES[selected.object.stage] ?? STAGE_NAMES[4]}</p>
+          <p className="planet-landscape-selection-description">
+            {OBJECT_DESCRIPTIONS[selected.object.kind] ?? "행성의 성장 과정에서 나타난 오브젝트입니다. 풍경의 일부를 이루며 행성의 변화를 보여줍니다."}
+          </p>
+          {onRequestNaturalRemoval && <button
+            type="button"
+            className="planet-landscape-natural-removal"
+            disabled={canRequestNaturalRemoval?.({
+              cycle_id: cycleId,
+              stage: selected.object.stage,
+              ordinal: selected.object.ordinal,
+            }) === false}
+            onClick={() => onRequestNaturalRemoval({
+              cycle_id: cycleId,
+              stage: selected.object.stage,
+              ordinal: selected.object.ordinal,
+            }, objectName(selected.object.kind))}
+          >자연물 제거</button>}
+        </section>
+        <div className="planet-landscape-object-preview" aria-hidden="true"
+          onPointerDown={(event) => event.stopPropagation()}
+          onPointerMove={(event) => event.stopPropagation()}
+          onPointerUp={(event) => event.stopPropagation()}
+        >
+          <svg viewBox="-11 -16 42 42" shapeRendering="crispEdges">
+            <PlanetObjectSprite object={selected.object} x={0} y={0} scale={1} />
+          </svg>
+        </div>
+      </div>}
       {selectedShopPlacement && <div className="planet-landscape-shop-selection" role="group" aria-label="선택한 장식">
         <span>{selectedShopPlacement.product.display_name}</span>
         <button

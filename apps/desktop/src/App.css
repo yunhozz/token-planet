@@ -454,24 +454,28 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .planet-landscape-object { cursor: pointer; }
 .planet-landscape-object.is-selected { filter: drop-shadow(0 0 3px #f1cf89); }
 .planet-landscape-object:focus-visible { outline: 2px solid #f1cf89; outline-offset: 2px; }
-.planet-landscape-selection,
-.planet-landscape-object-list { min-width: 0; margin: 12px auto 0; padding: 12px; border: 1px solid #536578; background: #1d2938; }
-.planet-landscape-selection { width: min(100%, 900px); }
-.planet-landscape-selection h2 { margin: 0; color: var(--gold); font-size: 20px; }
-.planet-landscape-selection p { margin: 5px 0 0; color: var(--muted); }
-.planet-landscape-object-list { width: min(100%, 1100px); }
-.planet-landscape-object-list ol { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 210px), 1fr)); gap: 6px; max-height: 280px; overflow: auto; padding: 0; margin: 0; list-style: none; }
-.planet-landscape-object-list li { min-width: 0; }
-.planet-landscape-object-list button { width: 100%; min-height: 44px; display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 7px; padding: 6px 8px; border: 1px solid #536578; color: var(--paper); background: #202a3a; font: inherit; text-align: left; }
-.planet-landscape-object-list button span:first-of-type { color: var(--gold); }
-.planet-landscape-object-list button span:last-of-type { grid-column: 1 / -1; color: var(--muted); font-size: 13px; }
-.planet-landscape-object-list button[aria-pressed="true"] { border: 2px solid var(--mint); background: #293b43; }
-.planet-landscape-object-list button:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+.planet-landscape-object-detail { position: absolute; z-index: 1; inset: 72px 20px auto; height: calc(clamp(320px, 42vw, 560px) - 92px); display: flex; align-items: center; justify-content: space-between; gap: 24px; pointer-events: none; }
+.planet-landscape-selection { width: min(42%, 350px); min-width: 0; max-height: 100%; overflow: auto; padding: 20px; border: 1px solid #82978c; border-radius: 12px; background: #1d2938f2; box-shadow: 0 8px 24px rgb(4 9 20 / 35%); pointer-events: auto; touch-action: pan-y; cursor: auto; overflow-wrap: anywhere; }
+.planet-landscape-selection-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.planet-landscape-selection h2 { margin: 6px 0 0; color: var(--gold); font-size: 20px; }
+.planet-landscape-selection p { margin: 10px 0 0; color: var(--muted); line-height: 1.6; }
+.planet-landscape-selection .planet-landscape-selection-description { color: var(--paper); }
+.planet-landscape-selection button { min-width: 44px; min-height: 44px; padding: 8px 12px; border: 1px solid #82978c; border-radius: 6px; color: var(--paper); background: #202a3a; font: inherit; cursor: pointer; }
+.planet-landscape-selection button:focus-visible { outline: 3px solid var(--gold); outline-offset: 2px; }
+.planet-landscape-selection button:disabled { opacity: .5; cursor: default; }
+.planet-landscape-selection .planet-landscape-natural-removal { margin-top: 16px; border-color: var(--gold); color: var(--gold); }
+.planet-landscape-object-preview { width: min(32%, 260px); min-width: 0; aspect-ratio: 1; max-height: 100%; pointer-events: auto; cursor: auto; border: 1px solid #82978c; border-radius: 12px; background: #1d2938dc; backdrop-filter: blur(6px); }
+.planet-landscape-object-preview svg { display: block; width: 100%; height: 100%; image-rendering: pixelated; }
+
+@media (max-width: 680px) {
+  .planet-landscape-object-detail { inset: 64px 12px auto; height: calc(clamp(320px, 42vw, 560px) - 76px); pointer-events: auto; flex-direction: column; align-items: stretch; justify-content: flex-start; gap: 12px; overflow-y: auto; touch-action: pan-y; }
+  .planet-landscape-selection { width: 100%; max-height: none; padding: 14px; flex-shrink: 0; }
+  .planet-landscape-object-preview { width: 140px; max-height: none; align-self: flex-end; flex-shrink: 0; }
+}
 
 @media (max-width: 540px) {
   .planet-landscape-controls { top: 8px; right: 8px; gap: 4px; }
   .planet-landscape-controls button { min-width: 40px; min-height: 40px; padding: 5px 7px; }
-  .planet-landscape-object-list ol { grid-template-columns: minmax(0, 1fr); }
 }
 
 .feature-tool-menu { display: flex; align-items: center; justify-content: center; gap: 7px; min-width: 0; margin-left: auto; }

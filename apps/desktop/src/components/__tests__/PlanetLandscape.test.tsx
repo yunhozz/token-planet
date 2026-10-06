@@ -280,21 +280,20 @@ describe("planet landscape artwork", () => {
     second.unmount();
   });
 
-  it("selects a saved object from the list and shows its mapped name, era, and one-based order", () => {
+  it("selects a saved scene object and shows its mapped name and era without moving the camera", () => {
     const { container } = render(<ControlledLandscape />);
     const svg = container.querySelector(".planet-landscape-svg")!;
     const initialViewBox = svg.getAttribute("viewBox");
 
-    fireEvent.click(screen.getByRole("region", { name: "오브젝트 목록" }).querySelector('[data-object-list-id="1-3"]')!);
+    fireEvent.click(container.querySelector('[data-landscape-hit-id="1-3"]')!);
 
     const selected = screen.getByRole("region", { name: "선택한 오브젝트" });
     expect(selected).toHaveTextContent("나무");
     expect(selected).toHaveTextContent("정착·농경");
-    expect(selected).toHaveTextContent("4번째");
+    expect(selected).not.toHaveTextContent(/\d+번째/);
     expect(selected).not.toHaveTextContent(/20\d\d[-./년]/);
-    expect(within(screen.getByRole("region", { name: "오브젝트 목록" }))
-      .getByRole("button", { name: /나무.*4번째/ })).toHaveAttribute("aria-pressed", "true");
-    expect(svg.getAttribute("viewBox")).not.toBe(initialViewBox);
+    expect(container.querySelector('[data-landscape-hit-id="1-3"]')).toHaveAttribute("aria-pressed", "true");
+    expect(svg.getAttribute("viewBox")).toBe(initialViewBox);
   });
 
   it("requests removal only for the selected natural object's current cycle key", () => {
@@ -305,7 +304,7 @@ describe("planet landscape artwork", () => {
         onRequestNaturalRemoval={onRequestNaturalRemoval}
       />,
     );
-    fireEvent.click(container.querySelector('[data-object-list-id="1-3"]')!);
+    fireEvent.click(container.querySelector('[data-landscape-hit-id="1-3"]')!);
 
     const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
     fireEvent.click(within(selection).getByRole("button", { name: "자연물 제거" }));
@@ -324,7 +323,7 @@ describe("planet landscape artwork", () => {
         canRequestNaturalRemoval={() => false}
       />,
     );
-    fireEvent.click(container.querySelector('[data-object-list-id="0-0"]')!);
+    fireEvent.click(container.querySelector('[data-landscape-hit-id="0-0"]')!);
 
     const selection = screen.getByRole("region", { name: "선택한 오브젝트" });
     const remove = within(selection).getByRole("button", { name: "자연물 제거" });
@@ -333,7 +332,7 @@ describe("planet landscape artwork", () => {
     expect(onRequestNaturalRemoval).not.toHaveBeenCalled();
   });
 
-  it("provides a separate keyboard-accessible scene target and list entry for every saved object", () => {
+  it("provides a keyboard-accessible scene target for every saved object without a separate list", () => {
     const manyCollocated: PlanetObject[] = Array.from({ length: 120 }, (_, ordinal) => ({
       stage: 0, ordinal, kind: "rock", x: 50, y: 50, seed: 1,
     }));
@@ -341,16 +340,14 @@ describe("planet landscape artwork", () => {
 
     expect(container.querySelectorAll("[data-landscape-object-id]")).toHaveLength(manyCollocated.length);
     expect(container.querySelectorAll("[data-landscape-hit-id]")).toHaveLength(manyCollocated.length);
-    expect(within(screen.getByRole("region", { name: "오브젝트 목록" })).getAllByRole("button"))
-      .toHaveLength(manyCollocated.length);
+    expect(screen.queryByRole("region", { name: "오브젝트 목록" })).not.toBeInTheDocument();
     expect(screen.queryByText(/^\+\d/)).not.toBeInTheDocument();
   });
 
-  it("explains when an empty planet has no saved objects", () => {
+  it("omits the list and object detail when an empty planet has no saved objects", () => {
     render(<ControlledLandscape objects={[]} />);
 
-    expect(screen.getByRole("region", { name: "오브젝트 목록" }))
-      .toHaveTextContent("아직 생성된 오브젝트가 없습니다.");
+    expect(screen.queryByRole("region", { name: "오브젝트 목록" })).not.toBeInTheDocument();
     expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
   });
 
@@ -434,13 +431,11 @@ describe("planet landscape artwork", () => {
 
     fireEvent.click(container.querySelector('[data-landscape-hit-id="0-0"]')!);
     expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toHaveTextContent("바위");
-    expect(within(screen.getByRole("region", { name: "오브젝트 목록" }))
-      .getByRole("button", { name: /바위.*1번째/ })).toHaveAttribute("aria-pressed", "true");
+    expect(container.querySelector('[data-landscape-hit-id="0-0"]')).toHaveAttribute("aria-pressed", "true");
 
     rerender(<ControlledLandscape objects={[]} />);
     expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
-    expect(screen.getByRole("region", { name: "오브젝트 목록" }))
-      .toHaveTextContent("아직 생성된 오브젝트가 없습니다.");
+    expect(screen.queryByRole("region", { name: "오브젝트 목록" })).not.toBeInTheDocument();
   });
 });
 

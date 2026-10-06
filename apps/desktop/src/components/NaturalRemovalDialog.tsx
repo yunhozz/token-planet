@@ -100,7 +100,7 @@ export function NaturalRemovalDialog({
       }}
     >
       <p className="cosmetic-shop-kicker">
-        생성 시대: {eraName ?? "확인 필요"}{validTarget && ` · ${target.ordinal + 1}번째 개체`}
+        생성 시대: {eraName ?? "확인 필요"}
       </p>
       <h3 id={titleId}>{itemName} 제거 확인</h3>
       {baseCost !== null
