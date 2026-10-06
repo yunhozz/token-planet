@@ -8,6 +8,7 @@
 
 - 기본 도로, 지선, 차선을 전 시대 풍경 장식에서 제거한다. 자연 하천 등 도로가 아닌 풍경은 보존한다.
 - 네 오브젝트 종류를 상세·홈·그룹 화면의 렌더링, hit area/선택, 개수 배지, 신규 오브젝트 애니메이션과 대화에서 제외한다.
+- 상세 화면의 ‘최근 생성’ 라벨도 숨김 종류를 표시하지 않게 하되 원본 오브젝트 기록과 성장 수치는 보존한다.
 - 원본 오브젝트를 사용해 layout과 bounds를 계산한 뒤 표시만 필터링한다. 다른 오브젝트의 좌표, 지형 크기, 카메라는 유지한다.
 - 숨김 오브젝트가 선택된 상태라면 선택 ID만 정리하고 카메라를 바꾸지 않는다.
 - Rust 및 서버의 canonical 생성, SQLite·snapshot 저장, 성장 수치와 기존 변경을 건드리지 않는다.
@@ -44,5 +45,7 @@
 - `apps/desktop/src/components/PlanetScene.tsx`
 - `apps/desktop/src/components/__tests__/PlanetLandscape.test.tsx`
 - `apps/desktop/src/components/__tests__/PlanetScene.test.tsx`
+- `apps/desktop/src/App.tsx`
+- `apps/desktop/src/__tests__/App.test.tsx`
 
 `PlanetObjectSprite.tsx`의 기존 그림 개선은 유지하며, 화면 표시 정책으로 해당 종류의 사용을 차단한다.
