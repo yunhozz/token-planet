@@ -308,7 +308,7 @@ class WorkflowAndReadmeTests(unittest.TestCase):
         self.assertIn("${{ runner.temp }}/supabase-migration-results/*.log", workflow)
         self.assertNotIn("${{ runner.temp }}/supabase-migration-results/\n", workflow)
         guard = workflow.index("name: Verify local Docker endpoint")
-        image_pull = workflow.index("docker pull public.ecr.aws/supabase/postgres:17.6.1.171")
+        image_pull = workflow.index("bash supabase/ci/pull-image.sh public.ecr.aws/supabase/postgres:17.6.1.171")
         replay = workflow.index("bash supabase/ci/run.sh")
         self.assertLess(guard, image_pull)
         self.assertLess(image_pull, replay)
