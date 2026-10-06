@@ -659,3 +659,51 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
   .shop-selected-preview { grid-template-columns: minmax(80px, 100px) minmax(0, 1fr); gap: 7px; padding: 6px; }
   .shop-selected-preview-art { height: 68px; }
 }
+
+/* The transparent surface lets the macOS Popover material show through. */
+.app-shell--macos-popover {
+  color-scheme: light dark;
+  --paper: CanvasText;
+  --muted: color-mix(in srgb, CanvasText 65%, transparent);
+  --gold: CanvasText;
+  --mint: #30b957;
+  --rule: color-mix(in srgb, CanvasText 18%, transparent);
+  font-family: -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
+  color: CanvasText;
+  background: transparent;
+  border-color: color-mix(in srgb, CanvasText 15%, transparent);
+  box-shadow: none;
+  overflow: visible;
+}
+.app-shell--macos-popover .world-layout { display: flex; flex-direction: column; overflow: visible; }
+.app-shell--macos-popover .world-layout > * { flex-shrink: 0; }
+.app-shell--macos-popover .brand { font-family: inherit; }
+.app-shell--macos-popover .icon-button { border: 1px solid var(--rule); border-radius: 50%; background: color-mix(in srgb, CanvasText 7%, transparent); }
+.app-shell--macos-popover .planet-scene-canvas { width: min(100%, 160px, max(60px, calc(100vh - 540px))); }
+.app-shell--macos-popover .planet-caption { font-size: 14px; }
+.app-shell--macos-popover .planet-summary { margin: 4px 0 8px; }
+.app-shell--macos-popover .planet-summary-heading { flex-direction: row; gap: 8px; }
+.app-shell--macos-popover .planet-summary-heading h1 { font-size: 18px; }
+.app-shell--macos-popover .summary-era { flex: none; font-size: 12px; }
+.app-shell--macos-popover .summary-era strong { font-size: 14px; }
+.app-shell--macos-popover .summary-token { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); padding-top: 6px; }
+.app-shell--macos-popover .summary-token .ledger-label { font-size: 14px; }
+.app-shell--macos-popover .summary-token .ledger-value { font-size: 24px; overflow-wrap: anywhere; }
+.app-shell--macos-popover .stage-progress--summary { margin: 6px 0 8px; font-size: 12px; }
+.app-shell--macos-popover .progress-track { padding: 0; border: 0; border-radius: 6px; background: color-mix(in srgb, CanvasText 12%, transparent); }
+.app-shell--macos-popover .progress-track span { border-radius: inherit; background: #30b957; }
+.app-shell--macos-popover .detail-open-button { min-height: 44px; padding: 7px 10px; border: 0; border-radius: 9px; color: white; background: #007aff; font-weight: 600; }
+.app-shell--macos-popover .usage-summary { padding: 8px 0; border-top-width: 1px; }
+.app-shell--macos-popover .usage-heading h2 { font-size: 16px; }
+.app-shell--macos-popover .usage-number { font-size: 24px; margin: 2px 0; }
+.app-shell--macos-popover .usage-footnote, .app-shell--macos-popover .incomplete-label { font-size: 12px; }
+.app-shell--macos-popover .source-list { margin-top: 0; border-color: var(--rule); }
+.app-shell--macos-popover .source-row-wrap { padding: 3px 0; border-color: var(--rule); }
+.app-shell--macos-popover .source-row { min-height: 40px; }
+.app-shell--macos-popover .source-name, .app-shell--macos-popover .source-state, .app-shell--macos-popover .source-count { font-size: 12px; }
+.app-shell--macos-popover .bottom-actions { position: static; background: transparent; padding: 6px 0 0; margin-top: auto; }
+.app-shell--macos-popover .sync-status { font-size: 12px; }
+.app-shell--macos-popover .error-note { margin-top: 6px; padding: 6px; border-radius: 8px; color: CanvasText; background: color-mix(in srgb, #ff453a 12%, transparent); }
+.app-shell--macos-popover .error-retry { border-radius: 6px; color: CanvasText; background: color-mix(in srgb, CanvasText 8%, transparent); }
+.app-shell--compact-popover .planet-scene-canvas { width: min(100%, var(--popup-scene-width, 160px), max(0px, calc(100vh - 350px))); }
+.app-shell--compact-popover .planet-summary { margin-bottom: 0; }

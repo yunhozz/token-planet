@@ -17,6 +17,7 @@ import { UsageSummary } from "./components/UsageSummary";
 import { WorldCommunity } from "./components/WorldCommunity";
 import { ShopPanel, type ShopPanelPreview } from "./components/ShopPanel";
 import { ShopProductThumbnail } from "./components/ShopProductThumbnail";
+import { useCompactPopup } from "./hooks/useCompactPopup";
 import { useShopActions } from "./hooks/useShopActions";
 import { sharing, type SharingState, type WorldMember } from "./lib/sharing";
 import type { Agent, GrowthJournal as GrowthJournalData, NaturalObjectKey, PlanetAvatar, ShopActionResult, ShopQuote, ShopRequest, ShopState, WorldSnapshot } from "./types/usage";
@@ -115,6 +116,8 @@ function App() {
   featureScreenRef.current = featureScreen;
   const [snapshot, setSnapshot] = useState<WorldSnapshot | null>(null);
   const [detail, setDetail] = useState(initialFeatureScreen !== "planet");
+  const popupRef = useRef<HTMLElement | null>(null);
+  const compactHeight = useCompactPopup(popupRef, !detail && navigator.platform.startsWith("Mac") && Boolean(snapshot?.planet.profile));
   const [detailTab, setDetailTab] = useState<"planet" | "group">("planet");
   const [planetExplorationEntry, setPlanetExplorationEntry] = useState<{ context: string; value: PlanetExplorationState } | null>(null);
   const detailTabRefs = useRef<(HTMLButtonElement | null)[]>([]);
@@ -1019,8 +1022,11 @@ function App() {
     );
   }
 
+  const macosPopup = !detail && navigator.platform.startsWith("Mac");
+  const compactPopup = macosPopup && compactHeight;
+
   return (
-    <main className={`app-shell ${detail ? "app-shell--detail" : "app-shell--popover"}`} aria-label={detail ? undefined : "행성 팝오버"}>
+    <main ref={popupRef} className={`app-shell ${detail ? "app-shell--detail" : "app-shell--popover"}${macosPopup ? " app-shell--macos-popover" : ""}${compactPopup ? " app-shell--compact-popover" : ""}`} aria-label={detail ? undefined : "행성 팝오버"}>
       <header className="topbar">
         <div className="brand"><span className="brand-symbol" aria-hidden="true" /><span>Token Planet</span></div>
         {detail && <FeatureToolMenu active="planet" disabled={featureActionsBlocked} onNavigate={launchFeatureScreen} />}
@@ -1047,11 +1053,13 @@ function App() {
             </div>
             <button className="detail-open-button" type="button" onClick={() => void changeView()}>행성·그룹 자세히 보기</button>
           </section>
-          <UsageSummary snapshot={view} />
-          <div className="source-list" role="region" aria-label="수집 상태">
-            <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} />
-            <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} />
-          </div>
+          {!compactPopup && <>
+            <UsageSummary snapshot={view} />
+            <div className="source-list" role="region" aria-label="수집 상태">
+              <SourceStatus agent="codex" usage={view.usage.codex} health={view.usage.codex_source} />
+              <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} />
+            </div>
+          </>}
         </> : <>
           <div className="detail-navigation">
             <button className="text-button detail-return-button" type="button" onClick={() => void changeView()}>← 행성으로 돌아가기</button>
@@ -1178,7 +1186,7 @@ function App() {
           {planetError && <p className="error-note" role="alert">{planetError}</p>}
           {sharingError && <p className="error-note" role="alert">{sharingError}</p>}
         </div>
-        <footer className="bottom-actions"><SyncStatus status={shared?.sync_status ?? "local"} pending={shared?.pending ?? 0} lastSyncedAt={shared?.last_synced_at} onPause={() => changeSharing(() => sharing.pause(true))} onResume={() => { if (window.confirm("동기화를 재개하면 내 행성 상태를 서버에 다시 동기화합니다. 공동 세계에 참여 중이면 행성 모습, 이번 행성 토큰, 누적 토큰과 성장 점수가 멤버에게 공개됩니다.")) void changeSharing(() => sharing.pause(false)); }} /></footer>
+        {!compactPopup && <footer className="bottom-actions"><SyncStatus status={shared?.sync_status ?? "local"} pending={shared?.pending ?? 0} lastSyncedAt={shared?.last_synced_at} onPause={() => changeSharing(() => sharing.pause(true))} onResume={() => { if (window.confirm("동기화를 재개하면 내 행성 상태를 서버에 다시 동기화합니다. 공동 세계에 참여 중이면 행성 모습, 이번 행성 토큰, 누적 토큰과 성장 점수가 멤버에게 공개됩니다.")) void changeSharing(() => sharing.pause(false)); }} /></footer>}
       </div>
       {activeNaturalRemoval && currentShopState && <NaturalRemovalDialog
         target={activeNaturalRemoval.key}

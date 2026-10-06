@@ -4,3 +4,4 @@ pub mod popover;
 pub mod tray;
 #[cfg(target_os = "windows")]
 pub mod windows;
+pub mod window_appearance;
