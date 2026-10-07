@@ -42,6 +42,8 @@ const selectableObjects: PlanetObject[] = [
 function ControlledLandscape({
   objects = selectableObjects,
   stage = 2,
+  initialZoom = 1,
+  initialSelectedObjectId = null,
   avatar = "masculine",
   avatarEquipment,
   equippedCosmetics = [],
@@ -59,6 +61,8 @@ function ControlledLandscape({
 }: {
   objects?: PlanetObject[];
   stage?: number;
+  initialZoom?: number;
+  initialSelectedObjectId?: string | null;
   avatar?: "masculine" | "feminine";
   avatarEquipment?: AvatarEquipment;
   equippedCosmetics?: { slot_id: string; sku: string; version: number }[];
@@ -75,8 +79,8 @@ function ControlledLandscape({
   createShopRequestId?: () => string;
 }) {
   const [exploration, setExploration] = useState<PlanetExplorationState>(() => ({
-    camera: fitLandscape(planetLandscapeBounds(terrainObjects ?? objects)),
-    selectedObjectId: null,
+    camera: { ...fitLandscape(planetLandscapeBounds(terrainObjects ?? objects)), zoom: initialZoom },
+    selectedObjectId: initialSelectedObjectId,
   }));
 
   return (
@@ -353,30 +357,23 @@ describe("planet landscape artwork", () => {
     expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
   });
 
-  it("zooms, restores the full view, and pans with arrow keys only while the scene is focused", () => {
-    const { container } = render(<ControlledLandscape />);
+  it("omits magnification controls and pans with arrow keys while preserving zoom", () => {
+    const { container } = render(<ControlledLandscape initialZoom={2} />);
     const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
     const svg = container.querySelector(".planet-landscape-svg")!;
     const initialViewBox = svg.getAttribute("viewBox");
-
-    fireEvent.click(screen.getByRole("button", { name: "확대" }));
-    const zoomedViewBox = svg.getAttribute("viewBox");
-    expect(zoomedViewBox).not.toBe(initialViewBox);
-
+    for (const name of ["확대", "축소", "전체 보기"]) expect(screen.queryByRole("button", { name })).not.toBeInTheDocument();
     viewport.focus();
     fireEvent.keyDown(viewport, { key: "ArrowDown" });
-    expect(svg.getAttribute("viewBox")).not.toBe(zoomedViewBox);
-
-    fireEvent.click(screen.getByRole("button", { name: "전체 보기" }));
-    expect(svg.getAttribute("viewBox")).toBe(initialViewBox);
+    expect(svg.getAttribute("viewBox")).not.toBe(initialViewBox);
+    expect(container.querySelector(".planet-landscape")).toHaveAttribute("data-camera-zoom", "2");
   });
 
   it("pans by pointer and ends the drag on pointer cancellation", () => {
-    const { container } = render(<ControlledLandscape />);
+    const { container } = render(<ControlledLandscape initialZoom={2} />);
     const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
     const svg = container.querySelector(".planet-landscape-svg")!;
 
-    fireEvent.click(screen.getByRole("button", { name: "확대" }));
     const zoomedViewBox = svg.getAttribute("viewBox");
     fireEvent.pointerDown(viewport, { pointerId: 7, button: 0, clientX: 240, clientY: 220 });
     fireEvent.pointerMove(viewport, { pointerId: 7, clientX: 240, clientY: 170 });
@@ -392,11 +389,10 @@ describe("planet landscape artwork", () => {
 
   it("reclamps camera geometry after ResizeObserver reports a new viewport", () => {
     vi.stubGlobal("ResizeObserver", TestResizeObserver);
-    const { container } = render(<ControlledLandscape />);
+    const { container } = render(<ControlledLandscape initialZoom={2} />);
     const svg = container.querySelector(".planet-landscape-svg")!;
     const root = container.querySelector<HTMLElement>(".planet-landscape")!;
 
-    fireEvent.click(screen.getByRole("button", { name: "확대" }));
     expect(Number(root.dataset.cameraZoom)).toBeGreaterThan(1);
     act(() => TestResizeObserver.latest!.resize(360, 500));
 
@@ -419,10 +415,9 @@ describe("planet landscape artwork", () => {
       removeEventListener: () => {},
       dispatchEvent: () => false,
     } as MediaQueryList));
-    const { container } = render(<ControlledLandscape />);
+    const { container } = render(<ControlledLandscape initialZoom={2} />);
     const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
 
-    fireEvent.click(screen.getByRole("button", { name: "확대" }));
 
     expect(svg.style.transition).toBe("none");
     expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBeGreaterThan(1);
@@ -1059,7 +1054,7 @@ it("starts an unplaced selection card and saves a single click draft only on con
   expect(within(card).getByText("연못")).toBeInTheDocument();
   expect(within(card).getByText("배치 중")).toBeInTheDocument();
   expect(within(card).getByText("풍경을 클릭하거나 드래그해 위치를 고르세요. 방향키로 조정하고 Enter로 확정할 수 있습니다.")).toBeInTheDocument();
-  expect(within(card).getByRole("img", { name: "연못 미리보기" })).toBeInTheDocument();
+  expect(within(card.parentElement!).getByRole("img", { name: "연못 미리보기" })).toBeInTheDocument();
   expect(container.querySelector("[data-shop-preview-valid='true']")).toBeInTheDocument();
   const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
   const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
@@ -1075,14 +1070,13 @@ it("starts an unplaced selection card and saves a single click draft only on con
   expect(screen.getByRole("status")).toHaveTextContent("장식을 배치했습니다.");
 });
 
-it.each(["확대", "축소"])("keeps preview and submitted world coordinates equal after %s and viewport resize", async (zoom) => {
+it("keeps preview and submitted world coordinates equal after viewport resize", async () => {
   vi.stubGlobal("ResizeObserver", TestResizeObserver);
   const instance = landscapeInstance("zoom-draft");
   const state = landscapeShopState({ landscape_instances: [instance] });
   const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({ status: "placed", request_id: request.request_id, confirmed_quote: null, state }));
   const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
   act(() => TestResizeObserver.latest!.resize(620, 460));
-  fireEvent.click(screen.getByRole("button", { name: zoom }));
   const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
   const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
   const rect = { left: 17, top: 31, width: 620, height: 460 };
@@ -1269,21 +1263,26 @@ it.each([{ x: 160, y: 140 }, { x: 1100, y: 200 }, { x: 50, y: 200 }, { x: 1300, 
   expect(onShopAction).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: "place", x: point.x, y: point.y }));
 });
 
-it("reverses avatar progression only at the full route endpoint and retains facing", () => {
+it("walks vertically then diagonally without immediately reversing and scales transition time", () => {
   vi.useFakeTimers();
-  vi.spyOn(Math,"random").mockReturnValue(0);
+  let calls = 0;
+  vi.spyOn(Math, "random").mockImplementation(() => ++calls === 4 ? 1 - Number.EPSILON : 0);
   try {
-    const route=landscapeAvatarRoute(layoutLandscape(selectableObjects).bounds);
-    const {container,unmount}=render(<ControlledLandscape />);
-    const avatar=container.querySelector(".planet-landscape-avatar")!;
-    act(()=>vi.advanceTimersByTime(1500+1800*(route.length-2)));
-    expect(avatar).toHaveAttribute("transform",`translate(${route[route.length - 1].x} ${route[route.length - 1].y})`);
-    act(()=>vi.advanceTimersByTime(1800));
-    expect(avatar).toHaveAttribute("transform",`translate(${route[route.length - 2].x} ${route[route.length - 2].y})`);
-    expect(container.querySelector(".planet-landscape-avatar-sprite")).toHaveClass("avatar-sprite--facing-left");
+    const { container, unmount } = render(<ControlledLandscape />);
+    const avatar = container.querySelector<SVGGElement>(".planet-landscape-avatar")!;
+    act(() => vi.advanceTimersByTime(1500));
+    const [x, y] = avatar.getAttribute("transform")!.match(/[\d.]+/g)!.map(Number);
+    expect(x).toBe(0);
+    expect(y).toBeGreaterThan(0);
+    const duration = Number(avatar.style.getPropertyValue("--avatar-step-ms").replace("ms", ""));
+    expect(duration).toBeLessThan(300);
+    act(() => vi.advanceTimersByTime(duration + 1500));
+    const [nextX, nextY] = avatar.getAttribute("transform")!.match(/[\d.]+/g)!.map(Number);
+    expect(nextX).toBeGreaterThan(0);
+    expect(nextY).toBe(0);
     unmount();
     expect(vi.getTimerCount()).toBe(0);
-  } finally {vi.useRealTimers();vi.restoreAllMocks();}
+  } finally { vi.useRealTimers(); vi.restoreAllMocks(); }
 });
 
 it("pauses avatar timers while the document is hidden and resumes from the same point", () => {
@@ -1306,4 +1305,153 @@ it("pauses avatar timers while the document is hidden and resumes from the same 
     unmount();
     expect(vi.getTimerCount()).toBe(0);
   } finally {delete (document as unknown as {hidden?:boolean}).hidden;vi.useRealTimers();vi.restoreAllMocks();}
+});
+
+function LinkedSelectionLandscape({ pending = false }: { pending?: boolean }) {
+  const [instanceId, setInstanceId] = useState<string | null>(null);
+  const instance = landscapeInstance("shared-card");
+  const state = landscapeShopState({ landscape_instances: [instance], placements: [{ instance_id: instance.instance_id, cycle_id: "cycle-1", x: 400, y: 200, version: 0 }] });
+  return <ControlledLandscape shopState={state} selectedLandscapeInstanceId={instanceId} onSelectLandscapeInstance={setInstanceId}
+    onShopAction={async () => null} onRequestNaturalRemoval={() => {}}
+    pendingShopAction={pending ? { request: { kind: "retrieve", request_id: "pending", cycle_id: "cycle-1", instance_id: instance.instance_id, expected_version: 0 }, status: "submitting", error: null } : null} />;
+}
+
+it("uses one bottom card when switching between natural and purchased objects", () => {
+  const { container } = render(<LinkedSelectionLandscape />);
+  const natural = container.querySelector('[data-landscape-object-id="0-0"]')!;
+  const shop = container.querySelector('[data-shop-instance-id="shared-card"]')!;
+  fireEvent.click(natural);
+  expect(screen.getByRole("button", { name: "자연물 제거" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "위치 이동" })).not.toBeInTheDocument();
+  fireEvent.click(shop);
+  expect(container.querySelectorAll(".planet-landscape-object-detail")).toHaveLength(1);
+  const card = container.querySelector(".planet-landscape-object-detail")!;
+  expect(card.previousElementSibling).toHaveClass("planet-landscape-viewport");
+  expect(card).toContainElement(screen.getByRole("button", { name: "위치 이동" }));
+  expect(card).toContainElement(screen.getByRole("button", { name: "보관함으로" }));
+  expect(screen.queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
+  expect(card.querySelector(".planet-landscape-object-preview")).toBeInTheDocument();
+  fireEvent.keyDown(natural, { key: "Enter" });
+  expect(container.querySelectorAll(".planet-landscape-object-detail")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "자연물 제거" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "보관함으로" })).not.toBeInTheDocument();
+});
+
+it("blocks natural and purchased selection changes during a pending shop request", () => {
+  const { container, rerender } = render(<LinkedSelectionLandscape />);
+  fireEvent.click(container.querySelector('[data-shop-instance-id="shared-card"]')!);
+  rerender(<LinkedSelectionLandscape pending />);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
+  expect(screen.queryByRole("button", { name: "자연물 제거" })).not.toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "위치 이동" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "장식 선택 닫기" })).toBeDisabled();
+});
+
+it("clears natural selection and its old card for an externally selected unplaced decoration", () => {
+  const instance = landscapeInstance("external-unplaced");
+  const state = landscapeShopState({ landscape_instances: [instance] });
+  const { container, rerender } = render(<ControlledLandscape shopState={state} onShopAction={async () => null} />);
+  fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
+  rerender(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={async () => null} />);
+  expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
+  expect(container.querySelectorAll(".planet-landscape-object-detail")).toHaveLength(1);
+  expect(screen.getByRole("button", { name: "배치 확정" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "위치 이동" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "보관함으로" })).not.toBeInTheDocument();
+});
+
+it("clears the selected decoration identity when its canonical instance disappears", () => {
+  const instance = landscapeInstance("disappearing");
+  const onSelect = vi.fn();
+  const { rerender } = render(<ControlledLandscape shopState={landscapeShopState({ landscape_instances: [instance] })}
+    selectedLandscapeInstanceId={instance.instance_id} onSelectLandscapeInstance={onSelect} onShopAction={async () => null} />);
+  rerender(<ControlledLandscape shopState={landscapeShopState()} selectedLandscapeInstanceId={instance.instance_id}
+    onSelectLandscapeInstance={onSelect} onShopAction={async () => null} />);
+  expect(onSelect).toHaveBeenCalledWith(null);
+  expect(screen.queryByRole("group", { name: "선택한 장식" })).not.toBeInTheDocument();
+});
+
+it("clears selected identity across account context changes even when the instance id is reused", () => {
+  const instance = landscapeInstance("same-id");
+  const onSelect = vi.fn();
+  const own = landscapeShopState({ landscape_instances: [instance] });
+  const { rerender } = render(<ControlledLandscape shopState={own} selectedLandscapeInstanceId={instance.instance_id}
+    onSelectLandscapeInstance={onSelect} onShopAction={async () => null} />);
+  rerender(<ControlledLandscape shopState={{ ...own, account_id: "other-account" }} selectedLandscapeInstanceId={instance.instance_id}
+    onSelectLandscapeInstance={onSelect} onShopAction={async () => null} />);
+  expect(onSelect).toHaveBeenCalledWith(null);
+});
+
+it.each([0, 1, 2, 3, 4])("renders noninteractive layered pixel scenery and textured terrain for era %s", (stage) => {
+  const { container } = render(<ControlledLandscape stage={stage} objects={[]} />);
+  expect(container.querySelectorAll("[data-landscape-background-layer]")).toHaveLength(3);
+  expect(container.querySelector("[data-landscape-ground-layer='grass-edge']")).toBeInTheDocument();
+  expect(container.querySelector("[data-landscape-ground-layer='soil']")).toBeInTheDocument();
+  const texture = container.querySelector("[data-landscape-ground-layer='texture']")!;
+  expect(texture.querySelectorAll("[data-landscape-world-cell]").length).toBeGreaterThan(0);
+  expect(texture.closest("[aria-hidden='true']")).toHaveAttribute("pointer-events", "none");
+});
+
+it("keeps shared world texture cells identical through two-axis panning and caps rendering to visible terrain", () => {
+  const bounds = { x: 0, y: 0, width: 1420, height: 548 };
+  const firstBox = { x: 0, y: 0, width: 800, height: 400 };
+  const scenery = (height: number, viewBox = firstBox) => <svg><PlanetLandscapeDecorations stage={2}
+    bounds={{ ...bounds, height }} viewBox={viewBox} equippedCosmetics={[]} /></svg>;
+  const { container, rerender } = render(scenery(548));
+  const cells = () => new Map([...container.querySelectorAll("[data-landscape-world-cell]")]
+    .map(node => [node.getAttribute("data-landscape-world-cell"), node.outerHTML]));
+  const original = cells();
+  expect(original.size).toBeGreaterThan(0);
+  rerender(scenery(50000));
+  expect(cells()).toEqual(original);
+  rerender(scenery(50000, { ...firstBox, x: 128, y: 72 }));
+  const panned = cells();
+  const shared = [...original.keys()].filter(key => panned.has(key));
+  expect(shared.length).toBeGreaterThan(0);
+  for (const key of shared) expect(panned.get(key)).toBe(original.get(key));
+  expect(panned.size).toBeLessThanOrEqual(original.size + 16);
+});
+
+it("keeps the saving object's card and draft when another selection is injected during pending", () => {
+  const a = landscapeInstance("saving-a"), b = landscapeInstance("injected-b");
+  const state = landscapeShopState({ landscape_instances: [a, b] });
+  const onShopAction = async () => null;
+  const { container, rerender } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={a.instance_id} onShopAction={onShopAction} />);
+  const before = container.querySelector("[data-shop-preview-instance-id]")!.getAttribute("transform");
+  rerender(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={b.instance_id} onShopAction={onShopAction}
+    pendingShopAction={{ request: { kind: "place", request_id: "saving", cycle_id: "cycle-1", instance_id: a.instance_id, expected_version: 0, x: 400, y: 200 }, status: "submitting", error: null }} />);
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-instance-id", a.instance_id);
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("transform", before);
+  expect(screen.getByRole("button", { name: "배치 확정" })).toBeDisabled();
+});
+
+it.each([null, "0-0"])("synchronizes the initial pending target with natural selection %s and selects B only after a fresh inventory click", (initialNaturalId) => {
+  const a = landscapeInstance("mount-saving-a"), b = landscapeInstance("mount-other-b", "land_thin_ring");
+  const state = landscapeShopState({ landscape_instances: [a, b], placements: [{ instance_id: a.instance_id, cycle_id: "cycle-1", x: 400, y: 200, version: 0 }] });
+  function PendingSelectionParent({ pending }: { pending: boolean }) {
+    const [selectedId, setSelectedId] = useState<string | null>(b.instance_id);
+    return <>
+      <ControlledLandscape shopState={state} selectedLandscapeInstanceId={selectedId} initialSelectedObjectId={initialNaturalId}
+        onSelectLandscapeInstance={setSelectedId} onShopAction={async () => null}
+        pendingShopAction={pending ? { request: { kind: "place", request_id: "mount-saving", cycle_id: "cycle-1", instance_id: a.instance_id, expected_version: 0, x: 500, y: 200 }, status: "submitting", error: null } : null} />
+      <output aria-label="부모 선택 상태">{selectedId}</output>
+      <button type="button" disabled={pending} onClick={() => setSelectedId(b.instance_id)}>보관함의 얇은 고리 선택</button>
+    </>;
+  }
+  const { container, rerender } = render(<PendingSelectionParent pending />);
+  expect(screen.getByLabelText("부모 선택 상태")).toHaveTextContent(a.instance_id);
+  expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
+  const card = screen.getByRole("group", { name: "선택한 장식" });
+  expect(within(card).getByRole("heading", { name: "연못" })).toBeInTheDocument();
+  expect(within(card).queryByRole("heading", { name: "얇은 고리" })).not.toBeInTheDocument();
+  expect(container.querySelector(`[data-shop-instance-id="${a.instance_id}"]`)).toHaveAttribute("aria-pressed", "true");
+  expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+  rerender(<PendingSelectionParent pending={false} />);
+  expect(screen.getByLabelText("부모 선택 상태")).toHaveTextContent(a.instance_id);
+  expect(within(screen.getByRole("group", { name: "선택한 장식" })).getByRole("heading", { name: "연못" })).toBeInTheDocument();
+  expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "보관함의 얇은 고리 선택" }));
+  expect(screen.getByLabelText("부모 선택 상태")).toHaveTextContent(b.instance_id);
+  expect(within(screen.getByRole("group", { name: "선택한 장식" })).getByRole("heading", { name: "얇은 고리" })).toBeInTheDocument();
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-instance-id", b.instance_id);
 });

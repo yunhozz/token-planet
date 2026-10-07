@@ -1,7 +1,6 @@
 import type { LandscapeBounds } from "./planetLandscapeLayout";
 
 export type AvatarRoutePoint = { x: number; y: number };
-export type AvatarRouteProgress = { index: number; direction: 1 | -1 };
 
 function stops(origin: number, span: number, gap: number): number[] {
   const intervals = Math.ceil(span / gap);
@@ -17,8 +16,22 @@ export function landscapeAvatarRoute(bounds: LandscapeBounds): AvatarRoutePoint[
   return ys.flatMap((y, row) => (row % 2 ? [...xs].reverse() : xs).map((x) => ({ x, y })));
 }
 
-export function advanceLandscapeAvatarRoute(length: number, progress: AvatarRouteProgress): AvatarRouteProgress {
-  if (length <= 1) return { index: 0, direction: progress.direction };
-  const direction = progress.index === 0 ? 1 : progress.index === length - 1 ? -1 : progress.direction;
-  return { index: progress.index + direction, direction };
+/** Choose a neighboring grid point; do not retrace the last step if another neighbor exists. */
+export function nextLandscapeAvatarPoint(
+  points: readonly AvatarRoutePoint[],
+  currentIndex: number,
+  previousIndex: number | null,
+  random: () => number = Math.random,
+): number {
+  if (!Number.isInteger(currentIndex) || !points[currentIndex]) return 0;
+  const current = points[currentIndex];
+  const neighbors = points.flatMap((point, index) => index !== currentIndex
+    && Math.abs(point.x - current.x) <= 48 + 1e-9
+    && Math.abs(point.y - current.y) <= 30 + 1e-9 ? [index] : []);
+  const alternatives = neighbors.filter(index => index !== previousIndex);
+  const candidates = alternatives.length ? alternatives : neighbors;
+  if (!candidates.length) return currentIndex;
+  const value = random();
+  const fraction = Number.isFinite(value) ? Math.max(0, Math.min(1 - Number.EPSILON, value)) : 0;
+  return candidates[Math.floor(fraction * candidates.length)];
 }

@@ -13,6 +13,8 @@ type Props = {
 
 const SKY_COLORS = ["#23445b", "#28475a", "#304456", "#343b50", "#263c59"];
 const DISTANT_COLORS = ["#32656a", "#3e6b65", "#59685d", "#56535c", "#3e5968"];
+const SOIL_COLORS = ["#385f59", "#5d694e", "#67654b", "#514d4a", "#3c5554"];
+const FAR_COLORS = ["#486575", "#506c75", "#5c6c74", "#565c70", "#465c76"];
 const GROUND_COLORS = ["#5f967f", "#7c9b65", "#8a9b62", "#796d63", "#63837a"];
 const RECOGNIZED_COSMETICS = new Set([
   "star_cluster", "aurora", "thin_ring", "double_ring", "flag", "crystal_tower",
@@ -47,7 +49,10 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
   const emblemY = ringPlacement.y + ringPlacement.height / 2;
   const distantCells = visibleCells(viewBox, 360);
   const starCells = visibleCells(viewBox, 145);
-  const grassCells = visibleCells(viewBox, 260);
+  const textureColumns = visibleCells(viewBox, 128).filter(cell => cell * 128 < bounds.x + bounds.width && (cell + 1) * 128 > bounds.x);
+  const firstRow = Math.max(Math.floor(bounds.y / 72), Math.floor(viewBox.y / 72) - 1);
+  const lastRow = Math.min(Math.floor((bounds.y + bounds.height - 1) / 72), Math.floor((viewBox.y + viewBox.height) / 72) + 1);
+  const textureRows = Array.from({ length: Math.max(0, lastRow - firstRow + 1) }, (_, index) => firstRow + index);
   const cloudCells = visibleCells(viewBox, 390);
   const skyCosmeticX = cosmeticLandscapeBounds(bounds, "sky", "star_cluster").x;
   const hasCosmetic = (slotId: string, styleId: string) => equippedCosmetics.some((item) =>
@@ -63,10 +68,13 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
   const hasRingEmblem = ["thin_ring", "double_ring", "moonlets"].some((styleId) => hasCosmetic("ring", styleId));
 
   return (
-    <g aria-hidden="true">
+    <g aria-hidden="true" pointerEvents="none" shapeRendering="crispEdges">
       <rect className="planet-landscape-sky" x={viewBox.x} y={viewBox.y} width={viewBox.width} height={viewBox.height} fill={SKY_COLORS[era]} />
-      <rect x={viewBox.x} y={groundTop - 104} width={viewBox.width} height="104" fill="#a6d9ce" opacity=".04" />
-      <rect x={viewBox.x} y={groundTop - 56} width={viewBox.width} height="56" fill="#f1cf89" opacity=".07" />
+      <g data-landscape-background-layer="sky-bands">
+        <rect x={viewBox.x} y={groundTop - 176} width={viewBox.width} height="72" fill={FAR_COLORS[era]} opacity=".25" />
+        <rect x={viewBox.x} y={groundTop - 104} width={viewBox.width} height="104" fill="#a6d9ce" opacity=".12" />
+        <rect x={viewBox.x} y={groundTop - 56} width={viewBox.width} height="56" fill="#f1cf89" opacity=".12" />
+      </g>
       <g className="planet-landscape-stars" fill="#e8d59d">
         {starCells.map((cell) => {
           const x = cell * 145 + 27;
@@ -87,14 +95,14 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
           </g>;
         })}
       </g>
-      <g className="planet-landscape-far-hills" fill="#496a70" opacity=".42">
+      <g className="planet-landscape-far-hills" data-landscape-background-layer="far-ridges" fill={FAR_COLORS[era]} opacity=".7">
         {visibleCells(viewBox, 500).map((cell) => {
           const x = cell * 500;
-          const rise = 45 + positiveModulo(cell * 19, 35);
-          return <path key={cell} d={`M ${x} ${groundTop} l 95 -${rise} l 58 ${rise * 0.42} l 88 -${rise * 0.72} l 92 ${rise * 0.46} l 82 -${rise * 0.31} l 85 ${rise * 0.6} V ${groundTop} Z`} />;
+          const rise = 52 + positiveModulo(cell * 19, 35);
+          return <path key={cell} d={`M ${x} ${groundTop} v -${rise} h 64 v -16 h 72 v 8 h 56 v -24 h 64 v 16 h 80 v 20 h 64 v 12 h 100 V ${groundTop} Z`} />;
         })}
       </g>
-      <g className="planet-landscape-distant-ground" fill={DISTANT_COLORS[era]}>
+      <g className="planet-landscape-distant-ground" data-landscape-background-layer="near-ridges" fill={DISTANT_COLORS[era]}>
         {distantCells.map((cell) => {
           const x = cell * 360;
           const towerHeight = 18 + positiveModulo(cell * 17, 21);
@@ -103,8 +111,20 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
         })}
       </g>
       <rect className="planet-landscape-ground" x={viewBox.x} y={groundTop} width={viewBox.width} height={groundBottom - groundTop} fill={GROUND_COLORS[era]} />
-      <rect x={viewBox.x} y={groundTop} width={viewBox.width} height="18" fill={DISTANT_COLORS[era]} opacity=".32" />
-      <path d={`M ${viewBox.x} ${groundTop + 36} h ${viewBox.width} v 17 h -${viewBox.width} Z`} fill="#b4bd76" opacity=".16" />
+      <g data-landscape-ground-layer="grass-edge">
+        <rect x={viewBox.x} y={groundTop} width={viewBox.width} height="8" fill="#c1cc91" opacity=".32" />
+        {visibleCells(viewBox, 64).map(cell => {
+          const x = cell * 64;
+          const drop = 4 + positiveModulo(cell * 13, 3) * 2;
+          return <path key={cell} d={`M ${x} ${groundTop + 8} h 16 v ${drop} h 12 v -4 h 20 v 4 h 16 v -${drop} Z`} fill={SOIL_COLORS[era]} opacity=".3" />;
+        })}
+      </g>
+      <g data-landscape-ground-layer="soil">
+        <rect x={viewBox.x} y={bounds.y + bounds.height - 18} width={viewBox.width} height={Math.max(18, groundBottom - bounds.y - bounds.height + 18)} fill={SOIL_COLORS[era]} />
+        {visibleCells(viewBox, 96).map(cell => <path key={cell}
+          d={`M ${cell * 96 + 12} ${bounds.y + bounds.height - 12} h 24 v 4 h -24 Z M ${cell * 96 + 55} ${bounds.y + bounds.height - 5} h 12 v 3 h -12 Z`}
+          fill={GROUND_COLORS[era]} opacity=".5" />)}
+      </g>
       {era >= 1 && era <= 2 && <g data-landscape-decoration="cultivated-fields" fill="#a2ad6c" opacity=".8" shapeRendering="crispEdges">
         {Array.from({ length: Math.ceil(viewBox.width / 280) + 1 }, (_, index) => {
           const x = Math.floor(viewBox.x / 280) * 280 + index * 280 + 78;
@@ -136,19 +156,26 @@ export function PlanetLandscapeDecorations({ stage, bounds, viewBox, equippedCos
           })}
         </g>
       )}
-      <g className="planet-landscape-ground-dressing" shapeRendering="crispEdges">
-        {grassCells.map((cell) => {
-          const x = cell * 260 + 42 + positiveModulo(cell * 17, 52);
-          const y = groundTop + 100 + positiveModulo(cell * 53, Math.max(80, Math.floor(bounds.height * 0.43)));
-          return <g key={cell} transform={`translate(${x} ${y})`} data-landscape-dressing="grass">
-            <path d="M0 8h31v3H0ZM8 13h39v2H8Z" fill="#294a49" opacity=".13" />
-            <g className={`planet-landscape-grass--${positiveModulo(cell, 3)}`}>
-              <path d="M3 8V4h2v2h3V1h2v7ZM16 9V5h2v2h3V3h2v6ZM31 11V7h2v2h3V5h2v6Z" fill="#88a56e" />
-              <path d="M8 1h2v5H8ZM21 3h2v4h-2ZM36 5h2v4h-2Z" fill="#b4bd76" opacity=".7" />
-            </g>
-            <path d="M1 11h6M13 14h9M29 15h6" stroke="#bac394" strokeWidth="1" opacity=".3" />
+      <g className="planet-landscape-ground-dressing" data-landscape-ground-layer="texture" shapeRendering="crispEdges">
+        {textureRows.flatMap(row => textureColumns.map(column => {
+          // Integer world cells keep texture stable as the camera moves or the terrain grows.
+          const seed = positiveModulo(column * 73 + row * 157, 997);
+          const x = column * 128 + 12 + positiveModulo(seed, 64);
+          const y = row * 72 + 12 + positiveModulo(seed * 7, 32);
+          if (x < bounds.x || x + 44 > bounds.x + bounds.width || y < bounds.y + 18 || y + 18 > bounds.y + bounds.height - 18) return null;
+          const grass = seed % 3 !== 0;
+          return <g key={`${column}:${row}`} data-landscape-world-cell={`${column}:${row}`}
+            data-landscape-dressing={grass ? "grass" : "stone"} transform={`translate(${x} ${y})`}>
+            <path d="M0 12h28v3H0ZM12 16h32v2H12Z" fill={SOIL_COLORS[era]} opacity=".22" />
+            {grass ? <>
+              <path d="M4 12V7h3v3h5V3h3v9ZM23 14V9h3v2h5V6h3v8Z" fill={SOIL_COLORS[era]} opacity=".45" />
+              <path d="M12 3h3v6h-3ZM31 6h3v5h-3Z" fill="#c1cc91" opacity=".5" />
+            </> : <>
+              <path d="M5 10V6h6V3h10v3h7v7H5Z" fill={SOIL_COLORS[era]} opacity=".36" />
+              <path d="M11 5h9v3h-9ZM31 15h8v2h-8Z" fill="#c6c9ac" opacity=".45" />
+            </>}
           </g>;
-        })}
+        }))}
       </g>
       <g data-landscape-slot="sky" shapeRendering="crispEdges">
         {hasCosmetic("sky", "star_cluster") && <g data-cosmetic="star_cluster" data-cosmetic-selected={isSelected("sky", "star_cluster") || undefined} fill="#fff0ad">

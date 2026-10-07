@@ -172,7 +172,11 @@ it("opens the cosmetic shop in the current window and restores exploration on re
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
-  fireEvent.click(screen.getByRole("button", { name: "확대" }));
+  const initialViewBox = container.querySelector(".planet-landscape-svg")!.getAttribute("viewBox");
+  const viewport = screen.getByRole("group", { name: "행성 풍경 탐사" });
+  viewport.focus();
+  fireEvent.keyDown(viewport, { key: "ArrowDown" });
+  expect(container.querySelector(".planet-landscape-svg")!.getAttribute("viewBox")).not.toBe(initialViewBox);
   fireEvent.click(container.querySelector('[data-landscape-object-id="1-3"]')!);
   const originalViewBox = container.querySelector(".planet-landscape-svg")?.getAttribute("viewBox");
 
@@ -467,7 +471,11 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
   const initialZoom = Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom);
-  fireEvent.click(screen.getByRole("button", { name: "확대" }));
+  const initialViewBox = container.querySelector(".planet-landscape-svg")!.getAttribute("viewBox");
+  const viewport = screen.getByRole("group", { name: "행성 풍경 탐사" });
+  viewport.focus();
+  fireEvent.keyDown(viewport, { key: "ArrowDown" });
+  expect(container.querySelector(".planet-landscape-svg")!.getAttribute("viewBox")).not.toBe(initialViewBox);
   fireEvent.click(container.querySelector('[data-landscape-object-id="1-3"]')!);
   expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
   fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
@@ -489,6 +497,7 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
   await screen.findByRole("region", { name: "행성 풍경" });
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
   expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(initialZoom);
+  expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", initialViewBox);
   expect(container.querySelector('[data-landscape-object-id="1-3"]')).toHaveAttribute("aria-pressed", "false");
 });
 
@@ -510,7 +519,11 @@ it("clears exploration immediately while a world context is locked", async () =>
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("region", { name: "행성 풍경" });
   const initialZoom = Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom);
-  fireEvent.click(screen.getByRole("button", { name: "확대" }));
+  const initialViewBox = container.querySelector(".planet-landscape-svg")!.getAttribute("viewBox");
+  const viewport = screen.getByRole("group", { name: "행성 풍경 탐사" });
+  viewport.focus();
+  fireEvent.keyDown(viewport, { key: "ArrowDown" });
+  expect(container.querySelector(".planet-landscape-svg")!.getAttribute("viewBox")).not.toBe(initialViewBox);
   fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   expect(screen.getByRole("region", { name: "선택한 오브젝트" })).toBeInTheDocument();
 
@@ -518,6 +531,7 @@ it("clears exploration immediately while a world context is locked", async () =>
 
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
   expect(Number(container.querySelector<HTMLElement>(".planet-landscape")!.dataset.cameraZoom)).toBe(initialZoom);
+  expect(container.querySelector(".planet-landscape-svg")).toHaveAttribute("viewBox", initialViewBox);
   fireEvent.click(container.querySelector('[data-landscape-object-id="0-0"]')!);
   expect(screen.queryByRole("region", { name: "선택한 오브젝트" })).not.toBeInTheDocument();
 });
