@@ -11,7 +11,6 @@ const DEFAULT_VIEWPORT: LandscapeViewport = { width: 1200, height: 420 };
 const MIN_ZOOM = 1;
 const SPRITE_FOOTPRINT = 36;
 const MAX_SPRITE_VIEW_FRACTION = 0.65;
-const FOCUS_TARGET_FRACTION = 0.45;
 
 function finiteOr(value: number, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
@@ -162,17 +161,6 @@ export function landscapeViewBox(
   };
 }
 
-export function zoomLandscape(
-  bounds: LandscapeBounds,
-  viewport: LandscapeViewport,
-  camera: LandscapeCamera,
-  factor: number,
-): LandscapeCamera {
-  const current = normalizedCamera(camera, normalizeBounds(bounds));
-  const safeFactor = Number.isFinite(factor) && factor > 0 ? factor : 1;
-  return clampLandscapeCamera(bounds, viewport, { ...current, zoom: current.zoom * safeFactor });
-}
-
 export function focusLandscape(
   bounds: LandscapeBounds,
   viewport: LandscapeViewport,
@@ -182,16 +170,10 @@ export function focusLandscape(
   const safeBounds = normalizeBounds(bounds);
   const safeViewport = normalizeViewport(viewport);
   const safeTarget = normalizeBounds(target, safeBounds);
-  const fit = fitSize(safeBounds, safeViewport);
-  const zoom = Math.min(
-    (fit.width * FOCUS_TARGET_FRACTION) / safeTarget.width,
-    (fit.height * FOCUS_TARGET_FRACTION) / safeTarget.height,
-  );
 
   return clampLandscapeCamera(safeBounds, safeViewport, {
     ...normalizedCamera(camera, safeBounds),
     centerX: safeTarget.x + safeTarget.width / 2,
     centerY: safeTarget.y + safeTarget.height / 2,
-    zoom: Math.max(MIN_ZOOM, zoom),
   });
 }

@@ -30,15 +30,13 @@ import { PlanetObjectSprite } from "./PlanetObjectSprite";
 import { objectName, STAGE_NAMES } from "./PlanetScene";
 import { PlanetLandscapeDecorations } from "./PlanetLandscapeDecorations";
 import { styleIdForSku } from "./cosmeticStyles";
-import { landscapeAvatarRoute, advanceLandscapeAvatarRoute } from "./landscapeAvatarRoute";
+import { landscapeAvatarRoute, nextLandscapeAvatarPoint } from "./landscapeAvatarRoute";
 import { restDuration, stepDuration } from "./sceneMotion";
 import {
   clampLandscapeCamera,
-  fitLandscape,
   focusLandscape,
   landscapeViewBox,
   screenToLandscape,
-  zoomLandscape,
   type LandscapeCamera,
   type LandscapeViewport,
 } from "./planetLandscapeCamera";
@@ -194,7 +192,12 @@ export function PlanetLandscape({
   const viewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<ActiveDrag | null>(null);
   const shopDragRef = useRef<LandscapeShopDrag | null>(null);
-  const previousShopSelectionRef = useRef<string | null | undefined>(undefined);
+  const initialPendingInstanceId = pendingShopAction
+    && (pendingShopAction.request.kind === "place" || pendingShopAction.request.kind === "retrieve")
+    && pendingShopAction.request.cycle_id === cycleId
+    ? pendingShopAction.request.instance_id
+    : undefined;
+  const previousShopSelectionRef = useRef<string | null | undefined>(initialPendingInstanceId);
   const shopRequestGenerationRef = useRef(0);
   const shopRequestInFlightRef = useRef(false);
   const [viewport, setViewport] = useState(DEFAULT_VIEWPORT);
@@ -207,7 +210,7 @@ export function PlanetLandscape({
   const [documentVisible, setDocumentVisible] = useState(() => typeof document === "undefined" || !document.hidden);
   const [avatarPosition, setAvatarPosition] = useState(0);
   const avatarPositionRef = useRef(0);
-  const avatarDirectionRef = useRef<1 | -1>(1);
+  const avatarPreviousPositionRef = useRef<number | null>(null);
   const avatarCoordinateRef = useRef({ x: 0, y: 0 });
   const [avatarStepDuration, setAvatarStepDuration] = useState(380);
   const [avatarFacing, setAvatarFacing] = useState<"left" | "right">("right");
@@ -235,6 +238,7 @@ export function PlanetLandscape({
     : null;
   const activeShopAccountId = shopAccountId ?? activeShopState?.account_id ?? null;
   const shopContextIdentity = `${shopAccountId ?? ""}/${shopState?.account_id ?? ""}/${shopState?.current_cycle_id ?? ""}/${cycleId}`;
+  const previousShopContextRef = useRef(shopContextIdentity);
   const removedNaturalKeys = useMemo(() => new Set(
     activeShopState?.removed_natural_keys
       .filter((key) => key.cycle_id === cycleId)
@@ -269,11 +273,15 @@ export function PlanetLandscape({
       || left.placement.instance_id.localeCompare(right.placement.instance_id)),
   [activeShopState, cycleId, shopInstancesById, shopProductsBySku]);
   const stageName = STAGE_NAMES[stage] ?? STAGE_NAMES[4];
+  const shopSelectionPending = Boolean(pendingShopAction) || shopRequestPending;
+  const activeLandscapeInstanceId = shopSelectionPending && previousShopSelectionRef.current !== undefined
+    ? previousShopSelectionRef.current
+    : selectedLandscapeInstanceId;
   const selected = visibleNaturalPlacements.find((placement) => placement.id === exploration.selectedObjectId) ?? null;
-  const selectedShopPlacement = selectedLandscapeInstanceId
-    ? placedShopObjects.find(({ instance }) => instance.instance_id === selectedLandscapeInstanceId) ?? null
+  const selectedShopPlacement = activeLandscapeInstanceId
+    ? placedShopObjects.find(({ instance }) => instance.instance_id === activeLandscapeInstanceId) ?? null
     : null;
-  const selectedShopInstance = selectedLandscapeInstanceId ? shopInstancesById.get(selectedLandscapeInstanceId) : undefined;
+  const selectedShopInstance = activeLandscapeInstanceId ? shopInstancesById.get(activeLandscapeInstanceId) : undefined;
   const selectedShopProduct = selectedShopInstance ? shopProductsBySku.get(selectedShopInstance.sku) : undefined;
   const draftFailure = shopDraft && selectedShopProduct ? placementFailure(selectedShopProduct, shopDraft, layout.bounds) : null;
   const placementFailureMessage = draftFailure === "outside_zone" ? "장식이 배치 구역을 벗어났습니다. 다른 위치를 선택해 주세요."
@@ -328,6 +336,15 @@ export function PlanetLandscape({
   }, [activeShopAccountId, cycleId, shopContextIdentity]);
 
   useEffect(() => {
+    const changed = previousShopContextRef.current !== shopContextIdentity;
+    previousShopContextRef.current = shopContextIdentity;
+    if (changed || (selectedLandscapeInstanceId && !shopInstancesById.has(selectedLandscapeInstanceId))) {
+      if (selectedLandscapeInstanceId) onSelectLandscapeInstance?.(null);
+      if (exploration.selectedObjectId) onExplorationChange({ ...exploration, selectedObjectId: null });
+    }
+  }, [shopContextIdentity, selectedLandscapeInstanceId, shopInstancesById, onSelectLandscapeInstance, exploration, onExplorationChange]);
+
+  useEffect(() => {
     if (!pendingShopAction) return;
     shopDragRef.current = null;
     setShopDraft((current) => current ? { ...current, pointerId: null } : null);
@@ -350,7 +367,12 @@ export function PlanetLandscape({
   }, [shopDraft?.instanceId, shopDraft?.expectedVersion, shopInstancesById]);
 
   useEffect(() => {
+    if (activeLandscapeInstanceId && exploration.selectedObjectId) onExplorationChange({ ...exploration, selectedObjectId: null });
     if (previousShopSelectionRef.current === selectedLandscapeInstanceId) return;
+    if (shopSelectionPending && previousShopSelectionRef.current && shopInstancesById.has(previousShopSelectionRef.current)) {
+      onSelectLandscapeInstance?.(previousShopSelectionRef.current);
+      return;
+    }
     previousShopSelectionRef.current = selectedLandscapeInstanceId;
     shopDragRef.current = null;
     setShopDraft(null);
@@ -359,7 +381,7 @@ export function PlanetLandscape({
     if (selectedLandscapeInstanceId && !shopPlacementsById.has(selectedLandscapeInstanceId)) startKeyboardPlacement(selectedLandscapeInstanceId);
   // Selection starts a draft once; canonical version changes cancel rather than restart it.
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedLandscapeInstanceId]);
+  }, [selectedLandscapeInstanceId, shopSelectionPending]);
 
   useEffect(() => () => {
     shopRequestGenerationRef.current += 1;
@@ -372,6 +394,7 @@ export function PlanetLandscape({
       if (Math.hypot(point.x - current.x, point.y - current.y) < Math.hypot(avatarWalkPoints[closest].x - current.x, avatarWalkPoints[closest].y - current.y)) closest = index;
     });
     avatarPositionRef.current = closest;
+    avatarPreviousPositionRef.current = null;
     avatarCoordinateRef.current = avatarWalkPoints[closest] ?? { x: layout.bounds.x, y: layout.bounds.y };
     setAvatarPosition(closest);
     setAvatarWalking(false);
@@ -392,22 +415,23 @@ export function PlanetLandscape({
 
     const scheduleWalk = () => {
       movementTimer = window.setTimeout(() => {
-        let progress = { index: avatarPositionRef.current, direction: avatarDirectionRef.current };
+        let current = avatarPositionRef.current;
+        let previous = avatarPreviousPositionRef.current;
         const steps = 1 + Math.floor(Math.max(0, Math.min(1 - Number.EPSILON, Math.random())) * 5);
         const route = Array.from({ length: steps }, () => {
-          progress = advanceLandscapeAvatarRoute(avatarWalkPoints.length, progress);
-          return progress;
+          const next = nextLandscapeAvatarPoint(avatarWalkPoints, current, previous);
+          previous = current;
+          current = next;
+          return next;
         });
         const duration = stepDuration(Math.random);
-        setAvatarStepDuration(duration);
         let step = 0;
         walking = true;
         setAvatarWalking(true);
         setEyesClosed(false);
         const moveNext = () => {
           if (cancelled) return;
-          const nextProgress = route[step];
-          const next = nextProgress?.index;
+          const next = route[step];
           step += 1;
           if (next === undefined) {
             walking = false;
@@ -421,11 +445,15 @@ export function PlanetLandscape({
           if (previousX !== undefined && nextX !== undefined && previousX !== nextX) {
             setAvatarFacing(nextX < previousX ? "left" : "right");
           }
-          avatarDirectionRef.current = nextProgress.direction;
+          const from = avatarWalkPoints[previous];
+          const to = avatarWalkPoints[next];
+          const travelDuration = Math.max(1, duration * Math.hypot(to.x - from.x, to.y - from.y) / 48);
+          setAvatarStepDuration(travelDuration);
+          avatarPreviousPositionRef.current = previous;
           avatarPositionRef.current = next;
           avatarCoordinateRef.current = avatarWalkPoints[next];
           setAvatarPosition(next);
-          movementTimer = window.setTimeout(moveNext, duration);
+          movementTimer = window.setTimeout(moveNext, travelDuration);
         };
         moveNext();
       }, restDuration(Math.random));
@@ -508,7 +536,16 @@ export function PlanetLandscape({
     onExplorationChange({ ...exploration, camera });
   }
 
+  function selectShopInstance(instanceId: string) {
+    if (pendingShopAction || shopRequestPending || shopRequestInFlightRef.current) return;
+    onExplorationChange({ ...exploration, selectedObjectId: null });
+    onSelectLandscapeInstance?.(instanceId);
+  }
+
   function selectPlacement(placement: LandscapePlacement) {
+    if (pendingShopAction || shopRequestPending || shopRequestInFlightRef.current) return;
+    cancelShopPlacement();
+    onSelectLandscapeInstance?.(null);
     onExplorationChange({
       ...exploration,
       selectedObjectId: placement.id,
@@ -936,11 +973,6 @@ export function PlanetLandscape({
       data-camera-center-y={exploration.camera.centerY}
       data-camera-zoom={exploration.camera.zoom}
     >
-      <div className="planet-landscape-controls" role="group" aria-label="풍경 카메라 조작">
-        <button type="button" aria-label="축소" onClick={() => updateCamera(zoomLandscape(landscapeBounds, viewport, exploration.camera, 1 / 1.4))}>−</button>
-        <button type="button" aria-label="확대" onClick={() => updateCamera(zoomLandscape(landscapeBounds, viewport, exploration.camera, 1.4))}>+</button>
-        <button type="button" aria-label="전체 보기" onClick={() => updateCamera(fitLandscape(landscapeBounds))}>전체 보기</button>
-      </div>
       <div
         className={`planet-landscape-viewport${isDragging ? " is-dragging" : ""}${isShopDragging ? " is-shop-dragging" : ""}`}
         ref={viewportRef}
@@ -1007,7 +1039,7 @@ export function PlanetLandscape({
           </g>
           <g className="planet-landscape-shop-objects">
             {placedShopObjects.map(({ placement, instance, product }) => {
-              const isSelected = instance.instance_id === selectedLandscapeInstanceId;
+              const isSelected = instance.instance_id === activeLandscapeInstanceId;
               return (
                 <g
                   key={instance.instance_id}
@@ -1020,12 +1052,12 @@ export function PlanetLandscape({
                   aria-label={`${product.display_name}, 설치된 장식`}
                   aria-pressed={isSelected}
                   tabIndex={0}
-                  onClick={() => onSelectLandscapeInstance?.(instance.instance_id)}
+                  onClick={() => selectShopInstance(instance.instance_id)}
                   onKeyDown={(event) => {
                     if (event.key !== "Enter" && event.key !== " ") return;
                     event.preventDefault();
                     event.stopPropagation();
-                    onSelectLandscapeInstance?.(instance.instance_id);
+                    selectShopInstance(instance.instance_id);
                   }}
                 >
                   <LandscapeObjectSprite instance={instance} product={product} selected={isSelected} />
@@ -1083,7 +1115,8 @@ export function PlanetLandscape({
           </g>
         </svg>
       </div>
-      {selected && <div className="planet-landscape-object-detail">
+      {(selected || (selectedShopInstance && selectedShopProduct)) && <div className="planet-landscape-object-detail">
+        {selected ? <>
         <section
           className="planet-landscape-selection"
           role="region"
@@ -1133,14 +1166,16 @@ export function PlanetLandscape({
             <PlanetObjectSprite object={selected.object} x={0} y={0} scale={1} />
           </svg>
         </div>
-      </div>}
-      {selectedShopInstance && selectedShopProduct && <div className="planet-landscape-shop-selection" role="group" aria-label="선택한 장식" onKeyDown={(event) => {
+      </> : selectedShopInstance && selectedShopProduct ? <>
+      <section className="planet-landscape-selection planet-landscape-shop-selection" role="group" aria-label="선택한 장식" onKeyDown={(event) => {
         if (pendingShopAction || shopRequestPending || shopRequestInFlightRef.current) return;
         if (event.key === "Escape" && shopDraft) { event.preventDefault(); cancelShopPlacement(); }
       }}>
-        <ShopProductThumbnail product={selectedShopProduct} instance={selectedShopInstance} />
         <div className="planet-landscape-shop-selection-copy">
-          <h2>{selectedShopProduct.display_name}</h2>
+          <div className="planet-landscape-selection-heading">
+            <h2>{selectedShopProduct.display_name}</h2>
+            <button type="button" aria-label="장식 선택 닫기" disabled={Boolean(pendingShopAction) || shopRequestPending} onClick={() => { cancelShopPlacement(); onSelectLandscapeInstance?.(null); }}>닫기</button>
+          </div>
           <span className="planet-landscape-shop-state">{shopDraft ? "배치 중" : selectedShopPlacement ? "배치됨" : "보관 중"}</span>
           {shopDraft && <p>풍경을 클릭하거나 드래그해 위치를 고르세요. 방향키로 조정하고 Enter로 확정할 수 있습니다.</p>}
         </div>
@@ -1151,9 +1186,13 @@ export function PlanetLandscape({
           </> : <>
             <button type="button" disabled={Boolean(pendingShopAction) || shopRequestPending || !onShopAction} onClick={() => { startKeyboardPlacement(selectedShopInstance.instance_id); viewportRef.current?.focus(); }}>{selectedShopPlacement ? "위치 이동" : "배치 시작"}</button>
             {selectedShopPlacement && <button type="button" disabled={Boolean(pendingShopAction) || shopRequestPending || !onShopAction} onClick={() => retrieveShopInstance(selectedShopInstance.instance_id)}>보관함으로</button>}
-            <button type="button" aria-label="장식 선택 닫기" onClick={() => { cancelShopPlacement(); onSelectLandscapeInstance?.(null); }}>닫기</button>
           </>}
         </div>
+      </section>
+      <div className="planet-landscape-object-preview">
+        <ShopProductThumbnail product={selectedShopProduct} instance={selectedShopInstance} />
+      </div>
+      </> : null}
       </div>}
       {(shopPlacementNotice || shopDraft) && <p className="planet-landscape-shop-status" role="status">
         {shopRequestPending ? "장식을 저장하고 있습니다." : shopPlacementNotice ?? placementFailureMessage ?? "배치 확정 또는 Enter로 저장하세요. 취소 또는 Esc로 배치를 끝낼 수 있습니다."}

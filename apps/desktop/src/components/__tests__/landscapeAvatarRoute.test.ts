@@ -23,13 +23,24 @@ describe("full terrain avatar route", () => {
     if (!api.landscapeAvatarRoute) return;
     for (const bounds of [{ x: NaN,y:0,width:40,height:40 }, {x:0,y:0,width:23,height:30}, {x:0,y:0,width:24,height:29}, {x:0,y:0,width:Infinity,height:30}]) expect(api.landscapeAvatarRoute(bounds)).toEqual([]);
   });
-  it("visits every point and reverses only at endpoints without teleporting", () => {
-    expect(api.advanceLandscapeAvatarRoute).toBeTypeOf("function");
-    if (!api.advanceLandscapeAvatarRoute) return;
-    let progress: Progress = {index:0,direction:1}; const visited=[0];
-    for (let i=0;i<10;i++) { const next=api.advanceLandscapeAvatarRoute(6,progress); expect(Math.abs(next.index-progress.index)).toBe(1); if(next.direction !== progress.direction) expect([0,5]).toContain(progress.index); visited.push(next.index); progress=next; }
-    expect(visited).toEqual([0,1,2,3,4,5,4,3,2,1,0]);
-    expect(api.advanceLandscapeAvatarRoute(1,{index:0,direction:1}).index).toBe(0);
+  it("chooses each of the eight neighboring points without reversing when alternatives exist", () => {
+    const next = (route as unknown as { nextLandscapeAvatarPoint?: (points: Point[], current: number, previous: number | null, rng?: () => number) => number }).nextLandscapeAvatarPoint;
+    expect(next).toBeTypeOf("function");
+    if (!next) return;
+    const points = route.landscapeAvatarRoute({ x: 0, y: 0, width: 120, height: 93 });
+    const center = points.findIndex(p => p.x === 48 && p.y === 30);
+    const neighbors = points.map((_, i) => i).filter(i => i !== center);
+    neighbors.forEach((index, ordinal) => expect(next(points, center, null, () => ordinal / 8)).toBe(index));
+    for (let i = 0; i < 8; i++) expect(next(points, center, neighbors[0], () => i / 8)).not.toBe(neighbors[0]);
+    expect(next([], 0, null)).toBe(0);
+    expect(next([points[0]], 0, null)).toBe(0);
+    expect(next(points, -1, null)).toBe(0);
+    expect(next(points, .5, null)).toBe(0);
+    expect(next(points, 99, null)).toBe(0);
+    expect(next(points.slice(0, 2), 0, 1)).toBe(1);
+    for (const value of [-1, NaN, Infinity]) expect(next(points, center, null, () => value)).toBe(neighbors[0]);
+    expect(next(points, center, null, () => 0)).toBe(neighbors[0]);
+    expect(next(points, center, null, () => 1)).toBe(neighbors[7]);
   });
 });
 

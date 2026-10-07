@@ -5,7 +5,6 @@ import {
   focusLandscape,
   landscapeViewBox,
   screenToLandscape,
-  zoomLandscape,
 } from "../planetLandscapeCamera";
 import type { LandscapePoint, LandscapeViewportRect, ScreenPoint } from "../planetLandscapeCamera";
 import type { LandscapeBounds } from "../planetLandscapeLayout";
@@ -137,7 +136,7 @@ describe("planet landscape camera", () => {
 
   it("clamps an explored camera inside the terrain and re-clamps it after resize", () => {
     const viewport = { width: 1200, height: 400 };
-    const zoomed = zoomLandscape(bounds, viewport, fitLandscape(bounds), 4);
+    const zoomed = clampLandscapeCamera(bounds, viewport, { ...fitLandscape(bounds), zoom: 4 });
     const resized = { width: 360, height: 500 };
     const camera = clampLandscapeCamera(bounds, resized, {
       ...zoomed,
@@ -166,13 +165,13 @@ describe("planet landscape camera", () => {
     expect(pixelsPerWorldUnit * 24).toBeLessThanOrEqual(Math.min(viewport.width, viewport.height) * 0.65 + 0.01);
   });
 
-  it("centers and enlarges a selected object while keeping its full footprint visible", () => {
+  it("centers a selected object while preserving the existing magnification", () => {
     const viewport = { width: 1200, height: 400 };
     const target = { x: 330, y: 110, width: 24, height: 24 };
-    const camera = focusLandscape(bounds, viewport, fitLandscape(bounds), target);
+    const camera = focusLandscape(bounds, viewport, { ...fitLandscape(bounds), zoom: 2 }, target);
     const viewBox = landscapeViewBox(bounds, viewport, camera);
 
-    expect(camera.zoom).toBeGreaterThan(1);
+    expect(camera.zoom).toBe(2);
     expect(camera.centerX).toBe(target.x + target.width / 2);
     expect(camera.centerY).toBe(target.y + target.height / 2);
     expect(target.x).toBeGreaterThan(viewBox.x);
