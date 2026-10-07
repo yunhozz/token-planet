@@ -450,7 +450,7 @@ export function ShopPanel({
         <button type="button" role="tab" aria-selected={category === "landscape"} onClick={() => selectCategory("landscape")}>조경</button>
         <button type="button" role="tab" aria-selected={category === "avatar"} onClick={() => selectCategory("avatar")}>아바타</button>
       </div>
-      <div className="cosmetic-tabs" role="tablist" aria-label="상점 보기">
+      <div className="cosmetic-tabs cosmetic-tabs--view" role="tablist" aria-label="상점 보기">
         <button type="button" role="tab" aria-selected={view === "products"} onClick={() => selectView("products")}>상품</button>
         <button type="button" role="tab" aria-selected={view === "inventory"} onClick={() => selectView("inventory")}>보유함</button>
       </div>

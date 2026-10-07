@@ -801,6 +801,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 }
 :is(.app-shell--detail, .app-shell--feature-screen) :is(.primary-action, .sharing-action, .cosmetic-primary) { border: 1px solid #9ae0c4; background: #80d6ba; color: #142c2a; }
 :is(.app-shell--detail, .app-shell--feature-screen) :is(.cosmetic-tabs button, .detail-tabs button) { border-radius: 10px; }
+.cosmetic-tabs--view { margin-top: 12px; padding-top: 0; }
+.cosmetic-tabs.cosmetic-tabs--view button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; }
+.cosmetic-tabs.cosmetic-tabs--view button[aria-selected="true"] { border-bottom-color: var(--mint); color: var(--mint); font-weight: 800; }
 :is(.app-shell--detail, .app-shell--feature-screen) .icon-button { border-radius: 50%; border: 1px solid #405362; background: #1b2833; }
 :is(.app-shell--detail, .app-shell--feature-screen) .reset-button { border: 1px solid #b07870; background: #3c2c32; color: #ffc2ad; }
 :is(.app-shell--detail, .app-shell--feature-screen) button:focus-visible { outline: 2px solid #80d6ba; outline-offset: 4px; }
