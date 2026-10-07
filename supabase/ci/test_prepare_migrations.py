@@ -56,6 +56,43 @@ class PrepareMigrationsTests(unittest.TestCase):
         self.assert_cli_succeeds()
         return json.loads((self.output / "manifest.json").read_text())
 
+    def test_production_deploy_uses_encoded_session_pooler_without_pat(self):
+        workflow = (REPO_ROOT / ".github/workflows/supabase-production-deploy.yml").read_text()
+        self.assertNotIn("SUPABASE_ACCESS_TOKEN", workflow)
+        self.assertNotIn("supabase link", workflow)
+        start = workflow.index("          python3 - <<'PY'\n") + len("          python3 - <<'PY'\n")
+        end = workflow.index("          PY", start)
+        script = "\n".join(line[10:] for line in workflow[start:end].splitlines())
+        stub = self.root / "supabase"
+        stub.write_text("#!/usr/bin/env python3\nimport json, os, sys\nprint('CLI_STARTED', flush=True)\nwith open(os.environ['CALLS'], 'a') as f: f.write(json.dumps(sys.argv[1:]) + '\\n')\nsys.exit(7 if '--dry-run' in sys.argv and os.environ['FAIL_DRY'] == '1' else 0)\n")
+        stub.chmod(0o755)
+        encoded = "p%40%3A%2F%3F%23%25%2B%20%ED%95%9C"
+        url = f"postgresql://postgres.projectref:{encoded}@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres?sslmode=require"
+        for ref, password, fail, expected_code, count in [
+            ("projectref", "p@:/?#%+ 한", "0", 0, 2),
+            ("projectref", "p@:/?#%+ 한", "1", 7, 1),
+            ("", "p@:/?#%+ 한", "0", 1, 0),
+            ("projectref", "", "0", 1, 0),
+        ]:
+            with self.subTest(ref=ref, fail=fail, empty_password=not password):
+                calls = self.root / "calls.jsonl"
+                calls.unlink(missing_ok=True)
+                env = dict(os.environ, PATH=f"{self.root}:{os.environ['PATH']}", CALLS=str(calls), FAIL_DRY=fail, SUPABASE_PROJECT_REF=ref, SUPABASE_DB_PASSWORD=password)
+                env.pop("SUPABASE_ACCESS_TOKEN", None)
+                result = subprocess.run([sys.executable, "-c", script], env=env, capture_output=True, text=True)
+                self.assertEqual(result.returncode, expected_code, result.stderr)
+                recorded = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+                self.assertEqual(len(recorded), count)
+                if count:
+                    self.assertEqual(recorded[0], ["db", "push", "--db-url", url, "--dry-run"])
+                    payloads = [line.removeprefix("::add-mask::") for line in result.stdout.splitlines() if line.startswith("::add-mask::")]
+                    self.assertEqual(payloads, [value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A") for value in [encoded, url]])
+                    self.assertEqual([value.replace("%0D", "\r").replace("%0A", "\n").replace("%25", "%") for value in payloads], [encoded, url])
+                    self.assertNotIn(password, result.stdout + result.stderr)
+                    self.assertLess(result.stdout.index("::add-mask::" + payloads[1]), result.stdout.index("CLI_STARTED"))
+                if count == 2:
+                    self.assertEqual(recorded[1], ["db", "push", "--db-url", url])
+
     def test_prepare_orders_whole_filenames_by_utf8_bytes_and_preserves_sql_bytes(self):
         fixtures = {
             "202610010001_가_parent.sql": b"create table parent(id int);\n",

@@ -22,23 +22,37 @@ jobs:
     runs-on: ubuntu-latest
     environment: supabase-production
     timeout-minutes: 30
-    env:
-      SUPABASE_ACCESS_TOKEN: ${{ secrets.TOKEN_PLANET_SUPABASE_ACCESS_TOKEN }}
-      SUPABASE_DB_PASSWORD: ${{ secrets.TOKEN_PLANET_SUPABASE_DB_PASSWORD }}
-      SUPABASE_PROJECT_REF: ${{ vars.TOKEN_PLANET_SUPABASE_PROJECT_REF }}
     steps:
       - uses: actions/checkout@v4
       - uses: supabase/setup-cli@1dedf2c611547ede7232d26866dd3c56ab903bbb
         with:
           version: 2.119.0
-      - name: Check production configuration
+      - name: Preview and apply pending migrations
+        env:
+          SUPABASE_PROJECT_REF: ${{ vars.TOKEN_PLANET_SUPABASE_PROJECT_REF }}
+          SUPABASE_DB_PASSWORD: ${{ secrets.TOKEN_PLANET_SUPABASE_DB_PASSWORD }}
         run: |
-          test -n "$SUPABASE_ACCESS_TOKEN"
-          test -n "$SUPABASE_DB_PASSWORD"
-          test -n "$SUPABASE_PROJECT_REF"
-      - name: Link production project
-        run: supabase link --project-ref "$SUPABASE_PROJECT_REF"
-      - name: Preview pending migrations
-        run: supabase db push --dry-run
-      - name: Apply pending migrations
-        run: supabase db push
+          python3 - <<'PY'
+          import os
+          import subprocess
+          import sys
+          from urllib.parse import quote
+
+          project_ref = os.environ.get("SUPABASE_PROJECT_REF", "")
+          password = os.environ.get("SUPABASE_DB_PASSWORD", "")
+          if not project_ref or not password:
+              sys.exit("Project ref and database password are required")
+          username = quote(f"postgres.{project_ref}", safe="")
+          encoded_password = quote(password, safe="")
+          url = f"postgresql://{username}:{encoded_password}@aws-0-ap-northeast-2.pooler.supabase.com:5432/postgres?sslmode=require"
+          def escape_command_data(value):
+              return value.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+          print(f"::add-mask::{escape_command_data(encoded_password)}", flush=True)
+          print(f"::add-mask::{escape_command_data(url)}", flush=True)
+          command = ["supabase", "db", "push", "--db-url", url]
+          dry_run = subprocess.run(command + ["--dry-run"], check=False)
+          if dry_run.returncode:
+              sys.exit(dry_run.returncode)
+          sys.exit(subprocess.run(command, check=False).returncode)
+          PY
