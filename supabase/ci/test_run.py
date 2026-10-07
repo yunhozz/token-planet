@@ -225,6 +225,8 @@ if args == ["--version"]:
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache.write_text("fake-cli-latest")
     print(os.environ.get("FAKE_CLI_VERSION", "2.119.0"))
+    if os.environ.get("FAKE_CLI_VERSION_NOTICE"):
+        print(os.environ["FAKE_CLI_VERSION_NOTICE"], file=sys.stderr)
 elif args and args[0] == "start":
     product_docker_args = None
     if os.environ.get("FAKE_PRODUCT_GUARD_PULL") == "1":
@@ -886,6 +888,14 @@ else:
         self.assertIn("Docker daemon must use a local Unix socket endpoint", (self.artifacts / "run.log").read_text())
         docker = [event["args"] for event in self.event_rows() if event["tool"] == "docker"]
         self.assertFalse(any(args[:2] == ["network", "create"] for args in docker))
+
+    def test_cli_version_accepts_pinned_stdout_with_update_notice_on_stderr(self):
+        result = self.run_runner({"FAKE_CLI_VERSION_NOTICE": "A new version of Supabase CLI is available: v2.120.0"})
+
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.artifacts / "cli-version.log").read_text(), "2.119.0\n")
+        self.assertTrue(any(event["tool"] == "supabase" and event["args"][:2] == ["db", "reset"]
+                            for event in self.event_rows()))
 
     def test_wrong_cli_version_is_refused_before_docker_calls(self):
         result = self.run_runner({"FAKE_CLI_VERSION": "2.118.0"})

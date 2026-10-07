@@ -637,7 +637,7 @@ enabled = false
 sql_paths = []
 EOF
 
-if ! (cd "$WORKDIR" && "$SUPABASE_BIN" --version) >"$CLI_VERSION_LOG" 2>&1; then
+if ! (cd "$WORKDIR" && "$SUPABASE_BIN" --version) >"$CLI_VERSION_LOG" 2>"$WORKDIR/cli-version.stderr"; then
   fail 1 "Supabase CLI version check failed"
 fi
 CLI_VERSION="$(tr -d '\r\n' <"$CLI_VERSION_LOG")"
