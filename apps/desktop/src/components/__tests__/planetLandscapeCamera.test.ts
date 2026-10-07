@@ -3,6 +3,7 @@ import {
   clampLandscapeCamera,
   fitLandscape,
   focusLandscape,
+  initialLandscapeCamera,
   landscapeViewBox,
   screenToLandscape,
 } from "../planetLandscapeCamera";
@@ -32,6 +33,28 @@ function clientPointForLandscapePoint(
 }
 
 describe("planet landscape camera", () => {
+  it.each([
+    { width: 1200, height: 420 },
+    { width: 600, height: 600 },
+    { width: 360, height: 500 },
+  ])("initially shows the entire tall landscape in a $width×$height viewport", (viewport) => {
+    const terrain = { x: 0, y: -220, width: 2400, height: 820 };
+    const camera = initialLandscapeCamera(terrain);
+    const viewBox = landscapeViewBox(terrain, viewport, camera);
+
+    expect(camera).toEqual({ centerX: 1200, centerY: 190, zoom: 1 });
+    expect(viewBox.x).toBeLessThanOrEqual(0);
+    expect(viewBox.y).toBeLessThanOrEqual(-220);
+    expect(viewBox.x + viewBox.width).toBeGreaterThanOrEqual(2400);
+    expect(viewBox.y + viewBox.height).toBeGreaterThanOrEqual(600);
+    expect(viewBox.width / viewBox.height).toBeCloseTo(viewport.width / viewport.height);
+  });
+
+  it("initializes invalid landscape bounds with finite default geometry", () => {
+    expect(initialLandscapeCamera({ x: Number.NaN, y: Infinity, width: 0, height: Number.NaN }))
+      .toEqual({ centerX: 300, centerY: 160, zoom: 1 });
+  });
+
   it("maps pointer coordinates through the actual panned and zoomed viewBox", () => {
     const terrain = { x: 0, y: 0, width: 1200, height: 600 };
     const viewport = { width: 1200, height: 600 };
