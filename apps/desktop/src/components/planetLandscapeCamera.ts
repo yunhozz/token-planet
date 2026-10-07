@@ -111,14 +111,7 @@ export function fitLandscape(bounds: LandscapeBounds): LandscapeCamera {
 }
 
 export function initialLandscapeCamera(bounds: LandscapeBounds): LandscapeCamera {
-  const safeBounds = normalizeBounds(bounds);
-  const fit = fitSize(safeBounds, DEFAULT_VIEWPORT);
-  const readableViewHeight = 500;
-  return clampLandscapeCamera(safeBounds, DEFAULT_VIEWPORT, {
-    centerX: safeBounds.x + safeBounds.width / 2,
-    centerY: Math.min(safeBounds.y + safeBounds.height / 2, 185),
-    zoom: Math.max(MIN_ZOOM, fit.height / readableViewHeight),
-  });
+  return fitLandscape(bounds);
 }
 
 export function clampLandscapeCamera(
