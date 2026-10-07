@@ -36,7 +36,7 @@
 - 운영 DB는 실제 적용하지 않는다. workflow 파일과 문서만 준비하고, 사용자 자격 증명이나 GitHub 환경 설정을 만들지 않는다.
 - 태그 릴리스는 초안으로만 만든다. 이번 구현 중 태그를 푸시하거나 원격 Release를 생성·공개하지 않는다.
 - SQLite 파일과 기존 키체인 항목은 옮기거나 지우지 않는다. 새 번들/키체인 식별자로 앱이 새 익명 계정을 만들며 이전 공동 세계 멤버십이 자동 승계되지 않는다는 점을 사용자 문서에 적는다.
-- 기존 테스트를 새 환경변수명에 맞춰 갱신할 수 있지만, 별도 테스트 스위트나 테스트 헬퍼를 추가하지 않는다.
+- 기존 테스트를 새 환경변수명에 맞춰 갱신할 수 있다. 사용자는 2026-10-07에 TDD를 위한 최소 회귀 검증을 기존 테스트 파일 안에 추가하고 관련 로컬 테스트·빌드 명령을 실행하도록 허용했다. 별도 테스트 스위트나 테스트 헬퍼는 추가하지 않는다.
 - 활성 제품 설정과 설명만 `Token World`에서 `Token Planet`으로 바꾼다. 역사적인 설계·계획 문서는 유지한다.
 
 ## Ownership and File Scope
@@ -107,7 +107,7 @@
 
 ## Verification and Acceptance
 
-- CI 정의에서 기존 `npm test`와 `npm run build`가 PR, `master`, `v*` 태그에서 실행됨을 확인한다. 새 테스트 코드는 추가하지 않는다.
+- CI 정의에서 기존 `npm test`와 `npm run build`가 PR, `master`, `v*` 태그에서 실행됨을 확인한다. TDD 검증은 기존 테스트 파일 안의 최소 회귀 검사로 한정하고, 관련 로컬 테스트·빌드 명령을 실행한다.
 - workflow의 tag 비교는 `vX.Y.Z`에서 `package.json` 및 `tauri.conf.json`의 동일 버전을 요구해야 한다.
 - workflow 정적 점검에서 macOS DMG와 Windows MSI가 각각의 네이티브 runner에서 생성되고, 두 job 성공 이후에만 draft release job이 실행되는지 확인한다.
 - 운영 workflow는 수동 시작, false 기본 확인 입력, `master` 제한, `supabase-production` 보호, dry-run 다음 push를 모두 가져야 한다. 기존 migration replay workflow의 변경도 확인한다.
