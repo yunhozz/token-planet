@@ -605,3 +605,60 @@ describe("ShopPanel", () => {
     expect(createRequestId).not.toHaveBeenCalled();
   });
 });
+
+it("shows purchased product and actual variation and selects the new instance only via CTA", async () => {
+  const instance = { instance_id: "new-pond", sku: "land_pond", placement_version: 0, variation_index: 3, variation_version: 1, seed: "new" };
+  const state = shopState();
+  const apply = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({ status: "purchased", request_id: request.request_id, confirmed_quote: null, state: shopState({ landscape_instances: [instance] }) }));
+  const { view, onSelectLandscapeInstance } = mountPanel(state, { apply });
+  fireEvent.click(screen.getByRole("button", { name: "연못 구매" }));
+  await screen.findByRole("dialog", { name: "연못 구매 확인" });
+  fireEvent.click(screen.getByRole("button", { name: "구매 확정" }));
+  const cta = await screen.findByRole("button", { name: "행성에 배치하기" });
+  expect(screen.getByText("연못 구매 완료")).toBeInTheDocument();
+  expect(view.container.querySelector('.shop-purchase-result [data-landscape-variation="3"]')).toBeInTheDocument();
+  expect(onSelectLandscapeInstance).not.toHaveBeenCalled();
+  fireEvent.click(cta);
+  expect(onSelectLandscapeInstance).toHaveBeenCalledExactlyOnceWith("new-pond");
+});
+
+it("offers inventory instead of selecting when purchased instances are ambiguous", async () => {
+  const apply = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({ status: "purchased", request_id: request.request_id, confirmed_quote: null, state: shopState() }));
+  const { onSelectLandscapeInstance } = mountPanel(shopState(), { apply });
+  fireEvent.click(screen.getByRole("button", { name: "연못 구매" }));
+  await screen.findByRole("dialog", { name: "연못 구매 확인" });
+  fireEvent.click(screen.getByRole("button", { name: "구매 확정" }));
+  fireEvent.click(await screen.findByRole("button", { name: "보유함에서 선택하기" }));
+  expect(screen.getByRole("tab", { name: "보유함" })).toHaveAttribute("aria-selected", "true");
+  expect(onSelectLandscapeInstance).not.toHaveBeenCalled();
+});
+
+it("keeps the original purchase baseline when retry sees the purchased ID already in canonical state", async () => {
+  const state = shopState();
+  const instance = { instance_id: "retried-pond", sku: "land_pond", placement_version: 0, variation_index: 2, variation_version: 1, seed: "retry" };
+  const updated = shopState({ landscape_instances: [instance] });
+  const request: ShopRequest = { kind: "purchase", request_id: "same-id", quote: { target: { kind: "purchase", sku: "land_pond" }, catalog_revision: 1, effect_revision: 1, price: 101 } };
+  const props: ShopPanelProps = { state, quote: vi.fn(async () => request.quote), apply: vi.fn(async () => { throw new Error("uncertain"); }), retryPending: vi.fn(async () => ({ status: "purchased" as const, request_id: request.request_id, confirmed_quote: null, state: updated })), onPreviewChange: vi.fn(), onSelectLandscapeInstance: vi.fn(), createRequestId: () => "same-id" };
+  const view = render(<ShopPanel {...props} />);
+  fireEvent.click(screen.getByRole("button", { name: "연못 구매" }));
+  await screen.findByRole("dialog", { name: "연못 구매 확인" });
+  fireEvent.click(screen.getByRole("button", { name: "구매 확정" }));
+  await screen.findByText("요청 결과를 확인하지 못했습니다. 같은 요청으로 다시 시도해 주세요.");
+  view.rerender(<ShopPanel {...props} state={updated} pending={{ request, status: "uncertain", error: null }} />);
+  fireEvent.click(screen.getByRole("button", { name: "같은 요청 다시 시도" }));
+  const cta = await screen.findByRole("button", { name: "행성에 배치하기" });
+  view.rerender(<ShopPanel {...props} state={updated} pending={null} />);
+  fireEvent.click(cta);
+  expect(props.onSelectLandscapeInstance).toHaveBeenCalledExactlyOnceWith(instance.instance_id);
+});
+
+it("does not infer a purchased instance on remounted uncertain retry without a baseline", async () => {
+  const instance = { instance_id: "unknown-pond", sku: "land_pond", placement_version: 0, variation_index: 0, variation_version: 1, seed: "unknown" };
+  const state = shopState({ landscape_instances: [instance] });
+  const request: ShopRequest = { kind: "purchase", request_id: "unknown-id", quote: { target: { kind: "purchase", sku: "land_pond" }, catalog_revision: 1, effect_revision: 1, price: 101 } };
+  const { onSelectLandscapeInstance } = mountPanel(state, { pending: { request, status: "uncertain", error: null }, retryPending: async () => ({ status: "purchased", request_id: request.request_id, confirmed_quote: null, state }) });
+  fireEvent.click(screen.getByRole("button", { name: "같은 요청 다시 시도" }));
+  expect(await screen.findByRole("button", { name: "보유함에서 선택하기" })).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "행성에 배치하기" })).not.toBeInTheDocument();
+  expect(onSelectLandscapeInstance).not.toHaveBeenCalled();
+});

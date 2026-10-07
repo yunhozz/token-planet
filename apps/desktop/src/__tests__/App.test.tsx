@@ -216,7 +216,7 @@ it("opens legacy feature URLs in detail mode and returns to personal detail", as
   expect(screen.queryByRole("main", { name: "행성 팝오버" })).not.toBeInTheDocument();
 });
 
-it("selects a purchased inventory instance and places it from the main landscape", async () => {
+it("selects the just purchased instance via result card then confirms placement and retrieves it", async () => {
   let canonical = canonicalShopState();
   const instance = {
     instance_id: "pond-instance-placed", sku: "land_pond", variation_index: 2,
@@ -263,8 +263,8 @@ it("selects a purchased inventory instance and places it from the main landscape
   const shop = await screen.findByRole("region", { name: "행성 상점" });
   fireEvent.click(within(shop).getByRole("button", { name: "연못 구매" }));
   fireEvent.click(await screen.findByRole("button", { name: "구매 확정" }));
-  fireEvent.click(within(shop).getByRole("tab", { name: "보유함" }));
-  fireEvent.click(await within(shop).findByRole("button", { name: "배치 선택" }));
+  expect(await within(shop).findByText("연못 구매 완료")).toBeInTheDocument();
+  fireEvent.click(await within(shop).findByRole("button", { name: "행성에 배치하기" }));
 
   const viewport = await screen.findByRole("group", { name: "행성 풍경 탐사" });
   const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
@@ -285,12 +285,14 @@ it("selects a purchased inventory instance and places it from the main landscape
     await Promise.resolve();
   });
 
+  expect(applied.map((request) => request.kind)).toEqual(["purchase"]);
+  fireEvent.click(screen.getByRole("button", { name: "배치 확정" }));
   await waitFor(() => expect(container.querySelector('[data-shop-instance-id="pond-instance-placed"]')).toHaveAttribute("transform", "translate(800 200)"));
   expect(applied.map((request) => request.kind)).toEqual(["purchase", "place"]);
   expect(applied[1]).toMatchObject({ kind: "place", instance_id: instance.instance_id, cycle_id: "cycle-1", expected_version: 0, x: 800, y: 200 });
 
   fireEvent.click(screen.getByRole("button", { name: "연못, 설치된 장식" }));
-  fireEvent.click(screen.getByRole("button", { name: "보관" }));
+  fireEvent.click(screen.getByRole("button", { name: "보관함으로" }));
   await waitFor(() => expect(container.querySelector('[data-shop-instance-id="pond-instance-placed"]')).not.toBeInTheDocument());
   expect(applied[2]).toMatchObject({ kind: "retrieve", instance_id: instance.instance_id, cycle_id: "cycle-1", expected_version: 1 });
   fireEvent.click(screen.getByRole("button", { name: "행성 상점 열기" }));

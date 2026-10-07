@@ -810,3 +810,28 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 :is(.app-shell--detail, .app-shell--feature-screen) button:disabled { opacity: .5; box-shadow: none; }
 :is(.app-shell--detail, .app-shell--feature-screen) button[aria-busy="true"] { border-color: #e8bf79; }
 :is(.app-shell--detail, .app-shell--feature-screen) .cosmetic-confirmation { border: 1px solid #758879; border-radius: 18px; background: #1b2430; box-shadow: 0 16px 48px #0008; }
+
+/* Purchase and placement controls stay below the scene, with room for narrow windows. */
+.shop-purchase-result, .planet-landscape-shop-selection { display: flex; align-items: center; flex-wrap: wrap; gap: 16px; padding: 20px; color: var(--paper); background: var(--panel-deep); border: 1px solid var(--rule); }
+.shop-purchase-result { margin: 20px 0; border-radius: 16px; }
+.planet-landscape-shop-selection { border-width: 1px 0 0; }
+.shop-purchase-result > svg, .planet-landscape-shop-selection > svg { flex: none; width: 80px; height: 80px; padding: 8px; border: 1px solid var(--rule); border-radius: 12px; background: var(--night); }
+.shop-purchase-result-copy, .planet-landscape-shop-selection-copy { flex: 1 1 220px; min-width: 0; overflow-wrap: anywhere; }
+.shop-purchase-result h3, .planet-landscape-shop-selection h2 { margin: 0 0 6px; font-size: 18px; }
+.shop-purchase-result p, .planet-landscape-shop-selection p { margin: 6px 0 0; color: var(--muted); line-height: 1.5; }
+.planet-landscape-shop-state { color: var(--mint); font-size: 14px; font-weight: 600; }
+.shop-purchase-result-actions, .planet-landscape-shop-selection-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.shop-purchase-result-actions button, .planet-landscape-shop-selection-actions button { min-height: 44px; min-width: 44px; padding: 10px 14px; border: 1px solid var(--rule); border-radius: 10px; color: var(--paper); background: var(--panel); cursor: pointer; }
+.shop-purchase-result-actions button.cosmetic-primary, .planet-landscape-shop-selection-actions button.cosmetic-primary { color: #142c2a; background: var(--mint); border-color: var(--mint); }
+.shop-purchase-result-actions button:hover:not(:disabled), .planet-landscape-shop-selection-actions button:hover:not(:disabled) { border-color: var(--mint); }
+.shop-purchase-result-actions button:disabled, .planet-landscape-shop-selection-actions button:disabled { opacity: .5; cursor: not-allowed; }
+.shop-purchase-result-actions button:focus-visible, .planet-landscape-shop-selection-actions button:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
+.planet-landscape-shop-status { margin: 0; padding: 12px 20px 16px; color: var(--paper); background: var(--panel-deep); line-height: 1.5; overflow-wrap: anywhere; }
+.app-shell--detail .planet-landscape-shop-selection, .app-shell--detail .planet-landscape-shop-status { background: #1b2430; }
+.app-shell--detail .planet-landscape-shop-selection > svg, .app-shell--feature-screen .shop-purchase-result > svg { background: #10151d; }
+@media (max-width: 560px) {
+  .shop-purchase-result, .planet-landscape-shop-selection { gap: 12px; padding: 16px; }
+  .shop-purchase-result-actions, .planet-landscape-shop-selection-actions { flex: 1 1 100%; }
+  .shop-purchase-result-actions button, .planet-landscape-shop-selection-actions button { flex: 1 1 auto; }
+  .planet-landscape-shop-status { padding: 12px 16px 16px; }
+}

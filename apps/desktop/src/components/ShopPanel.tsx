@@ -1,5 +1,6 @@
 import { formatTokenAmount } from "../lib/tokenFormatting";
 import { useEffect, useMemo, useRef, useState } from "react";
+import { resolvePurchasedLandscapeInstance, type LandscapePurchaseBaseline } from "./shopPurchaseSelection";
 import { ShopProductThumbnail } from "./ShopProductThumbnail";
 import type { PendingShopAction } from "../hooks/useShopActions";
 import type {
@@ -149,6 +150,8 @@ export function ShopPanel({
   const [category, setCategory] = useState<"landscape" | "avatar">("landscape");
   const [activeQuote, setActiveQuote] = useState<ActivePurchaseQuote | null>(null);
   const [notice, setNotice] = useState("");
+  const [purchaseResult, setPurchaseResult] = useState<{ product: ShopProduct; instance: LandscapeInstance | null } | null>(null);
+  const purchaseBaselineRef = useRef<LandscapePurchaseBaseline | null>(null);
   const [previewingKey, setPreviewingKey] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const dialogRef = useRef<HTMLDialogElement>(null);
@@ -202,6 +205,8 @@ export function ShopPanel({
     contextChangedPendingEffect.current = false;
     setActiveQuote(null);
     setNotice("");
+    setPurchaseResult(null);
+    purchaseBaselineRef.current = null;
     setBusy(false);
     clearPreview();
   // clearPreview intentionally sends the latest callback ref, and this effect is keyed to account/cycle only.
@@ -242,6 +247,7 @@ export function ShopPanel({
   }
 
   function clearForNavigation() {
+    setPurchaseResult(null);
     operationSequence.current += 1;
     setActiveQuote(null);
     setBusy(false);
@@ -292,6 +298,13 @@ export function ShopPanel({
       return;
     }
     setActiveQuote(null);
+    if (result.status === "purchased" && expectedRequest.kind === "purchase" && expectedRequest.quote.target.kind === "purchase") {
+      const product = productsBySku.get(expectedRequest.quote.target.sku);
+      if (product?.category === "landscape") {
+        const baseline = purchaseBaselineRef.current;
+        setPurchaseResult({ product, instance: baseline ? resolvePurchasedLandscapeInstance(baseline, result) : null });
+      }
+    }
     setNotice(actionMessage(result));
   }
 
@@ -349,6 +362,14 @@ export function ShopPanel({
       request_id: createRequestId(),
       quote: purchase.quote,
     };
+    purchaseBaselineRef.current = purchase.product.category === "landscape" ? {
+      requestId: request.request_id,
+      accountId: state.account_id,
+      cycleId: state.current_cycle_id,
+      sku: purchase.product.sku,
+      instanceIds: state.landscape_instances.map((instance) => instance.instance_id),
+    } : null;
+    setPurchaseResult(null);
     setBusy(true);
     setNotice("");
     try {
@@ -464,6 +485,22 @@ export function ShopPanel({
           )}
         </div>
       )}
+
+      {purchaseResult && <section className="shop-purchase-result" aria-label="구매한 장식" aria-live="polite">
+        {purchaseResult.instance && <ShopProductThumbnail product={purchaseResult.product} instance={purchaseResult.instance} />}
+        <div className="shop-purchase-result-copy">
+          <h3>{purchaseResult.product.display_name} 구매 완료</h3>
+          <p>{purchaseResult.instance ? "구매한 장식을 원하는 위치에 놓아 보세요." : "구매한 장식을 보유함에서 직접 선택해 주세요."}</p>
+        </div>
+        <div className="shop-purchase-result-actions">
+          {purchaseResult.instance ? <button className="cosmetic-primary" type="button" disabled={actionDisabled} onClick={() => {
+            const id = purchaseResult.instance!.instance_id;
+            clearPreview();
+            onSelectLandscapeInstance(id);
+          }}>행성에 배치하기</button> : <button className="cosmetic-primary" type="button" onClick={() => { setCategory("landscape"); selectView("inventory"); setPurchaseResult(null); }}>보유함에서 선택하기</button>}
+          <button className="cosmetic-secondary" type="button" onClick={() => setPurchaseResult(null)}>계속 쇼핑</button>
+        </div>
+      </section>}
 
       {view === "products" ? (
         <div className="cosmetic-list" aria-label={category === "landscape" ? "조경 상품" : "아바타 상품"}>

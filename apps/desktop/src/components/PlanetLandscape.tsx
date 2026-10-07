@@ -23,6 +23,8 @@ import type {
   ShopState,
 } from "../types/usage";
 import { AvatarSprite } from "./AvatarSprite";
+import { ShopProductThumbnail } from "./ShopProductThumbnail";
+import { placementFailure } from "./landscapeEditing";
 import { LandscapeObjectSprite } from "./LandscapeObjectSprite";
 import { PlanetObjectSprite } from "./PlanetObjectSprite";
 import { objectName, STAGE_NAMES } from "./PlanetScene";
@@ -246,6 +248,7 @@ export function PlanetLandscape({
   const viewportRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<ActiveDrag | null>(null);
   const shopDragRef = useRef<LandscapeShopDrag | null>(null);
+  const previousShopSelectionRef = useRef<string | null | undefined>(undefined);
   const shopRequestGenerationRef = useRef(0);
   const shopRequestInFlightRef = useRef(false);
   const [viewport, setViewport] = useState(DEFAULT_VIEWPORT);
@@ -323,6 +326,12 @@ export function PlanetLandscape({
   const selectedShopPlacement = selectedLandscapeInstanceId
     ? placedShopObjects.find(({ instance }) => instance.instance_id === selectedLandscapeInstanceId) ?? null
     : null;
+  const selectedShopInstance = selectedLandscapeInstanceId ? shopInstancesById.get(selectedLandscapeInstanceId) : undefined;
+  const selectedShopProduct = selectedShopInstance ? shopProductsBySku.get(selectedShopInstance.sku) : undefined;
+  const draftFailure = shopDraft && selectedShopProduct ? placementFailure(selectedShopProduct, shopDraft, layout.bounds) : null;
+  const placementFailureMessage = draftFailure === "reserved_walkway" ? "통행 구역에는 배치할 수 없습니다. 다른 위치를 선택해 주세요."
+    : draftFailure === "outside_zone" ? "장식이 배치 구역을 벗어났습니다. 다른 위치를 선택해 주세요."
+    : draftFailure === "invalid_input" ? "위치를 확인할 수 없습니다. 다시 선택해 주세요." : null;
   const viewBox = landscapeViewBox(landscapeBounds, viewport, exploration.camera);
   const avatarPoint = avatarWalkPoints[avatarPosition] ?? avatarWalkPoints[LANDSCAPE_WALK_START];
   const avatarX = avatarPoint.x;
@@ -375,7 +384,7 @@ export function PlanetLandscape({
   useEffect(() => {
     if (!pendingShopAction) return;
     shopDragRef.current = null;
-    setShopDraft(null);
+    setShopDraft((current) => current ? { ...current, pointerId: null } : null);
     setIsShopDragging(false);
   }, [pendingShopAction?.request.request_id, pendingShopAction?.status]);
 
@@ -393,6 +402,18 @@ export function PlanetLandscape({
       viewportRef.current.releasePointerCapture?.(pointerId);
     }
   }, [shopDraft?.instanceId, shopDraft?.expectedVersion, shopInstancesById]);
+
+  useEffect(() => {
+    if (previousShopSelectionRef.current === selectedLandscapeInstanceId) return;
+    previousShopSelectionRef.current = selectedLandscapeInstanceId;
+    shopDragRef.current = null;
+    setShopDraft(null);
+    setIsShopDragging(false);
+    setShopPlacementNotice(null);
+    if (selectedLandscapeInstanceId && !shopPlacementsById.has(selectedLandscapeInstanceId)) startKeyboardPlacement(selectedLandscapeInstanceId);
+  // Selection starts a draft once; canonical version changes cancel rather than restart it.
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedLandscapeInstanceId]);
 
   useEffect(() => () => {
     shopRequestGenerationRef.current += 1;
@@ -635,7 +656,8 @@ export function PlanetLandscape({
       } else if (result.status !== successStatus) {
         setShopPlacementNotice(`${actionName}할 수 없습니다. 위치와 보유 상태를 확인해 주세요.`);
       } else {
-        setShopPlacementNotice(null);
+        setShopDraft(null);
+        setShopPlacementNotice(successStatus === "retrieved" ? "장식을 보관함으로 옮겼습니다." : "장식을 배치했습니다.");
       }
     } catch {
       if (generation === shopRequestGenerationRef.current) {
@@ -708,11 +730,19 @@ export function PlanetLandscape({
       ? { x: currentPlacement.x, y: currentPlacement.y }
       : null;
     if (!found) {
-      for (let y = minimumY; y <= maximumY && !found; y += 8) {
+      const center = { x: layout.bounds.x + (layout.bounds.width - footprintWidth) / 2, y: (minimumY + maximumY) / 2 };
+      if (validatePlacement(product, center, layout.bounds)) found = center;
+    }
+    if (!found) {
+      let closestDistance = Infinity;
+      for (let y = minimumY; y <= maximumY; y += 8) {
         for (let x = layout.bounds.x; x + footprintWidth <= layout.bounds.x + layout.bounds.width; x += 8) {
           if (validatePlacement(product, { x, y }, layout.bounds)) {
-            found = { x, y };
-            break;
+            const distance = Math.hypot(x - (layout.bounds.x + (layout.bounds.width - footprintWidth) / 2), y - (minimumY + maximumY) / 2);
+            if (distance < closestDistance) {
+              closestDistance = distance;
+              found = { x, y };
+            }
           }
         }
       }
@@ -729,7 +759,7 @@ export function PlanetLandscape({
 
   function moveKeyboardDraft(dx: number, dy: number) {
     const current = shopDraft;
-    if (!current || current.pointerId !== null) return false;
+    if (!current || current.pointerId !== null || pendingShopAction || shopRequestInFlightRef.current) return false;
     const product = shopProductsBySku.get(current.sku);
     if (!product) return true;
     const next = draftAt(
@@ -750,7 +780,10 @@ export function PlanetLandscape({
       true,
       current.expectedVersion,
     );
-    if (next) setShopDraft(next);
+    if (next) {
+      setShopDraft(next);
+      setShopPlacementNotice(null);
+    }
     return true;
   }
 
@@ -764,12 +797,12 @@ export function PlanetLandscape({
       const instanceId = shopHit?.getAttribute("data-shop-instance-id") ?? null;
       const existing = instanceId ? shopInstancesById.get(instanceId) : undefined;
       const placement = instanceId ? shopPlacementsById.get(instanceId) : undefined;
-      if (existing && placement && startShopPointerDrag(event, existing, point, placement)) return;
+      if (existing && placement && shopDraft?.instanceId === existing.instance_id && startShopPointerDrag(event, existing, point, placement)) return;
       if (shopHit) return;
     }
     if (point && selectedLandscapeInstanceId && activeShopState && onShopAction) {
       const selectedInstance = shopInstancesById.get(selectedLandscapeInstanceId);
-      if (selectedInstance && !shopPlacementsById.has(selectedLandscapeInstanceId)
+      if (selectedInstance && shopDraft?.instanceId === selectedInstance.instance_id
         && startShopPointerDrag(event, selectedInstance, point)) return;
     }
     event.preventDefault();
@@ -828,12 +861,11 @@ export function PlanetLandscape({
         ? draftAt(instance, product, finalPoint, shopDrag.offsetX, shopDrag.offsetY, shopDrag.pointerId, start, hasMoved, shopDrag.expectedVersion)
         : { ...shopDrag, hasMoved };
       shopDragRef.current = null;
-      setShopDraft(null);
+      setShopDraft(cancelled || !completedDraft ? null : { ...completedDraft, pointerId: null });
       setIsShopDragging(false);
       if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
         event.currentTarget.releasePointerCapture(event.pointerId);
       }
-      if (!cancelled && completedDraft && completedDraft.valid && completedDraft.hasMoved) void submitShopPlacement(completedDraft);
       return;
     }
     if (dragRef.current?.pointerId !== event.pointerId) return;
@@ -844,7 +876,23 @@ export function PlanetLandscape({
     }
   }
 
+  function cancelShopPlacement() {
+    const pointerId = shopDragRef.current?.pointerId;
+    shopDragRef.current = null;
+    setShopDraft(null);
+    setIsShopDragging(false);
+    setShopPlacementNotice(null);
+    if (pointerId != null && viewportRef.current?.hasPointerCapture?.(pointerId)) viewportRef.current.releasePointerCapture(pointerId);
+  }
+
   function handleSceneKeyDown(event: ReactKeyboardEvent<HTMLDivElement>) {
+    if (pendingShopAction || shopRequestInFlightRef.current) return;
+    if (event.key === "Escape" && shopDraft) {
+      event.preventDefault();
+      event.stopPropagation();
+      cancelShopPlacement();
+      return;
+    }
     if (event.key === "Escape" && selected && shopDraft?.pointerId !== null) {
       event.preventDefault();
       event.stopPropagation();
@@ -875,7 +923,7 @@ export function PlanetLandscape({
       }
       return;
     }
-    if ((event.key === " " || event.key === "Enter") && selectedLandscapeInstanceId && activeShopState) {
+    if ((event.key === " " || event.key === "Enter") && selectedLandscapeInstanceId && activeShopState && !shopPlacementsById.has(selectedLandscapeInstanceId)) {
       event.preventDefault();
       startKeyboardPlacement(selectedLandscapeInstanceId);
       return;
@@ -1120,16 +1168,29 @@ export function PlanetLandscape({
           </svg>
         </div>
       </div>}
-      {selectedShopPlacement && <div className="planet-landscape-shop-selection" role="group" aria-label="선택한 장식">
-        <span>{selectedShopPlacement.product.display_name}</span>
-        <button
-          type="button"
-          disabled={Boolean(pendingShopAction) || shopRequestPending || !onShopAction}
-          onClick={() => retrieveShopInstance(selectedShopPlacement.instance.instance_id)}
-        >보관</button>
+      {selectedShopInstance && selectedShopProduct && <div className="planet-landscape-shop-selection" role="group" aria-label="선택한 장식" onKeyDown={(event) => {
+        if (pendingShopAction || shopRequestPending || shopRequestInFlightRef.current) return;
+        if (event.key === "Escape" && shopDraft) { event.preventDefault(); cancelShopPlacement(); }
+      }}>
+        <ShopProductThumbnail product={selectedShopProduct} instance={selectedShopInstance} />
+        <div className="planet-landscape-shop-selection-copy">
+          <h2>{selectedShopProduct.display_name}</h2>
+          <span className="planet-landscape-shop-state">{shopDraft ? "배치 중" : selectedShopPlacement ? "배치됨" : "보관 중"}</span>
+          {shopDraft && <p>풍경을 클릭하거나 드래그해 위치를 고르세요. 방향키로 조정하고 Enter로 확정할 수 있습니다.</p>}
+        </div>
+        <div className="planet-landscape-shop-selection-actions">
+          {shopDraft ? <>
+            <button type="button" className="cosmetic-primary" disabled={!shopDraft.valid || Boolean(pendingShopAction) || shopRequestPending || !onShopAction} onClick={() => { void submitShopPlacement(shopDraft); }}>배치 확정</button>
+            <button type="button" disabled={Boolean(pendingShopAction) || shopRequestPending} onClick={cancelShopPlacement}>취소</button>
+          </> : <>
+            <button type="button" disabled={Boolean(pendingShopAction) || shopRequestPending || !onShopAction} onClick={() => { startKeyboardPlacement(selectedShopInstance.instance_id); viewportRef.current?.focus(); }}>{selectedShopPlacement ? "위치 이동" : "배치 시작"}</button>
+            {selectedShopPlacement && <button type="button" disabled={Boolean(pendingShopAction) || shopRequestPending || !onShopAction} onClick={() => retrieveShopInstance(selectedShopInstance.instance_id)}>보관함으로</button>}
+            <button type="button" aria-label="장식 선택 닫기" onClick={() => { cancelShopPlacement(); onSelectLandscapeInstance?.(null); }}>닫기</button>
+          </>}
+        </div>
       </div>}
-      {(shopPlacementNotice || shopDraft?.pointerId === null) && <p className="planet-landscape-shop-status" role="status">
-        {shopPlacementNotice ?? (shopDraft?.valid ? "방향키로 위치를 조정하고 Enter로 설치하세요. Esc를 누르면 취소합니다." : "설치할 수 없는 위치입니다. 방향키로 옮기거나 Esc로 취소하세요.")}
+      {(shopPlacementNotice || shopDraft) && <p className="planet-landscape-shop-status" role="status">
+        {shopRequestPending ? "장식을 저장하고 있습니다." : shopPlacementNotice ?? placementFailureMessage ?? "배치 확정 또는 Enter로 저장하세요. 취소 또는 Esc로 배치를 끝낼 수 있습니다."}
       </p>}
     </section>
   );

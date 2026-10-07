@@ -477,6 +477,10 @@ describe("canonical shop landscape integration", () => {
       fireEvent.pointerDown(viewport, { pointerId: 8, button: 0, ...from });
       fireEvent.pointerMove(viewport, { pointerId: 8, ...drop });
       fireEvent.pointerUp(viewport, { pointerId: 8, ...drop });
+    });
+    expect(onShopAction).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "배치 확정" }));
       await Promise.resolve();
     });
 
@@ -514,6 +518,10 @@ describe("canonical shop landscape integration", () => {
     await act(async () => {
       fireEvent.pointerDown(viewport, { pointerId: 9, button: 0, ...screenPointForWorld(svg, rect, 760, 160) });
       fireEvent.pointerUp(viewport, { pointerId: 9, ...screenPointForWorld(svg, rect, 832, 232) });
+    });
+    expect(onShopAction).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "배치 확정" }));
       await Promise.resolve();
     });
     expect(onShopAction).toHaveBeenCalledWith(expect.objectContaining({ kind: "place", x: 800, y: 200 }));
@@ -554,7 +562,7 @@ describe("canonical shop landscape integration", () => {
       status: "placed", request_id: request.request_id, confirmed_quote: null, state,
     }));
     const { container } = render(
-      <ControlledLandscape shopState={state} onShopAction={onShopAction} createShopRequestId={() => "move-request-1"} />,
+      <ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} createShopRequestId={() => "move-request-1"} />,
     );
     const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
     const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
@@ -562,10 +570,15 @@ describe("canonical shop landscape integration", () => {
     Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
     const object = container.querySelector<SVGGElement>('[data-shop-instance-id="pond-move"]')!;
 
+    fireEvent.click(screen.getByRole("button", { name: "위치 이동" }));
     await act(async () => {
       fireEvent.pointerDown(object, { pointerId: 10, button: 0, ...screenPointForWorld(svg, rect, 820, 220) });
       fireEvent.pointerMove(viewport, { pointerId: 10, ...screenPointForWorld(svg, rect, 920, 320) });
       fireEvent.pointerUp(viewport, { pointerId: 10, ...screenPointForWorld(svg, rect, 920, 320) });
+    });
+    expect(onShopAction).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "배치 확정" }));
       await Promise.resolve();
     });
 
@@ -590,7 +603,7 @@ describe("canonical shop landscape integration", () => {
       status: "placed", request_id: request.request_id, confirmed_quote: null, state: state4,
     }));
     const { container, rerender } = render(
-      <ControlledLandscape shopState={state3} onShopAction={onShopAction} createShopRequestId={() => "stale-pointer-request"} />,
+      <ControlledLandscape shopState={state3} selectedLandscapeInstanceId={original.instance_id} onShopAction={onShopAction} createShopRequestId={() => "stale-pointer-request"} />,
     );
     const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
     const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
@@ -598,6 +611,7 @@ describe("canonical shop landscape integration", () => {
     Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
     const object = container.querySelector<SVGGElement>('[data-shop-instance-id="pond-race"]')!;
 
+    fireEvent.click(screen.getByRole("button", { name: "위치 이동" }));
     fireEvent.pointerDown(object, { pointerId: 41, button: 0, ...screenPointForWorld(svg, rect, 820, 220) });
     rerender(<ControlledLandscape shopState={state4} onShopAction={onShopAction} createShopRequestId={() => "stale-pointer-request"} />);
     fireEvent.pointerMove(viewport, { pointerId: 41, ...screenPointForWorld(svg, rect, 920, 320) });
@@ -666,7 +680,7 @@ describe("canonical shop landscape integration", () => {
     );
     const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
     viewport.focus();
-    fireEvent.keyDown(viewport, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "위치 이동" }));
     expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-x", "800");
     expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-y", "200");
     fireEvent.keyDown(viewport, { key: "ArrowRight" });
@@ -676,7 +690,7 @@ describe("canonical shop landscape integration", () => {
     expect(container.querySelector('[data-shop-instance-id="pond-key-move"]')).toHaveAttribute("transform", "translate(800 200)");
     expect(onShopAction).not.toHaveBeenCalled();
 
-    fireEvent.keyDown(viewport, { key: "Enter" });
+    fireEvent.click(screen.getByRole("button", { name: "위치 이동" }));
     fireEvent.keyDown(viewport, { key: "ArrowRight" });
     await act(async () => {
       fireEvent.keyDown(viewport, { key: "Enter" });
@@ -749,7 +763,7 @@ describe("canonical shop landscape integration", () => {
     expect(onShopAction).not.toHaveBeenCalled();
   });
 
-  it("clears invalid and canceled placement previews without changing canonical placements", () => {
+  it("retains invalid and clears canceled placement previews without changing canonical placements", () => {
     const instance = landscapeInstance("pond-draft");
     const state = landscapeShopState({ landscape_instances: [instance] });
     const onShopAction = vi.fn(async (): Promise<ShopActionResult> => { throw new Error("should not submit"); });
@@ -766,7 +780,9 @@ describe("canonical shop landscape integration", () => {
     expect(container.querySelector("[data-shop-preview-valid='false']")).toBeInTheDocument();
     fireEvent.pointerUp(viewport, { pointerId: 11, ...screenPointForWorld(svg, rect, 100, 165) });
     expect(onShopAction).not.toHaveBeenCalled();
-    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-shop-preview-instance-id]")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "배치 확정" })).toBeDisabled();
+    expect(screen.getByText(/통행 구역/)).toBeInTheDocument();
     expect(container.querySelectorAll("[data-shop-instance-id]")).toHaveLength(0);
 
     fireEvent.pointerDown(viewport, { pointerId: 12, button: 0, ...screenPointForWorld(svg, rect, 760, 160) });
@@ -797,7 +813,7 @@ describe("canonical shop landscape integration", () => {
     expect(container.querySelector("[data-shop-preview-valid='true']")).toBeInTheDocument();
     fireEvent.keyDown(viewport, { key: "ArrowRight" });
     const movedX = Number(container.querySelector<HTMLElement>("[data-shop-preview-instance-id]")?.dataset.shopPreviewX);
-    expect(movedX).toBe(8);
+    expect(movedX).toBeGreaterThan(8);
     fireEvent.keyDown(viewport, { key: "Escape" });
     expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
     expect(onShopAction).not.toHaveBeenCalled();
@@ -837,12 +853,13 @@ describe("canonical shop landscape integration", () => {
       />,
     );
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "보관" }));
+      fireEvent.click(screen.getByRole("button", { name: "보관함으로" }));
       await Promise.resolve();
     });
     expect(onShopAction).toHaveBeenCalledWith({
       kind: "retrieve", request_id: "retrieve-request-1", cycle_id: "cycle-1", instance_id: "pond-retrieve", expected_version: 7,
     });
+    expect(screen.getByRole("status")).toHaveTextContent("장식을 보관함으로 옮겼습니다.");
   });
 
   it("keeps natural layout positions when a removed natural object remains in the tombstone terrain basis", () => {
@@ -878,7 +895,7 @@ describe("canonical shop landscape integration", () => {
     fireEvent.pointerMove(container.querySelector(".planet-landscape-viewport")!, { pointerId: 13, clientX: 200, clientY: 200 });
     fireEvent.pointerUp(container.querySelector(".planet-landscape-viewport")!, { pointerId: 13, clientX: 200, clientY: 200 });
     expect(onShopAction).not.toHaveBeenCalled();
-    expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+    expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-x", "678");
   });
 
   it("blocks duplicate requests and ignores an in-flight result after the cycle changes", async () => {
@@ -902,6 +919,10 @@ describe("canonical shop landscape integration", () => {
       fireEvent.pointerDown(viewport, { pointerId: 20, button: 0, ...from });
       fireEvent.pointerMove(viewport, { pointerId: 20, ...drop });
       fireEvent.pointerUp(viewport, { pointerId: 20, ...drop });
+    });
+    expect(onShopAction).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "배치 확정" }));
       await Promise.resolve();
     });
     expect(onShopAction).toHaveBeenCalledTimes(1);
@@ -1026,4 +1047,148 @@ describe("hidden growth scenery", () => {
     expect(container.querySelector(".planet-landscape-ground")).toBeInTheDocument();
     if (stage === 0) expect(container.querySelector('[data-landscape-decoration="natural-stream"]')).toBeInTheDocument();
   });
+});
+
+it("starts an unplaced selection card and saves a single click draft only on confirmation", async () => {
+  const instance = landscapeInstance("click-draft", "land_pond", 2, 3);
+  const state = landscapeShopState({ landscape_instances: [instance] });
+  const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({ status: "placed", request_id: request.request_id, confirmed_quote: null, state }));
+  const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
+  const card = screen.getByRole("group", { name: "선택한 장식" });
+  expect(within(card).getByText("연못")).toBeInTheDocument();
+  expect(within(card).getByText("배치 중")).toBeInTheDocument();
+  expect(within(card).getByText("풍경을 클릭하거나 드래그해 위치를 고르세요. 방향키로 조정하고 Enter로 확정할 수 있습니다.")).toBeInTheDocument();
+  expect(within(card).getByRole("img", { name: "연못 미리보기" })).toBeInTheDocument();
+  expect(container.querySelector("[data-shop-preview-valid='true']")).toBeInTheDocument();
+  const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+  const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+  const rect = { left: 0, top: 0, width: 900, height: 420 };
+  Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+  const point = screenPointForWorld(svg, rect, 832, 232);
+  fireEvent.pointerDown(viewport, { pointerId: 88, button: 0, ...point });
+  fireEvent.pointerUp(viewport, { pointerId: 88, ...point });
+  expect(onShopAction).not.toHaveBeenCalled();
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-x", "800");
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "배치 확정" })); });
+  expect(onShopAction).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: "place", instance_id: instance.instance_id, expected_version: 2, x: 800, y: 200 }));
+  expect(screen.getByRole("status")).toHaveTextContent("장식을 배치했습니다.");
+});
+
+it.each(["확대", "축소"])("keeps preview and submitted world coordinates equal after %s and viewport resize", async (zoom) => {
+  vi.stubGlobal("ResizeObserver", TestResizeObserver);
+  const instance = landscapeInstance("zoom-draft");
+  const state = landscapeShopState({ landscape_instances: [instance] });
+  const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({ status: "placed", request_id: request.request_id, confirmed_quote: null, state }));
+  const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
+  act(() => TestResizeObserver.latest!.resize(620, 460));
+  fireEvent.click(screen.getByRole("button", { name: zoom }));
+  const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+  const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+  const rect = { left: 17, top: 31, width: 620, height: 460 };
+  Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+  const point = screenPointForWorld(svg, rect, 832, 232);
+  fireEvent.pointerDown(viewport, { pointerId: 90, button: 0, ...point });
+  fireEvent.pointerUp(viewport, { pointerId: 90, ...point });
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("transform", "translate(800 200)");
+  await act(async () => { fireEvent.keyDown(viewport, { key: "Enter" }); });
+  expect(onShopAction).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ x: 800, y: 200 }));
+});
+
+it("blocks repeat confirmation and draft input during saving then keeps a failed draft", async () => {
+  const instance = landscapeInstance("failed-draft");
+  const state = landscapeShopState({ landscape_instances: [instance] });
+  let complete!: (result: ShopActionResult | null) => void;
+  const onShopAction = vi.fn((_request: ShopRequest) => new Promise<ShopActionResult | null>((resolve) => { complete = resolve; }));
+  const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
+  const viewport = container.querySelector<HTMLElement>(".planet-landscape-viewport")!;
+  const before = container.querySelector("[data-shop-preview-instance-id]")!.getAttribute("transform");
+  fireEvent.click(screen.getByRole("button", { name: "배치 확정" }));
+  fireEvent.keyDown(viewport, { key: "Enter" });
+  fireEvent.keyDown(viewport, { key: "ArrowRight" });
+  expect(screen.getByRole("button", { name: "배치 확정" })).toBeDisabled();
+  expect(screen.getByRole("status")).toHaveTextContent("장식을 저장하고 있습니다.");
+  expect(onShopAction).toHaveBeenCalledTimes(1);
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("transform", before!);
+  await act(async () => { complete({ status: "invalid_placement", request_id: onShopAction.mock.calls[0][0].request_id, confirmed_quote: null, state }); });
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toBeInTheDocument();
+  expect(screen.getByRole("status")).toHaveTextContent("설치할 수 없습니다. 위치와 보유 상태를 확인해 주세요.");
+  expect(screen.getByRole("button", { name: "배치 확정" })).toBeEnabled();
+});
+
+it("cancel ends placement without saving and selecting another instance starts its own draft", () => {
+  const a = landscapeInstance("a"), b = landscapeInstance("b", "land_thin_ring");
+  const state = landscapeShopState({ landscape_instances: [a, b] });
+  const onShopAction = vi.fn(async () => null);
+  const { container, rerender } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId="a" onShopAction={onShopAction} />);
+  fireEvent.click(screen.getByRole("button", { name: "취소" }));
+  expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+  expect(onShopAction).not.toHaveBeenCalled();
+  rerender(<ControlledLandscape shopState={state} selectedLandscapeInstanceId="b" onShopAction={onShopAction} />);
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-instance-id", "b");
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-valid", "true");
+  rerender(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={null} onShopAction={onShopAction} />);
+  expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+});
+
+it("requires the move action before editing an already placed decoration", () => {
+  const instance = landscapeInstance("explicit-move", "land_pond", 1);
+  const state = landscapeShopState({ landscape_instances: [instance], placements: [{ instance_id: instance.instance_id, cycle_id: "cycle-1", x: 800, y: 200, version: 1 }] });
+  const onShopAction = vi.fn(async () => null);
+  const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
+  const viewport = screen.getByRole("group", { name: "행성 풍경 탐사" });
+  fireEvent.keyDown(viewport, { key: "Enter" });
+  expect(container.querySelector("[data-shop-preview-instance-id]")).not.toBeInTheDocument();
+  expect(screen.getByText("배치됨")).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button", { name: "위치 이동" }));
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toBeInTheDocument();
+  expect(onShopAction).not.toHaveBeenCalled();
+});
+
+
+it.each(["null", "throw"])("shows uncertain placement guidance for a %s response and keeps the draft", async (response) => {
+  const instance = landscapeInstance("uncertain-draft");
+  const state = landscapeShopState({ landscape_instances: [instance] });
+  const onShopAction = vi.fn(async (_request: ShopRequest): Promise<ShopActionResult | null> => {
+    if (response === "throw") throw new Error("response unavailable");
+    return null;
+  });
+  const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "배치 확정" })); });
+  expect(onShopAction).toHaveBeenCalledTimes(1);
+  expect(screen.getByRole("status")).toHaveTextContent("설치 결과를 확인할 수 없습니다. 상점에서 요청 상태를 확인해 주세요.");
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-instance-id", instance.instance_id);
+  expect(screen.queryByText("장식을 배치했습니다.")).not.toBeInTheDocument();
+});
+
+it("keeps the saving draft when Escape is pressed inside the selection card", async () => {
+  const instance = landscapeInstance("saving-escape");
+  const state = landscapeShopState({ landscape_instances: [instance] });
+  let complete!: (result: ShopActionResult | null) => void;
+  const onShopAction = vi.fn((_request: ShopRequest) => new Promise<ShopActionResult | null>((resolve) => { complete = resolve; }));
+  const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
+  const card = screen.getByRole("group", { name: "선택한 장식" });
+  const confirm = within(card).getByRole("button", { name: "배치 확정" });
+  fireEvent.click(confirm);
+  fireEvent.keyDown(confirm, { key: "Escape" });
+  fireEvent.keyDown(card, { key: "Escape" });
+  expect(within(card).getByText("배치 중")).toBeInTheDocument();
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-instance-id", instance.instance_id);
+  expect(screen.getByRole("status")).toHaveTextContent("장식을 저장하고 있습니다.");
+  expect(onShopAction).toHaveBeenCalledTimes(1);
+  await act(async () => { complete(null); });
+});
+
+it("shows the current invalid location reason after moving a failed draft with the keyboard", async () => {
+  const instance = landscapeInstance("failed-keyboard-location");
+  const state = landscapeShopState({ landscape_instances: [instance] });
+  const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({ status: "invalid_placement", request_id: request.request_id, confirmed_quote: null, state }));
+  const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "배치 확정" })); });
+  expect(screen.getByRole("status")).toHaveTextContent("설치할 수 없습니다. 위치와 보유 상태를 확인해 주세요.");
+  const viewport = screen.getByRole("group", { name: "행성 풍경 탐사" });
+  for (let step = 0; step < 10; step += 1) fireEvent.keyDown(viewport, { key: "ArrowUp" });
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-valid", "false");
+  expect(screen.getByRole("status")).toHaveTextContent("통행 구역에는 배치할 수 없습니다. 다른 위치를 선택해 주세요.");
+  expect(screen.getByRole("status")).not.toHaveTextContent("설치할 수 없습니다. 위치와 보유 상태를 확인해 주세요.");
+  expect(onShopAction).toHaveBeenCalledTimes(1);
 });

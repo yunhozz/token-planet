@@ -51,13 +51,15 @@ function crossesReservedWalkway(footprint: { x: number; y: number; width: number
 }
 
 /** Validate the complete fixed sprite footprint; point is its top-left corner. */
-export function validatePlacement(
+export type PlacementFailure = "invalid_input" | "outside_zone" | "reserved_walkway";
+
+export function placementFailure(
   product: Pick<ShopProduct, "placement_zone">,
   point: LandscapePoint,
   terrain: LandscapeBounds,
-): boolean {
+): PlacementFailure | null {
   const zone = product.placement_zone;
-  if (!zone || !finiteBounds(terrain) || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return false;
+  if (!zone || !finiteBounds(terrain) || !Number.isFinite(point.x) || !Number.isFinite(point.y)) return "invalid_input";
 
   const footprint = {
     x: point.x,
@@ -74,5 +76,14 @@ export function validatePlacement(
       && footprint.y >= terrain.y - SKY_HEIGHT
       && footprint.y + footprint.height <= terrain.y;
 
-  return inZone && !(zone === "ground" && crossesReservedWalkway(footprint));
+  if (!inZone) return "outside_zone";
+  return zone === "ground" && crossesReservedWalkway(footprint) ? "reserved_walkway" : null;
+}
+
+export function validatePlacement(
+  product: Pick<ShopProduct, "placement_zone">,
+  point: LandscapePoint,
+  terrain: LandscapeBounds,
+): boolean {
+  return placementFailure(product, point, terrain) === null;
 }
