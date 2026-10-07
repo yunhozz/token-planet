@@ -30,6 +30,7 @@ import { PlanetObjectSprite } from "./PlanetObjectSprite";
 import { objectName, STAGE_NAMES } from "./PlanetScene";
 import { PlanetLandscapeDecorations } from "./PlanetLandscapeDecorations";
 import { styleIdForSku } from "./cosmeticStyles";
+import { landscapeAvatarRoute, advanceLandscapeAvatarRoute } from "./landscapeAvatarRoute";
 import { restDuration, stepDuration } from "./sceneMotion";
 import {
   clampLandscapeCamera,
@@ -43,13 +44,6 @@ import {
 } from "./planetLandscapeCamera";
 import {
   cosmeticLandscapeBounds,
-  LANDSCAPE_CELL_HEIGHT,
-  LANDSCAPE_CELL_WIDTH,
-  LANDSCAPE_CELL_X_ORIGIN,
-  LANDSCAPE_CELL_Y_ORIGIN,
-  LANDSCAPE_WALKWAY_END_COLUMNS,
-  LANDSCAPE_WALKWAY_ROWS,
-  LANDSCAPE_WALKWAY_X_OFFSET,
   layoutLandscape,
   landscapeObjectId,
   type LandscapeBounds,
@@ -87,10 +81,6 @@ const OBJECT_DESCRIPTIONS: Record<string, string> = {
 
 const SKY_BAND_HEIGHT = 220;
 const DEFAULT_VIEWPORT: LandscapeViewport = { width: 1200, height: 420 };
-const LANDSCAPE_WALK_STOPS = 24;
-const LANDSCAPE_WALK_CONNECTOR_STEPS = 7;
-const LANDSCAPE_WALK_POINT_COUNT = LANDSCAPE_WALK_STOPS * 2 + LANDSCAPE_WALK_CONNECTOR_STEPS - 1;
-const LANDSCAPE_WALK_START = Math.floor(LANDSCAPE_WALK_STOPS / 2);
 
 export type PlanetExplorationState = {
   camera: LandscapeCamera;
@@ -178,50 +168,6 @@ function sameCamera(left: LandscapeCamera, right: LandscapeCamera): boolean {
     && Math.abs(left.zoom - right.zoom) < 0.001;
 }
 
-function landscapeWalkPoints(terrain: LandscapeBounds): Array<{ x: number; y: number }> {
-  const left = terrain.x + LANDSCAPE_CELL_X_ORIGIN + LANDSCAPE_WALKWAY_END_COLUMNS[0] * LANDSCAPE_CELL_WIDTH + LANDSCAPE_WALKWAY_X_OFFSET;
-  const right = terrain.x + LANDSCAPE_CELL_X_ORIGIN + LANDSCAPE_WALKWAY_END_COLUMNS[1] * LANDSCAPE_CELL_WIDTH + LANDSCAPE_WALKWAY_X_OFFSET;
-  const firstY = terrain.y + LANDSCAPE_CELL_Y_ORIGIN + LANDSCAPE_WALKWAY_ROWS[0] * LANDSCAPE_CELL_HEIGHT;
-  const secondY = terrain.y + LANDSCAPE_CELL_Y_ORIGIN + LANDSCAPE_WALKWAY_ROWS[1] * LANDSCAPE_CELL_HEIGHT;
-  const xStops = Array.from({ length: LANDSCAPE_WALK_STOPS }, (_, index) => (
-    left + ((right - left) * index) / (LANDSCAPE_WALK_STOPS - 1)
-  ));
-  return [
-    ...xStops.map((x) => ({ x, y: firstY })),
-    ...Array.from({ length: LANDSCAPE_WALK_CONNECTOR_STEPS }, (_, index) => {
-      const step = index + 1;
-      return { x: right, y: firstY + ((secondY - firstY) * step) / (LANDSCAPE_WALK_CONNECTOR_STEPS + 1) };
-    }),
-    ...xStops.slice(0, -1).reverse().map((x) => ({ x, y: secondY })),
-  ];
-}
-
-function planLandscapeWalk(startIndex: number, previousDestination: number | null, random: () => number): number[] {
-  const sample = () => Math.max(0, Math.min(1 - Number.EPSILON, random()));
-  const lastPoint = LANDSCAPE_WALK_POINT_COUNT - 1;
-  const start = Math.max(0, Math.min(lastPoint, Number.isFinite(startIndex) ? Math.trunc(startIndex) : 0));
-  const directions = [-1, 1].filter((direction) => start + direction >= 0 && start + direction <= lastPoint);
-  let direction = directions[Math.floor(sample() * directions.length)];
-  let available = direction < 0 ? start : lastPoint - start;
-  let steps = 1 + Math.floor(sample() * Math.min(5, available));
-
-  if (start + direction * steps === previousDestination) {
-    const alternatives = directions.filter((candidate) => candidate !== direction);
-    if (alternatives.length > 0) {
-      direction = alternatives[Math.floor(sample() * alternatives.length)];
-      available = direction < 0 ? start : lastPoint - start;
-      steps = Math.min(steps, available);
-    } else {
-      const maxSteps = Math.min(5, available);
-      const alternateSteps = Array.from({ length: maxSteps }, (_, index) => index + 1)
-        .filter((candidate) => candidate !== steps && start + direction * candidate !== previousDestination);
-      if (alternateSteps.length > 0) steps = alternateSteps[Math.floor(sample() * alternateSteps.length)];
-    }
-  }
-
-  return Array.from({ length: steps }, (_, index) => start + direction * (index + 1));
-}
-
 export function PlanetLandscape({
   stage,
   progress,
@@ -259,9 +205,10 @@ export function PlanetLandscape({
   const [shopPlacementNotice, setShopPlacementNotice] = useState<string | null>(null);
   const [isIntersecting, setIsIntersecting] = useState(() => typeof IntersectionObserver === "undefined");
   const [documentVisible, setDocumentVisible] = useState(() => typeof document === "undefined" || !document.hidden);
-  const [avatarPosition, setAvatarPosition] = useState(LANDSCAPE_WALK_START);
-  const avatarPositionRef = useRef(LANDSCAPE_WALK_START);
-  const previousDestinationRef = useRef<number | null>(null);
+  const [avatarPosition, setAvatarPosition] = useState(0);
+  const avatarPositionRef = useRef(0);
+  const avatarDirectionRef = useRef<1 | -1>(1);
+  const avatarCoordinateRef = useRef({ x: 0, y: 0 });
   const [avatarStepDuration, setAvatarStepDuration] = useState(380);
   const [avatarFacing, setAvatarFacing] = useState<"left" | "right">("right");
   const [avatarWalking, setAvatarWalking] = useState(false);
@@ -271,10 +218,10 @@ export function PlanetLandscape({
     && typeof window.matchMedia === "function"
     && window.matchMedia("(prefers-reduced-motion: reduce)").matches
   ));
-  const motionActive = isIntersecting && documentVisible;
+  const motionActive = isIntersecting && documentVisible && !prefersReducedMotion;
   const layoutSource = terrainObjects ?? objects;
   const layout = useMemo(() => layoutLandscape(layoutSource), [layoutSource]);
-  const avatarWalkPoints = useMemo(() => landscapeWalkPoints(layout.bounds), [layout.bounds]);
+  const avatarWalkPoints = useMemo(() => landscapeAvatarRoute(layout.bounds), [layout.bounds.x, layout.bounds.y, layout.bounds.width, layout.bounds.height]);
   const landscapeBounds = useMemo(() => ({
     x: layout.bounds.x,
     y: layout.bounds.y - SKY_BAND_HEIGHT,
@@ -329,11 +276,10 @@ export function PlanetLandscape({
   const selectedShopInstance = selectedLandscapeInstanceId ? shopInstancesById.get(selectedLandscapeInstanceId) : undefined;
   const selectedShopProduct = selectedShopInstance ? shopProductsBySku.get(selectedShopInstance.sku) : undefined;
   const draftFailure = shopDraft && selectedShopProduct ? placementFailure(selectedShopProduct, shopDraft, layout.bounds) : null;
-  const placementFailureMessage = draftFailure === "reserved_walkway" ? "통행 구역에는 배치할 수 없습니다. 다른 위치를 선택해 주세요."
-    : draftFailure === "outside_zone" ? "장식이 배치 구역을 벗어났습니다. 다른 위치를 선택해 주세요."
+  const placementFailureMessage = draftFailure === "outside_zone" ? "장식이 배치 구역을 벗어났습니다. 다른 위치를 선택해 주세요."
     : draftFailure === "invalid_input" ? "위치를 확인할 수 없습니다. 다시 선택해 주세요." : null;
   const viewBox = landscapeViewBox(landscapeBounds, viewport, exploration.camera);
-  const avatarPoint = avatarWalkPoints[avatarPosition] ?? avatarWalkPoints[LANDSCAPE_WALK_START];
+  const avatarPoint = avatarWalkPoints[avatarPosition] ?? { x: layout.bounds.x, y: layout.bounds.y };
   const avatarX = avatarPoint.x;
   const avatarY = avatarPoint.y;
 
@@ -420,7 +366,20 @@ export function PlanetLandscape({
   }, []);
 
   useEffect(() => {
-    if (!motionActive) {
+    const current = avatarCoordinateRef.current;
+    let closest = 0;
+    avatarWalkPoints.forEach((point, index) => {
+      if (Math.hypot(point.x - current.x, point.y - current.y) < Math.hypot(avatarWalkPoints[closest].x - current.x, avatarWalkPoints[closest].y - current.y)) closest = index;
+    });
+    avatarPositionRef.current = closest;
+    avatarCoordinateRef.current = avatarWalkPoints[closest] ?? { x: layout.bounds.x, y: layout.bounds.y };
+    setAvatarPosition(closest);
+    setAvatarWalking(false);
+    setEyesClosed(false);
+  }, [avatarWalkPoints]);
+
+  useEffect(() => {
+    if (!motionActive || avatarWalkPoints.length < 2) {
       setAvatarWalking(false);
       setEyesClosed(false);
       return;
@@ -433,9 +392,12 @@ export function PlanetLandscape({
 
     const scheduleWalk = () => {
       movementTimer = window.setTimeout(() => {
-        const start = avatarPositionRef.current;
-        const route = planLandscapeWalk(start, previousDestinationRef.current, Math.random);
-        previousDestinationRef.current = start;
+        let progress = { index: avatarPositionRef.current, direction: avatarDirectionRef.current };
+        const steps = 1 + Math.floor(Math.max(0, Math.min(1 - Number.EPSILON, Math.random())) * 5);
+        const route = Array.from({ length: steps }, () => {
+          progress = advanceLandscapeAvatarRoute(avatarWalkPoints.length, progress);
+          return progress;
+        });
         const duration = stepDuration(Math.random);
         setAvatarStepDuration(duration);
         let step = 0;
@@ -444,7 +406,8 @@ export function PlanetLandscape({
         setEyesClosed(false);
         const moveNext = () => {
           if (cancelled) return;
-          const next = route[step];
+          const nextProgress = route[step];
+          const next = nextProgress?.index;
           step += 1;
           if (next === undefined) {
             walking = false;
@@ -458,7 +421,9 @@ export function PlanetLandscape({
           if (previousX !== undefined && nextX !== undefined && previousX !== nextX) {
             setAvatarFacing(nextX < previousX ? "left" : "right");
           }
+          avatarDirectionRef.current = nextProgress.direction;
           avatarPositionRef.current = next;
+          avatarCoordinateRef.current = avatarWalkPoints[next];
           setAvatarPosition(next);
           movementTimer = window.setTimeout(moveNext, duration);
         };
@@ -488,7 +453,7 @@ export function PlanetLandscape({
       window.clearTimeout(blinkTimer);
       window.clearTimeout(blinkCloseTimer);
     };
-  }, [motionActive]);
+  }, [motionActive, avatarWalkPoints]);
 
   useEffect(() => {
     const node = viewportRef.current;
@@ -1101,6 +1066,7 @@ export function PlanetLandscape({
           <g
             className={`planet-landscape-avatar${avatarWalking ? " is-walking" : ""}`}
             data-avatar-walking={avatarWalking}
+            pointerEvents="none"
             style={{ "--avatar-step-ms": `${avatarStepDuration}ms` } as CSSProperties}
             transform={`translate(${avatarX} ${avatarY})`}
           >

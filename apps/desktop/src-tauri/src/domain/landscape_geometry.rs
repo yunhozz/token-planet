@@ -7,11 +7,6 @@ const GROUND_WIDTH: f64 = 64.0;
 const SKY_WIDTH: f64 = 96.0;
 const FOOTPRINT_HEIGHT: f64 = 64.0;
 const SKY_HEIGHT: f64 = 220.0;
-const CELL_WIDTH: f64 = 56.0;
-const CELL_HEIGHT: f64 = 50.0;
-const CELL_X_ORIGIN: f64 = 26.0;
-const CELL_Y_ORIGIN: f64 = 33.0;
-
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct LandscapePoint {
@@ -36,13 +31,6 @@ fn finite_bounds(bounds: LandscapeBounds) -> bool {
         && bounds.height > 0.0
         && (bounds.x + bounds.width).is_finite()
         && (bounds.y + bounds.height).is_finite()
-}
-
-fn intersects(left: LandscapeBounds, right: LandscapeBounds) -> bool {
-    left.x < right.x + right.width
-        && left.x + left.width > right.x
-        && left.y < right.y + right.height
-        && left.y + left.height > right.y
 }
 
 fn reserved_cell(row: usize, column: usize) -> bool {
@@ -82,13 +70,13 @@ pub fn terrain_bounds(objects: &[PlanetObject]) -> LandscapeBounds {
                 &right.kind,
             ))
     });
-    let mut occupied = [false; COLUMNS * ROWS];
+    let mut occupied = std::collections::HashSet::new();
     let (mut max_right, mut max_bottom) = (0.0_f64, 0.0_f64);
     for object in ordered {
         let x = f64::from(object.x.min(100));
         let y = f64::from(object.y.min(100));
-        let source_column = ((x / 100.0) * USABLE_COLUMNS as f64).floor() as usize;
-        let source_row = ((y / 100.0) * ROWS as f64).floor() as usize;
+        let source_column = (((x / 100.0) * USABLE_COLUMNS as f64).floor() as usize).min(USABLE_COLUMNS - 1);
+        let source_row = (((y / 100.0) * ROWS as f64).floor() as usize).min(ROWS - 1);
         let balanced_column =
             (object.ordinal as usize * 13 + object.stage as usize * 7) % USABLE_COLUMNS;
         let balanced_row = (object.ordinal as usize * 3 + object.stage as usize * 2) % ROWS;
@@ -102,11 +90,11 @@ pub fn terrain_bounds(objects: &[PlanetObject]) -> LandscapeBounds {
         let mut row = modulo(balanced_row as isize + row_offset, ROWS as isize) as usize;
         loop {
             let index = row * COLUMNS + column;
-            if !occupied[index] && !reserved_cell(row, column) {
-                occupied[index] = true;
+            if !occupied.contains(&index) && !reserved_cell(row, column) {
+                occupied.insert(index);
                 break;
             }
-            let next = (row * COLUMNS + column + 1) % (COLUMNS * ROWS);
+            let next = index + 1;
             row = next / COLUMNS;
             column = next % COLUMNS;
         }
@@ -121,26 +109,6 @@ pub fn terrain_bounds(objects: &[PlanetObject]) -> LandscapeBounds {
         width: EMPTY_WIDTH.max(max_right + 24.0),
         height: EMPTY_HEIGHT.max(max_bottom + 24.0),
     }
-}
-
-fn crosses_reserved_walkway(footprint: LandscapeBounds) -> bool {
-    for row in 0..10 {
-        for column in 0..24 {
-            if !reserved_cell(row, column) {
-                continue;
-            }
-            let cell = LandscapeBounds {
-                x: CELL_X_ORIGIN + column as f64 * CELL_WIDTH,
-                y: CELL_Y_ORIGIN + row as f64 * CELL_HEIGHT,
-                width: CELL_WIDTH,
-                height: CELL_HEIGHT,
-            };
-            if intersects(footprint, cell) {
-                return true;
-            }
-        }
-    }
-    false
 }
 
 /// Validate the entire fixed-size sprite footprint, not only its anchor point.
@@ -179,7 +147,7 @@ pub fn validate_placement(
                 && footprint.y + footprint.height <= terrain.y
         }
     };
-    if !in_zone || (zone == PlacementZone::Ground && crosses_reserved_walkway(footprint)) {
+    if !in_zone {
         return Err(ShopError::InvalidPlacement);
     }
     Ok(())
@@ -200,7 +168,7 @@ mod tests {
     }
 
     #[test]
-    fn placement_checks_the_whole_sprite_and_reserved_walkways() {
+    fn placement_checks_the_whole_sprite_and_zone() {
         let products = shop_products();
         let ground = products
             .iter()
@@ -227,11 +195,11 @@ mod tests {
         );
         assert_eq!(
             validate_placement(ground, LandscapePoint { x: 160.0, y: 140.0 }, terrain()),
-            Err(ShopError::InvalidPlacement)
+            Ok(())
         );
         assert_eq!(
             validate_placement(ground, LandscapePoint { x: 50.0, y: 200.0 }, terrain()),
-            Err(ShopError::InvalidPlacement)
+            Ok(())
         );
         assert_eq!(
             validate_placement(
@@ -260,4 +228,31 @@ mod tests {
             Err(ShopError::InvalidPlacement)
         );
     }
+
+    #[test]
+    fn shop_decorations_can_overlap_avatar_traffic() {
+        let products = shop_products();
+        let product = products.iter().find(|product| product.sku == "land_pond").unwrap();
+        for (x, y) in [(160.0, 140.0), (1100.0, 200.0), (50.0, 200.0), (1300.0, 200.0)] {
+            assert_eq!(
+                validate_placement(product, LandscapePoint { x, y }, terrain()),
+                Ok(()),
+                "traffic coordinate {x},{y}"
+            );
+        }
+    }
+    #[test]
+    fn expanded_terrain_matches_dynamic_rows_and_finishes() {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let objects: Vec<_> = (0..300).map(|ordinal| crate::domain::planet::PlanetObject {
+                stage: 0, ordinal, kind: "tree".into(), x: 25, y: 50, seed: u64::from(ordinal),
+            }).collect();
+            sender.send(super::terrain_bounds(&objects)).unwrap();
+        });
+        let bounds = receiver.recv_timeout(std::time::Duration::from_secs(1))
+            .expect("dynamic natural grid must terminate for 300 objects");
+        assert_eq!(bounds, LandscapeBounds { x: 0.0, y: 0.0, width: 1420.0, height: 883.0 });
+    }
+
 }

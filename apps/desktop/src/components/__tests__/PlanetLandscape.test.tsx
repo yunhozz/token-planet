@@ -1,3 +1,4 @@
+import { landscapeAvatarRoute } from "../landscapeAvatarRoute";
 import { layoutLandscape } from "../planetLandscapeLayout";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import { useState } from "react";
@@ -776,13 +777,13 @@ describe("canonical shop landscape integration", () => {
     Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
 
     fireEvent.pointerDown(viewport, { pointerId: 11, button: 0, ...screenPointForWorld(svg, rect, 760, 160) });
-    fireEvent.pointerMove(viewport, { pointerId: 11, ...screenPointForWorld(svg, rect, 100, 165) });
+    fireEvent.pointerMove(viewport, { pointerId: 11, ...screenPointForWorld(svg, rect, 10, 165) });
     expect(container.querySelector("[data-shop-preview-valid='false']")).toBeInTheDocument();
-    fireEvent.pointerUp(viewport, { pointerId: 11, ...screenPointForWorld(svg, rect, 100, 165) });
+    fireEvent.pointerUp(viewport, { pointerId: 11, ...screenPointForWorld(svg, rect, 10, 165) });
     expect(onShopAction).not.toHaveBeenCalled();
     expect(container.querySelector("[data-shop-preview-instance-id]")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "배치 확정" })).toBeDisabled();
-    expect(screen.getByText(/통행 구역/)).toBeInTheDocument();
+    expect(screen.getByText(/배치 구역을 벗어났습니다/)).toBeInTheDocument();
     expect(container.querySelectorAll("[data-shop-instance-id]")).toHaveLength(0);
 
     fireEvent.pointerDown(viewport, { pointerId: 12, button: 0, ...screenPointForWorld(svg, rect, 760, 160) });
@@ -1186,9 +1187,123 @@ it("shows the current invalid location reason after moving a failed draft with t
   await act(async () => { fireEvent.click(screen.getByRole("button", { name: "배치 확정" })); });
   expect(screen.getByRole("status")).toHaveTextContent("설치할 수 없습니다. 위치와 보유 상태를 확인해 주세요.");
   const viewport = screen.getByRole("group", { name: "행성 풍경 탐사" });
-  for (let step = 0; step < 10; step += 1) fireEvent.keyDown(viewport, { key: "ArrowUp" });
+  for (let step = 0; step < 90; step += 1) fireEvent.keyDown(viewport, { key: "ArrowLeft" });
   expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-valid", "false");
-  expect(screen.getByRole("status")).toHaveTextContent("통행 구역에는 배치할 수 없습니다. 다른 위치를 선택해 주세요.");
+  expect(screen.getByRole("status")).toHaveTextContent("장식이 배치 구역을 벗어났습니다. 다른 위치를 선택해 주세요.");
   expect(screen.getByRole("status")).not.toHaveTextContent("설치할 수 없습니다. 위치와 보유 상태를 확인해 주세요.");
   expect(onShopAction).toHaveBeenCalledTimes(1);
+});
+
+it("walks successive route points and cancels old terrain timers before continuing at the closest point", () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  try {
+    const bounds = layoutLandscape(selectableObjects).bounds;
+    const route = landscapeAvatarRoute(bounds);
+    const { container, rerender, unmount } = render(<ControlledLandscape />);
+    const avatar = () => container.querySelector(".planet-landscape-avatar")!;
+    expect(avatar()).toHaveAttribute("transform", `translate(${route[0].x} ${route[0].y})`);
+    act(() => vi.advanceTimersByTime(1500));
+    expect(avatar()).toHaveAttribute("transform", `translate(${route[1].x} ${route[1].y})`);
+    expect(avatar()).toHaveAttribute("data-avatar-walking", "true");
+    act(() => vi.advanceTimersByTime(300));
+    expect(avatar()).toHaveAttribute("data-avatar-walking", "false");
+    act(() => vi.advanceTimersByTime(1500));
+    expect(avatar()).toHaveAttribute("transform", `translate(${route[2].x} ${route[2].y})`);
+    const expanded = Array.from({ length: 240 }, (_, ordinal): PlanetObject => ({ stage: 1, ordinal, kind: "tree", x: 30, y: 30, seed: ordinal }));
+    const nextRoute = landscapeAvatarRoute(layoutLandscape(expanded).bounds);
+    const closest = nextRoute.reduce((best, point) => Math.hypot(point.x-route[2].x, point.y-route[2].y) < Math.hypot(best.x-route[2].x, best.y-route[2].y) ? point : best);
+    rerender(<ControlledLandscape terrainObjects={expanded} />);
+    expect(avatar()).toHaveAttribute("transform", `translate(${closest.x} ${closest.y})`);
+    const transform = avatar().getAttribute("transform");
+    act(() => vi.advanceTimersByTime(1499));
+    expect(avatar()).toHaveAttribute("transform", transform!);
+    act(() => vi.advanceTimersByTime(1));
+    expect(avatar().getAttribute("transform")).not.toBe(transform);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { vi.useRealTimers(); vi.restoreAllMocks(); }
+});
+
+it("keeps the full terrain avatar static with reduced motion", () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math, "random").mockReturnValue(0);
+  vi.stubGlobal("matchMedia", () => ({ matches: true, addEventListener: vi.fn(), removeEventListener: vi.fn() }));
+  try {
+    const { container, unmount } = render(<ControlledLandscape />);
+    const avatar = container.querySelector(".planet-landscape-avatar")!;
+    const initial = avatar.getAttribute("transform");
+    act(() => vi.advanceTimersByTime(10000));
+    expect(avatar).toHaveAttribute("transform", initial!);
+    expect(avatar).toHaveAttribute("data-avatar-walking", "false");
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally { vi.useRealTimers(); vi.restoreAllMocks(); }
+});
+
+it("renders the avatar above natural objects, purchased objects and draft without intercepting pointers", () => {
+  const a=landscapeInstance("layer-placed"), b=landscapeInstance("layer-draft");
+  const state=landscapeShopState({landscape_instances:[a,b],placements:[{instance_id:a.instance_id,cycle_id:"cycle-1",x:160,y:200,version:0}]});
+  const {container}=render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={b.instance_id} onShopAction={async()=>null} />);
+  const avatar=container.querySelector(".planet-landscape-avatar")!;
+  expect(avatar).toHaveAttribute("pointer-events","none");
+  for(const selector of [".planet-landscape-objects", "[data-shop-instance-id]", "[data-shop-preview-instance-id]"]) expect(container.querySelector(selector)!.compareDocumentPosition(avatar) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+});
+
+it.each([{ x: 160, y: 140 }, { x: 1100, y: 200 }, { x: 50, y: 200 }, { x: 1300, y: 200 }])("previews and explicitly saves once on former avatar traffic at %j", async (point) => {
+  const instance = landscapeInstance("traffic-draft");
+  const state = landscapeShopState({ landscape_instances: [instance] });
+  const onShopAction = vi.fn(async (request: ShopRequest): Promise<ShopActionResult> => ({ status: "placed", request_id: request.request_id, confirmed_quote: null, state }));
+  const { container } = render(<ControlledLandscape shopState={state} selectedLandscapeInstanceId={instance.instance_id} onShopAction={onShopAction} />);
+  const viewport = screen.getByRole("group", { name: "행성 풍경 탐사" });
+  const svg = container.querySelector<SVGSVGElement>(".planet-landscape-svg")!;
+  const rect = { left: 0, top: 0, width: 900, height: 420 };
+  Object.defineProperty(viewport, "getBoundingClientRect", { configurable: true, value: () => rect });
+  const screenPoint = screenPointForWorld(svg, rect, point.x+32, point.y+32);
+  fireEvent.pointerDown(viewport, { pointerId: 95, button: 0, ...screenPoint });
+  fireEvent.pointerUp(viewport, { pointerId: 95, ...screenPoint });
+  expect(container.querySelector("[data-shop-preview-instance-id]")).toHaveAttribute("data-shop-preview-valid", "true");
+  expect(screen.queryByText(/통행 구역/)).not.toBeInTheDocument();
+  expect(onShopAction).not.toHaveBeenCalled();
+  await act(async () => { fireEvent.click(screen.getByRole("button", { name: "배치 확정" })); });
+  expect(onShopAction).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ kind: "place", x: point.x, y: point.y }));
+});
+
+it("reverses avatar progression only at the full route endpoint and retains facing", () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math,"random").mockReturnValue(0);
+  try {
+    const route=landscapeAvatarRoute(layoutLandscape(selectableObjects).bounds);
+    const {container,unmount}=render(<ControlledLandscape />);
+    const avatar=container.querySelector(".planet-landscape-avatar")!;
+    act(()=>vi.advanceTimersByTime(1500+1800*(route.length-2)));
+    expect(avatar).toHaveAttribute("transform",`translate(${route[route.length - 1].x} ${route[route.length - 1].y})`);
+    act(()=>vi.advanceTimersByTime(1800));
+    expect(avatar).toHaveAttribute("transform",`translate(${route[route.length - 2].x} ${route[route.length - 2].y})`);
+    expect(container.querySelector(".planet-landscape-avatar-sprite")).toHaveClass("avatar-sprite--facing-left");
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {vi.useRealTimers();vi.restoreAllMocks();}
+});
+
+it("pauses avatar timers while the document is hidden and resumes from the same point", () => {
+  vi.useFakeTimers();
+  vi.spyOn(Math,"random").mockReturnValue(0);
+  try {
+    const {container,unmount}=render(<ControlledLandscape />);
+    const avatar=container.querySelector(".planet-landscape-avatar")!;
+    act(()=>vi.advanceTimersByTime(1500));
+    const at=avatar.getAttribute("transform");
+    Object.defineProperty(document,"hidden",{configurable:true,value:true});
+    fireEvent(document,new Event("visibilitychange"));
+    act(()=>vi.advanceTimersByTime(10000));
+    expect(avatar).toHaveAttribute("transform",at!);
+    expect(avatar).toHaveAttribute("data-avatar-walking","false");
+    Object.defineProperty(document,"hidden",{configurable:true,value:false});
+    fireEvent(document,new Event("visibilitychange"));
+    act(()=>vi.advanceTimersByTime(1500));
+    expect(avatar.getAttribute("transform")).not.toBe(at);
+    unmount();
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {delete (document as unknown as {hidden?:boolean}).hidden;vi.useRealTimers();vi.restoreAllMocks();}
 });
