@@ -952,7 +952,6 @@ mod tests {
         sync::{atomic::AtomicBool, Mutex},
     };
 
-    static AUTH_ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn add_usage(ledger: &mut Ledger, event_key: &str, at: &str, tokens: u64) {
         ledger
@@ -2329,11 +2328,11 @@ mod tests {
 
     #[test]
     fn pending_local_guest_shop_stops_first_login_before_account_selection_or_session_rpc() {
-        let _env_guard = AUTH_ENV_LOCK.lock().unwrap();
-        let old_url = std::env::var_os("TOKEN_WORLD_SUPABASE_URL");
-        let old_key = std::env::var_os("TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY");
-        std::env::set_var("TOKEN_WORLD_SUPABASE_URL", "");
-        std::env::set_var("TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY", "");
+        let _env_guard = crate::sync::auth::AUTH_ENV_LOCK.lock().unwrap();
+        let old_url = std::env::var_os("TOKEN_PLANET_SUPABASE_URL");
+        let old_key = std::env::var_os("TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY");
+        std::env::set_var("TOKEN_PLANET_SUPABASE_URL", "");
+        std::env::set_var("TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY", "");
 
         let ledger = Ledger::open(Path::new(":memory:"), UTC).unwrap();
         let guest_account = ledger.cosmetic_account_id().unwrap();
@@ -2362,14 +2361,14 @@ mod tests {
         let result = tauri::async_runtime::block_on(super::sync_once(&state));
 
         if let Some(value) = old_url {
-            std::env::set_var("TOKEN_WORLD_SUPABASE_URL", value);
+            std::env::set_var("TOKEN_PLANET_SUPABASE_URL", value);
         } else {
-            std::env::remove_var("TOKEN_WORLD_SUPABASE_URL");
+            std::env::remove_var("TOKEN_PLANET_SUPABASE_URL");
         }
         if let Some(value) = old_key {
-            std::env::set_var("TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY", value);
+            std::env::set_var("TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY", value);
         } else {
-            std::env::remove_var("TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY");
+            std::env::remove_var("TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY");
         }
 
         assert_eq!(

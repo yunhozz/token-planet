@@ -4,6 +4,8 @@ This checklist separates verified local behavior from work that needs a hosted S
 
 ## Verified in the macOS development environment
 
+The local OTP checks below are historical evidence for the earlier email-auth flow. Current shared-world sign-in uses anonymous Auth and personal invitation codes; verify that flow separately before release.
+
 - [x] Solo mode launches without an account. Compact and detailed windows render a planet, confirmed token subtotal, and separate unknown-source state.
 - [x] The updated macOS `.app` bundle builds. A Token Planet app window opens; compact and detailed layouts render and switch in the macOS UI.
 - [x] Rust tests cover creator-timezone day buckets, changed historical revisions, SQLite restart persistence, account-scoped queues, historical scan-health coverage, deletion cutoff, and capped retry timing.
@@ -15,10 +17,16 @@ This checklist separates verified local behavior from work that needs a hosted S
 
 ## Pending before a shared-world release
 
-- [ ] Configure a hosted Supabase free project, custom SMTP, Auth email templates, migrations, and public client URL/key. Verify actual email delivery, expiry, resend throttling, and refresh there.
+- [ ] Configure a hosted Supabase project, apply migrations, enable Anonymous Sign-Ins, and verify the packaged app can create and refresh its anonymous session.
 - [ ] Complete an end-to-end sign-in, invite, upload, offline restart/retry, pause/resume, leave, and deletion pass in the packaged macOS app against the hosted project.
 - [ ] Confirm the updated release bundle launches by its exact path, then check macOS menu-bar icon click, keyboard activation, close/reopen, and launch after copying the `.app` into Applications.
 - [ ] Build the native Windows app and check tray click/keyboard behavior, secure credential storage, Windows account refresh, network payloads, and a real native Windows Claude Code transcript with usage fields. WSL is outside MVP scope.
 - [ ] Repeat the hosted end-to-end sharing checks on native Windows, including a two-device same-account deletion/rejoin case and a two-member world.
+
+## Automated release and production migration gates
+
+- [ ] Configure the GitHub Actions variables and the `supabase-production` environment protection and secrets described in [`docs/deployment.md`](deployment.md).
+- [ ] For a release candidate, verify the matching `vX.Y.Z` tag and review both platform artifacts in the generated draft Release. Do not publish it until the shared-world and native-platform checks above pass.
+- [ ] Before each production migration run, review the migrations on `master`, use the explicit confirmation input, and obtain the required `supabase-production` environment approval. The workflow performs a dry-run and then applies migrations in the same approved job.
 
 The app accepts self-reported client aggregates. A modified client can submit fabricated totals. Device-scoped deduplication does not detect a log copied to a second installation.

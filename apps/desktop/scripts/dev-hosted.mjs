@@ -24,25 +24,25 @@ try {
   fail("Could not read .env.local. Copy .env.example to .env.local and set the hosted values.");
 }
 
-const hostedUrl = hostedSettings.TOKEN_WORLD_SUPABASE_URL?.trim();
+const hostedUrl = hostedSettings.TOKEN_PLANET_SUPABASE_URL?.trim();
 if (!hostedUrl) {
-  fail(".env.local must set TOKEN_WORLD_SUPABASE_URL.");
+  fail(".env.local must set TOKEN_PLANET_SUPABASE_URL.");
 }
 
 let parsedUrl;
 try {
   parsedUrl = new URL(hostedUrl);
 } catch {
-  fail("TOKEN_WORLD_SUPABASE_URL must be a valid HTTPS URL.");
+  fail("TOKEN_PLANET_SUPABASE_URL must be a valid HTTPS URL.");
 }
 
 if (parsedUrl.protocol !== "https:") {
-  fail("TOKEN_WORLD_SUPABASE_URL must use HTTPS.");
+  fail("TOKEN_PLANET_SUPABASE_URL must use HTTPS.");
 }
 
-const publishableKey = hostedSettings.TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY?.trim();
+const publishableKey = hostedSettings.TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY?.trim();
 if (!publishableKey) {
-  fail(".env.local must set TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY.");
+  fail(".env.local must set TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY.");
 }
 
 const tauri = spawn(
@@ -52,8 +52,8 @@ const tauri = spawn(
     cwd: desktopDir,
     env: {
       ...process.env,
-      TOKEN_WORLD_SUPABASE_URL: parsedUrl.toString().replace(/\/$/, ""),
-      TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY: publishableKey,
+      TOKEN_PLANET_SUPABASE_URL: parsedUrl.toString().replace(/\/$/, ""),
+      TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY: publishableKey,
     },
     stdio: "inherit",
   },

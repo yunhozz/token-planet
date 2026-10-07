@@ -1,6 +1,6 @@
-# Token World desktop
+# Token Planet desktop
 
-Token World turns confirmed Codex and Claude Code token usage into a growing solo or shared planet. This directory contains the Tauri 2, React, and Rust desktop client. Solo use needs no account.
+Token Planet turns confirmed Codex and Claude Code token usage into a growing solo or shared planet. This directory contains the Tauri 2, React, and Rust desktop client. Solo use needs no account.
 
 ## Run locally
 
@@ -31,11 +31,11 @@ npx --yes supabase@2.118.0 start --exclude realtime,storage-api,imgproxy,postgre
 npm --prefix apps/desktop run dev:local
 ```
 
-`dev:local` reads `API_URL` and `PUBLISHABLE_KEY` from the local CLI status, requires an HTTP loopback URL and a non-empty publishable key, then overrides only `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` for `tauri dev`. This keeps a hosted URL inherited from a shell or launchd from being used by the local launch. The CLI status also contains secret keys; the launcher does not display or save its output or those keys.
+`dev:local` reads `API_URL` and `PUBLISHABLE_KEY` from the local CLI status, requires an HTTP loopback URL and a non-empty publishable key, then overrides only `TOKEN_PLANET_SUPABASE_URL` and `TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY` for `tauri dev`. This keeps a hosted URL inherited from a shell or launchd from being used by the local launch. The CLI status also contains secret keys; the launcher does not display or save its output or those keys.
 
 Shared-world entry creates a device-bound Supabase anonymous user. The app keeps its session in the operating system credential store. The member's nickname may match another member's; the Supabase user ID distinguishes them. Every member receives a unique 10-character personal code, but only the current world owner's code can admit a friend. The owner shares that code, and the friend enters it with a nickname when joining. Members can rotate their codes to invalidate the old value. If this Mac loses the session, the same member identity and its shared-world access cannot be recovered.
 
-Each Mac has its own local database and Auth users. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_WORLD_SUPABASE_*` values need to be copied between machines. Two Macs using separate local stacks cannot exchange personal invitation codes or join the same shared world; that requires both apps to use one reachable Supabase project. To stop the local stack without deleting its data, run `npx --yes supabase@2.118.0 stop --project-id token-planet` from the repository root.
+Each Mac has its own local database and Auth users. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_PLANET_SUPABASE_*` values need to be copied between machines. Two Macs using separate local stacks cannot exchange personal invitation codes or join the same shared world; that requires both apps to use one reachable Supabase project. To stop the local stack without deleting its data, run `npx --yes supabase@2.118.0 stop --project-id token-planet` from the repository root.
 
 ### Hosted Supabase development
 
@@ -45,13 +45,21 @@ For hosted development, create an ignored, machine-local settings file from the 
 cp apps/desktop/.env.example apps/desktop/.env.local
 ```
 
-Set `TOKEN_WORLD_SUPABASE_URL` and `TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY` in `.env.local`, then run from the repository root:
+Set `TOKEN_PLANET_SUPABASE_URL` and `TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY` in `.env.local`, then run from the repository root:
 
 ```sh
 npm --prefix apps/desktop run dev:hosted
 ```
 
 The launcher requires a non-empty publishable key and an HTTPS URL, then overrides only those two settings for `tauri dev`. The publishable key is a public client key; never put a Supabase secret or service-role key in this file. Local development with `dev:local` uses the local Supabase CLI and does not need `.env.local`. Running `npm run tauri -- dev` without hosted settings still allows solo use. For hosted sharing, apply the latest migrations and enable Anonymous Sign-Ins in Supabase Authentication → Sign In / Providers; no SMTP or sender domain is needed.
+
+## Installation identity and local data
+
+The Token Planet release uses a new application identifier and a new keychain service. An existing installation's SQLite file and keychain entry are left in place, but the new app does not read them. The new installation creates a new anonymous Supabase user. Its identity does not inherit the previous user's shared-world memberships or ownership, so old worlds may no longer be accessible from the new installation. There is no automatic account, local-data, or world transfer.
+
+## Releases and production migrations
+
+GitHub Actions builds macOS DMG and Windows MSI artifacts for a matching `vX.Y.Z` tag and creates a draft GitHub Release after both platform builds pass. A person reviews the draft and completes the manual checks in [`docs/release-acceptance.md`](../../docs/release-acceptance.md) before publishing it. The production Supabase migration workflow is a separate manual operation. See the [deployment guide](../../docs/deployment.md) for required Actions variables, protected environment secrets, and operating steps.
 
 ## Local sources and storage
 

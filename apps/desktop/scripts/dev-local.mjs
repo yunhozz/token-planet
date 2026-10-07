@@ -60,8 +60,8 @@ const tauri = spawn(
     cwd: desktopDir,
     env: {
       ...process.env,
-      TOKEN_WORLD_SUPABASE_URL: apiUrl.toString().replace(/\/$/, ""),
-      TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY: publishableKey.trim(),
+      TOKEN_PLANET_SUPABASE_URL: apiUrl.toString().replace(/\/$/, ""),
+      TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY: publishableKey.trim(),
     },
     stdio: "inherit",
   },
