@@ -404,6 +404,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 .shop-planet-preview-copy p { margin: 0 0 7px; color: var(--muted); font-size: 14px; line-height: 1.4; }
 .shop-planet-preview-copy strong { color: var(--gold); font-size: 14px; }
 .shop-window-store .cosmetic-shop { margin-top: 10px; }
+.shop-window-store .cosmetic-list { max-height: none; overflow-y: visible; }
 .growth-journal-window-content { padding: 0 2px 12px; }
 .growth-journal-window-content .growth-journal { margin-top: 0; }
 
@@ -640,7 +641,6 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
   .shop-planet-preview .planet-scene-canvas { width: min(100%, 420px); }
   .shop-planet-preview-copy { width: min(100%, 420px); }
   .shop-window-store { min-width: 0; }
-  .shop-window-store .cosmetic-list { max-height: min(68vh, 700px); }
 }
 
 @media (max-width: 760px) {
