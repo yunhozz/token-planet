@@ -13,12 +13,12 @@ pub struct AuthConfig {
 
 impl AuthConfig {
     pub fn from_env() -> Option<Self> {
-        let base_url = std::env::var("TOKEN_WORLD_SUPABASE_URL")
+        let base_url = std::env::var("TOKEN_PLANET_SUPABASE_URL")
             .ok()
-            .or_else(|| option_env!("TOKEN_WORLD_SUPABASE_URL").map(str::to_owned))?;
-        let publishable_key = std::env::var("TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY")
+            .or_else(|| option_env!("TOKEN_PLANET_SUPABASE_URL").map(str::to_owned))?;
+        let publishable_key = std::env::var("TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY")
             .ok()
-            .or_else(|| option_env!("TOKEN_WORLD_SUPABASE_PUBLISHABLE_KEY").map(str::to_owned))?;
+            .or_else(|| option_env!("TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY").map(str::to_owned))?;
         if base_url.is_empty() || publishable_key.is_empty() {
             return None;
         }
@@ -92,7 +92,7 @@ impl SessionStore {
             .map(|byte| format!("{byte:02x}"))
             .collect::<String>();
         let entry =
-            Entry::new("Token World session", &username).map_err(|_| AuthError::CredentialStore)?;
+            Entry::new("Token Planet session", &username).map_err(|_| AuthError::CredentialStore)?;
         Ok(Self { entry })
     }
 
@@ -183,8 +183,30 @@ impl SupabaseAuthClient {
 }
 
 #[cfg(test)]
+pub(crate) static AUTH_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+#[cfg(test)]
 mod tests {
     use super::{can_save_refresh, AuthUser, StoredSession};
+
+    #[test]
+    fn token_planet_environment_configures_auth() {
+        let _env_guard = super::AUTH_ENV_LOCK.lock().unwrap();
+        let names = ["TOKEN_PLANET_SUPABASE_URL", "TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY"];
+        let previous = names.map(|name| std::env::var(name).ok());
+        std::env::set_var(names[0], "https://planet.example.test/");
+        std::env::set_var(names[1], "sb_publishable_example");
+        let config = super::AuthConfig::from_env();
+        for (name, value) in names.into_iter().zip(previous) {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+        let config = config.expect("Token Planet public configuration must be recognized");
+        assert_eq!(config.base_url, "https://planet.example.test");
+        assert_eq!(config.publishable_key, "sb_publishable_example");
+    }
 
     #[test]
     fn session_tokens_are_rust_owned_and_not_a_frontend_state() {

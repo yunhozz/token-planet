@@ -13,7 +13,7 @@ pub const OPEN_ID: &str = "open-world";
 pub const QUIT_ID: &str = "quit-world";
 
 pub fn icon_rect(app: &AppHandle) -> Option<Rect> {
-    app.tray_by_id("token-world")
+    app.tray_by_id("token-planet")
         .and_then(|tray| tray.rect().ok().flatten())
 }
 
@@ -72,13 +72,13 @@ fn force_open_window(app: &AppHandle) {
 
 pub fn install(app: &mut App) -> tauri::Result<()> {
     let menu = build_menu(app.handle(), None)?;
-    TrayIconBuilder::with_id("token-world")
+    TrayIconBuilder::with_id("token-planet")
         .icon(
             app.default_window_icon()
                 .expect("application icon configured")
                 .clone(),
         )
-        .tooltip("Token World")
+        .tooltip("Token Planet")
         .icon_as_template(cfg!(target_os = "macos"))
         .menu(&menu)
         .show_menu_on_left_click(false)
@@ -112,7 +112,7 @@ pub fn install(app: &mut App) -> tauri::Result<()> {
 }
 
 pub fn refresh_status(app: &AppHandle, snapshot: &WorldSnapshot) -> tauri::Result<()> {
-    if let Some(tray) = app.tray_by_id("token-world") {
+    if let Some(tray) = app.tray_by_id("token-planet") {
         tray.set_menu(Some(build_menu(app, Some(snapshot))?))?;
     }
     Ok(())
@@ -122,7 +122,7 @@ fn build_menu(
     app: &AppHandle,
     snapshot: Option<&WorldSnapshot>,
 ) -> tauri::Result<Menu<tauri::Wry>> {
-    let open = MenuItem::with_id(app, OPEN_ID, "Token World 열기", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, OPEN_ID, "Token Planet 열기", true, None::<&str>)?;
     let status = match snapshot {
         Some(world) => format!(
             "수집 상태: Codex {} / Claude Code {}",
@@ -139,7 +139,7 @@ fn build_menu(
         false,
         None::<&str>,
     )?;
-    let quit = MenuItem::with_id(app, QUIT_ID, "Token World 종료", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, QUIT_ID, "Token Planet 종료", true, None::<&str>)?;
     Menu::with_items(app, &[&open, &source, &sync, &quit])
 }
 

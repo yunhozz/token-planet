@@ -25,6 +25,7 @@ npm --prefix apps/desktop run tauri -- dev
 ## 📚 상세 문서
 
 - [데스크톱 실행·공유 설정·수집 방식·개인정보 및 검증 상태](apps/desktop/README.md)
+- [GitHub Releases 및 운영 Supabase 배포 절차](docs/deployment.md)
 - [Supabase 데이터베이스·마이그레이션·CI 안내](supabase/README.md)
 - [설계 문서](docs/superpowers/specs/) · [구현 계획](docs/superpowers/plans/)
 
