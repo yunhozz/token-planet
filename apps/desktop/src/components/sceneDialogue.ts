@@ -36,13 +36,10 @@ function sample(random: () => number) {
 
 export function pickDialogue(context: DialogueContext, random: () => number): string {
   const newKind = context.publicOnly ? null : context.newObjectKind;
-  const incomplete = !context.publicOnly && context.incomplete;
   let pool: string[];
 
   if (newKind) {
     pool = [`새로운 ${KIND_NAMES[newKind] ?? "오브젝트"}가 생겼어!`];
-  } else if (incomplete) {
-    pool = ["아직 기록을 확인하는 중이야."];
   } else if (context.stage < STAGE_LINES.length - 1 && context.progress >= 0.85) {
     pool = ["다음 시대가 가까워!"];
   } else if (context.target === "planet" && STAGE_LINES[context.stage]) {

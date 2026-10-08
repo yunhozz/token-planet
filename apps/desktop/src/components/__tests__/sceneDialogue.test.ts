@@ -9,9 +9,9 @@ describe("pickDialogue", () => {
       .toBe("새로운 오브젝트가 생겼어!");
   });
 
-  it("prioritizes an incomplete personal collection over progress and stage", () => {
+  it("uses normal progress dialogue for an incomplete personal collection", () => {
     expect(pickDialogue({ target: "planet", stage: 1, progress: 0.95, incomplete: true, publicOnly: false }, () => 0))
-      .toContain("기록");
+      .toBe("다음 시대가 가까워!");
   });
 
   it("announces a nearby next stage before the current stage", () => {
