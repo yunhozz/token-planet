@@ -227,7 +227,7 @@ if args == ["--version"]:
     print(os.environ.get("FAKE_CLI_VERSION", "2.119.0"))
     if os.environ.get("FAKE_CLI_VERSION_NOTICE"):
         print(os.environ["FAKE_CLI_VERSION_NOTICE"], file=sys.stderr)
-elif args and args[0] == "start":
+elif args[:2] == ["db", "start"]:
     product_docker_args = None
     if os.environ.get("FAKE_PRODUCT_GUARD_PULL") == "1":
         product_docker_args = ["pull", "unapproved/image:latest"]
@@ -622,17 +622,21 @@ else:
             return []
         return [json.loads(line) for line in self.events.read_text().splitlines()]
 
-    def test_success_starts_resets_tests_and_cleans_resources_in_order(self):
+    def test_success_uses_database_only_start_and_resets_tests_and_cleans_resources_in_order(self):
         result = self.run_runner()
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.source_cli_latest.read_text(), "source-cli-cache-baseline")
         events = self.event_rows()
         cli = [event for event in events if event["tool"] == "supabase"]
+        starts = [event for event in cli if event["args"][:2] == ["db", "start"]]
+        self.assertEqual(len(starts), 1, "runner must start PostgreSQL only")
+        self.assertEqual(starts[0]["args"][:3], ["db", "start", "--network-id"])
+        self.assertEqual(len(starts[0]["args"]), 4)
         docker = [event for event in events if event["tool"] == "docker"]
         version = next(event for event in cli if event["args"] == ["--version"])
         self.assertTrue(Path(version["cwd"]).name.startswith("token-planet-ci."))
-        start = next(i for i, event in enumerate(cli) if event["args"][0] == "start")
+        start = next(i for i, event in enumerate(cli) if event["args"][:2] == ["db", "start"])
         reset = next(i for i, event in enumerate(cli) if event["args"][:2] == ["db", "reset"])
         self.assertLess(start, reset)
         self.assertIn("--network-id", cli[start]["args"])
@@ -962,7 +966,7 @@ else:
         result = self.run_runner({"FAKE_FAIL_NETWORK_CREATE": "1"})
 
         self.assertEqual(result.returncode, 32)
-        self.assertFalse(any(event["tool"] == "supabase" and event["args"][0] == "start" for event in self.event_rows()))
+        self.assertFalse(any(event["tool"] == "supabase" and event["args"][:2] == ["db", "start"] for event in self.event_rows()))
         docker = [event["args"] for event in self.event_rows() if event["tool"] == "docker"]
         self.assertFalse(any(args[:2] == ["network", "rm"] for args in docker))
         self.assertIn("cleanup_status=SKIP kind=network_inspect code=confirmed_not_found", (self.artifacts / "cleanup.log").read_text())
@@ -993,7 +997,7 @@ else:
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("one or more required local ports are unavailable", (self.artifacts / "run.log").read_text())
         events = self.event_rows()
-        self.assertFalse(any(event["tool"] == "supabase" and event["args"][0] == "start" for event in events))
+        self.assertFalse(any(event["tool"] == "supabase" and event["args"][:2] == ["db", "start"] for event in events))
         self.assertFalse(any(event["tool"] == "docker" and event["args"][:2] == ["network", "create"] for event in events))
 
     def test_reset_failure_exports_only_validated_evidence(self):

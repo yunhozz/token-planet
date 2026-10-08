@@ -741,6 +741,14 @@ sys.exit(guard.main(["invalid"]))
                 self.assertEqual(sidecar.read_bytes(), before)
                 self.assertEqual(outside.read_text(), "password-JWT-log-sentinel")
 
+    def test_unapproved_pull_and_ps_are_denied_before_docker(self):
+        for args in (["pull", POSTGRES_IMAGE], ["ps"], ["ps", "--all"], ["container", "ls"]):
+            with self.subTest(args=args):
+                self.events.unlink(missing_ok=True)
+                result = self.invoke(args)
+                self.assertEqual(result.returncode, 125, result.stderr)
+                self.assertEqual(self.docker_events(), [])
+
     def test_unapproved_mutations_and_global_options_never_reach_docker(self):
         bad_commands = [
             ["pull", "unapproved/image:latest"],

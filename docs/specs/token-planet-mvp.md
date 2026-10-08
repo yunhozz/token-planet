@@ -1,6 +1,16 @@
 # Token Planet MVP Product and Technical Specification
 
-**Status:** Product and shared-world design choices approved; implementation and platform release checks are in progress.
+**Status:** Historical MVP design and evidence. The original decisions below are preserved for traceability; they are not the current multiplayer policy or current runtime verification.
+
+## Current multiplayer baseline (2026-10-08)
+
+The [approved multiplayer policy](../superpowers/specs/2026-10-08-token-planet-multiplayer-policy-design.md) supersedes this document's shared-planet, hidden individual totals, email/OTP, and invitation descriptions. Each member keeps an independent personal planet. A private group has at most 10 members and exposes exact individual current/lifetime tokens, growth credits, and ranks to its members.
+
+Current sharing uses device-bound anonymous Auth and the current owner's reusable personal code; rotating it invalidates the previous value. The desired invitation policy remains 7-day expiry, one successful use, and owner revocation; that policy is not implemented by the current personal-code flow. Session loss cannot recover the same member. Account recovery, new read-only visits, and joint goals are deferred.
+
+Raw logs, prompts, original paths and original agent session identifiers remain local; Auth tokens and private wallet information are excluded from group responses. See the [verification record](../2026-10-08-multiplayer-verification.md) for P01–P05 document evidence and V01–V13, whose runtime results are initially unverified. Historical checks below do not prove the current flow.
+
+## Historical specification
 
 ## Product goal
 

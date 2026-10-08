@@ -215,6 +215,41 @@ pub struct SupabaseSyncClient {
     task9_diagnostic: bool,
 }
 
+// The issuance DTO deliberately has no Debug implementation: it owns a one-time secret.
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct CreatedWorldInvite {
+    pub invite_id: String,
+    pub code: String,
+    pub created_at: String,
+    pub expires_at: String,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteStatus { Active, Used, Revoked, Expired }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorldInvite {
+    pub invite_id: String,
+    pub created_at: String,
+    pub expires_at: String,
+    pub revoked_at: Option<String>,
+    pub used_at: Option<String>,
+    pub status: InviteStatus,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteRevokeStatus { Revoked, AlreadyRevoked, Used }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InviteRevokeResult { pub status: InviteRevokeStatus }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InviteAcceptStatus { Accepted, AlreadyAccepted, Unavailable, AlreadyMember, WorldFull, RateLimited }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InviteAcceptResult { pub status: InviteAcceptStatus, pub world_id: Option<String> }
+
 impl SupabaseSyncClient {
     pub fn new(base_url: &str, publishable_key: &str) -> Self {
         Self {
@@ -518,33 +553,34 @@ impl SupabaseSyncClient {
         .await
     }
 
-    pub async fn join_world_by_member_code(
-        &self,
-        access_token: &str,
-        code: &str,
-    ) -> Result<WorldSummary, SyncError> {
-        let rows: Vec<WorldSummary> = self
-            .post_rpc(
-                access_token,
-                "join_world_by_member_code",
-                &serde_json::json!({ "p_code": code }),
-            )
-            .await?;
+    pub async fn accept_world_invite(&self, access_token: &str, code: &str) -> Result<InviteAcceptResult, SyncError> {
+        let rows: Vec<InviteAcceptResult> = self.post_rpc(access_token,"accept_world_invite",&serde_json::json!({"p_code":code})).await?;
+        let result = one_row(rows)?;
+        let success = matches!(result.status, InviteAcceptStatus::Accepted | InviteAcceptStatus::AlreadyAccepted);
+        if success != result.world_id.is_some() || result.world_id.as_ref().is_some_and(|id| uuid::Uuid::parse_str(id).is_err()) {
+            return Err(SyncError::InvalidResponse);
+        }
+        Ok(result)
+    }
+
+    pub async fn create_world_invite(&self, access_token: &str, world_id: &str) -> Result<CreatedWorldInvite, SyncError> {
+        let rows: Vec<CreatedWorldInvite> = self.post_rpc(access_token,"create_world_invite",&serde_json::json!({"p_world_id":world_id})).await?;
+        let result = one_row(rows)?;
+        let created = chrono::DateTime::parse_from_rfc3339(&result.created_at).map_err(|_| SyncError::InvalidResponse)?;
+        let expires = chrono::DateTime::parse_from_rfc3339(&result.expires_at).map_err(|_| SyncError::InvalidResponse)?;
+        if uuid::Uuid::parse_str(&result.invite_id).is_err() || result.code.len()!=64
+            || !result.code.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || expires-created!=chrono::Duration::hours(168) { return Err(SyncError::InvalidResponse); }
+        Ok(result)
+    }
+
+    pub async fn list_world_invites(&self, access_token: &str, world_id: &str) -> Result<Vec<WorldInvite>, SyncError> {
+        self.post_rpc(access_token,"list_world_invites",&serde_json::json!({"p_world_id":world_id})).await
+    }
+
+    pub async fn revoke_world_invite(&self, access_token: &str, invite_id: &str) -> Result<InviteRevokeResult, SyncError> {
+        let rows: Vec<InviteRevokeResult> = self.post_rpc(access_token,"revoke_world_invite",&serde_json::json!({"p_invite_id":invite_id})).await?;
         one_row(rows)
-    }
-
-    pub async fn my_member_code(&self, access_token: &str) -> Result<String, SyncError> {
-        self.post_rpc(access_token, "get_my_member_code", &serde_json::json!({}))
-            .await
-    }
-
-    pub async fn rotate_my_member_code(&self, access_token: &str) -> Result<String, SyncError> {
-        self.post_rpc(
-            access_token,
-            "rotate_my_member_code",
-            &serde_json::json!({}),
-        )
-        .await
     }
 
     pub async fn current_world(&self, access_token: &str) -> Result<Option<WorldShell>, SyncError> {
@@ -901,6 +937,53 @@ mod tests {
     use std::io::{Read, Write};
     use std::net::{TcpListener, TcpStream};
     use std::thread::{self, JoinHandle};
+
+    #[test]
+    fn invite_accept_decodes_status_and_uses_invite_endpoint() {
+        let (url, server) = spawn_rpc_server(MockResponse::Json(200,
+            r#"[{"status":"accepted","world_id":"81000000-0000-0000-0000-000000000001"}]"#.into()));
+        let client = SupabaseSyncClient::new(&url, "publishable-key");
+        let result = run_async(client.accept_world_invite("account-token", &"a".repeat(64)));
+        let request = server.join().unwrap();
+        assert!(result.is_ok(), "invite status response must decode");
+        assert_account_request(&request, "/rest/v1/rpc/accept_world_invite");
+        assert_eq!(request.body, serde_json::json!({"p_code": "a".repeat(64)}));
+    }
+
+    #[test]
+    fn invite_rpc_management_contracts_and_failures() {
+        let cases = [
+            ("create", r#"[{"invite_id":"81000000-0000-0000-0000-000000000002","code":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2026-10-08T00:00:00Z","expires_at":"2026-10-15T00:00:00Z"}]"#),
+            ("list", r#"[{"invite_id":"81000000-0000-0000-0000-000000000002","created_at":"2026-10-08T00:00:00Z","expires_at":"2026-10-15T00:00:00Z","used_at":null,"revoked_at":null,"status":"active"}]"#),
+            ("revoke", r#"[{"status":"revoked"}]"#),
+        ];
+        for (name, body) in cases {
+            let (url, server) = spawn_rpc_server(MockResponse::Json(200, body.into()));
+            let client = SupabaseSyncClient::new(&url, "publishable-key");
+            match name {
+                "create" => assert!(run_async(client.create_world_invite("account-token", "world-id")).is_ok()),
+                "list" => assert_eq!(run_async(client.list_world_invites("account-token", "world-id")).unwrap().len(), 1),
+                _ => assert!(run_async(client.revoke_world_invite("account-token", "invite-id")).is_ok()),
+            }
+            let request = server.join().unwrap();
+            assert_account_request(&request, &format!("/rest/v1/rpc/{name}_world_invite{}", if name=="list" {"s"} else {""}));
+            assert_eq!(request.body, if name=="revoke" {serde_json::json!({"p_invite_id":"invite-id"})} else {serde_json::json!({"p_world_id":"world-id"})});
+        }
+        for body in ["[]", "null", r#"[{"status":"accepted","world_id":null}]"#,
+            r#"[{"status":"unavailable","world_id":"81000000-0000-0000-0000-000000000001"}]"#,
+            r#"[{"status":"future","world_id":null}]"#] {
+            let (url, server) = spawn_rpc_server(MockResponse::Json(200, body.into()));
+            let client = SupabaseSyncClient::new(&url,"publishable-key");
+            assert!(matches!(run_async(client.accept_world_invite("account-token","hidden")),Err(SyncError::InvalidResponse)));
+            assert_account_request(&server.join().unwrap(),"/rest/v1/rpc/accept_world_invite");
+        }
+        for response in [MockResponse::Json(401,"sensitive body".into()),MockResponse::Disconnect] {
+            let (url, server) = spawn_rpc_server(response);
+            let client = SupabaseSyncClient::new(&url,"publishable-key");
+            assert!(run_async(client.accept_world_invite("account-token","hidden")).is_err());
+            assert_account_request(&server.join().unwrap(),"/rest/v1/rpc/accept_world_invite");
+        }
+    }
 
     #[test]
     fn task9_postgrest_error_code_accepts_only_bounded_uppercase_alphanumeric_code() {

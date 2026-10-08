@@ -5,7 +5,7 @@ use crate::domain::planet::{PlanetAvatar, WorldPlanet};
 use crate::sync::auth::{
     AuthConfig, AuthError, SessionStore, StoredSession, SupabaseAuthClient, SESSION_GATE,
 };
-use crate::sync::client::{SupabaseSyncClient, SyncError, WorldMember};
+use crate::sync::client::{CreatedWorldInvite, InviteAcceptStatus, InviteRevokeResult, SupabaseSyncClient, SyncError, WorldInvite, WorldMember};
 use crate::AppState;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -317,31 +317,39 @@ pub async fn join_world(
 ) -> Result<SharingState, String> {
     let (client, session) = signed_in().await?;
     save_sharing_nickname(&state, &nickname)?;
-    client
-        .join_world_by_member_code(&session.access_token, code.trim())
-        .await
-        .map_err(|_| {
-            "코드를 확인할 수 없거나 참여할 수 없습니다. 소유자에게 코드를 다시 확인하세요"
-        })?;
+    let result = client.accept_world_invite(&session.access_token, code.trim()).await
+        .map_err(|_| "가입 응답을 확인하지 못했습니다. 같은 초대 코드로 다시 시도하세요")?;
+    match result.status {
+        InviteAcceptStatus::Accepted | InviteAcceptStatus::AlreadyAccepted => {},
+        InviteAcceptStatus::Unavailable => return Err("사용할 수 없는 초대입니다. 소유자에게 새 초대를 요청하세요".into()),
+        InviteAcceptStatus::AlreadyMember => return Err("이미 다른 그룹에 참여 중입니다".into()),
+        InviteAcceptStatus::WorldFull => return Err("그룹 정원 10명이 모두 찼습니다".into()),
+        InviteAcceptStatus::RateLimited => return Err("시도가 너무 많습니다. 15분 후 다시 시도하세요".into()),
+    }
     get_sharing_state(state).await
 }
 
 #[tauri::command]
-pub async fn get_my_member_code() -> Result<String, String> {
+pub async fn create_world_invite() -> Result<CreatedWorldInvite, String> {
     let (client, session) = signed_in().await?;
-    client
-        .my_member_code(&session.access_token)
-        .await
-        .map_err(|_| "내 초대 코드를 불러올 수 없습니다".into())
+    let id = world_id(&client, &session).await?;
+    client.create_world_invite(&session.access_token, &id).await
+        .map_err(|_| "발급 응답을 확인하지 못했습니다. 목록에서 초대를 철회한 뒤 다시 발급하세요".into())
 }
 
 #[tauri::command]
-pub async fn rotate_my_member_code() -> Result<String, String> {
+pub async fn list_world_invites() -> Result<Vec<WorldInvite>, String> {
     let (client, session) = signed_in().await?;
-    client
-        .rotate_my_member_code(&session.access_token)
-        .await
-        .map_err(|_| "초대 코드를 다시 발급할 수 없습니다".into())
+    let id = world_id(&client, &session).await?;
+    client.list_world_invites(&session.access_token, &id).await
+        .map_err(|_| "초대 목록을 불러오지 못했습니다".into())
+}
+
+#[tauri::command]
+pub async fn revoke_world_invite(invite_id: String) -> Result<InviteRevokeResult, String> {
+    let (client, session) = signed_in().await?;
+    client.revoke_world_invite(&session.access_token, &invite_id).await
+        .map_err(|_| "초대를 철회하지 못했습니다".into())
 }
 
 #[tauri::command]

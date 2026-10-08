@@ -2,9 +2,15 @@
 
 This checklist separates verified local behavior from work that needs a hosted Supabase project and a native Windows machine. Do not publish a cross-platform MVP until the pending checks pass.
 
+## Current multiplayer baseline (2026-10-08)
+
+Use the [approved policy](superpowers/specs/2026-10-08-token-planet-multiplayer-policy-design.md): independent personal planets; exact individual current/lifetime tokens, growth credits and ranks visible within private groups of at most 10. Current device-bound anonymous Auth and reusable owner codes differ from desired 7-day, one-successful-use, owner-revocable invitations. Rotation invalidates the previous personal code but does not implement that desired invitation policy. Session loss cannot recover the same member; recovery, new read-only visits and joint goals remain deferred.
+
+Raw logs, prompts, original paths and original agent session identifiers stay local. Group responses exclude Auth tokens, wallet balances and credit history. The [current verification record](2026-10-08-multiplayer-verification.md) contains P01–P05 document review and V01–V13 runtime status. The 2026-10-08 QA attempt observed only local onboarding before A became inaccessible through CUA: V01 remains partially observed/unverified and V02–V13 remain not run/unverified. Subsequent A-only restart and Launch Services activation did not restore CUA access by exact path or bundle ID. Hidden Popup behavior is a source-based hypothesis, not a confirmed cause; an explicitly approved alternative access path or fix is needed. Document review does not complete a release gate; two-user verification does not prove the 10-member boundary, all native platform checks, or production readiness.
+
 ## Verified in the macOS development environment
 
-The local OTP checks below are historical evidence for the earlier email-auth flow. Current shared-world sign-in uses anonymous Auth and personal invitation codes; verify that flow separately before release.
+The checked items below preserve their historical scope. In particular, the OTP and group-summary-without-member-totals checks are evidence for the earlier email-auth/shared-planet flow. Current shared-world sign-in uses anonymous Auth and personal invitation codes; verify that flow separately before release.
 
 - [x] Solo mode launches without an account. Compact and detailed windows render a planet, confirmed token subtotal, and separate unknown-source state.
 - [x] The updated macOS `.app` bundle builds. A Token Planet app window opens; compact and detailed layouts render and switch in the macOS UI.
@@ -21,7 +27,7 @@ The local OTP checks below are historical evidence for the earlier email-auth fl
 - [ ] Complete an end-to-end sign-in, invite, upload, offline restart/retry, pause/resume, leave, and deletion pass in the packaged macOS app against the hosted project.
 - [ ] Confirm the updated release bundle launches by its exact path, then check macOS menu-bar icon click, keyboard activation, close/reopen, and launch after copying the `.app` into Applications.
 - [ ] Build the native Windows app and check tray click/keyboard behavior, secure credential storage, Windows account refresh, network payloads, and a real native Windows Claude Code transcript with usage fields. WSL is outside MVP scope.
-- [ ] Repeat the hosted end-to-end sharing checks on native Windows, including a two-device same-account deletion/rejoin case and a two-member world.
+- [ ] Repeat hosted end-to-end sharing checks on native Windows with two independent anonymous users. The historical two-device same-account deletion/rejoin expectation depends on future account/device linking and is deferred; it is not a supported current anonymous-auth release check.
 
 ## Automated release and production migration gates
 

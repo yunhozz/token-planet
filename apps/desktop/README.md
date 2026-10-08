@@ -1,6 +1,14 @@
 # Token Planet desktop
 
-Token Planet turns confirmed Codex and Claude Code token usage into a growing solo or shared planet. This directory contains the Tauri 2, React, and Rust desktop client. Solo use needs no account.
+Token Planet turns confirmed Codex and Claude Code token usage into independent personal planets, with optional private group comparison. This directory contains the Tauri 2, React, and Rust desktop client. Solo use needs no account.
+
+## Current multiplayer policy (2026-10-08)
+
+The [approved policy](../../docs/superpowers/specs/2026-10-08-token-planet-multiplayer-policy-design.md) defines independent personal planets and private groups of up to 10 members. Group members see exact individual current planet tokens, lifetime tokens, growth credits, and ranks. They cannot edit or grow another member's planet.
+
+Current device-bound anonymous Auth uses the current owner's reusable personal code. Successful joining does not consume the code; rotation invalidates the old value. The desired 7-day expiry, one successful use, and owner revocation are deferred invitation work. Losing the stored session loses the same member identity; account recovery is deferred. New read-only visits and joint goals are also deferred.
+
+Group responses exclude Auth tokens, wallet balances and credit history; original logs, prompts, paths and original agent session identifiers stay local. See the [verification record](../../docs/2026-10-08-multiplayer-verification.md) for document evidence and runtime status. Existing build/test notes are historical evidence and do not prove the current two-user flow.
 
 ## Run locally
 

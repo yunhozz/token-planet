@@ -11,7 +11,6 @@ PYTHON_BIN="$(command -v python3 || true)"
 POSTGRES_IMAGE="public.ecr.aws/supabase/postgres:17.6.1.171"
 DB_PORT=56432
 SHADOW_PORT=56430
-EXCLUDED_SERVICES="gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor"
 
 usage() {
   printf 'Usage: %s --artifacts-dir <absolute-path>\n' "$0" >&2
@@ -765,7 +764,7 @@ if (
   TOKEN_PLANET_GUARD_NETWORK_ID="$NETWORK_ID" \
   TOKEN_PLANET_GUARD_NETWORK_NAME="$NETWORK_NAME" \
   TOKEN_PLANET_GUARD_PHASE=start \
-  "$SUPABASE_BIN" start --network-id "$NETWORK_ID" --exclude "$EXCLUDED_SERVICES"
+  "$SUPABASE_BIN" db start --network-id "$NETWORK_ID"
 ) >"$WORKDIR/start.raw.log" 2>&1; then
   :
 else

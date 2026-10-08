@@ -143,11 +143,8 @@ function App() {
   const sharedMemberCount = shared?.world?.member_count ?? null;
   const memberContext = JSON.stringify([sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner]);
   const memberListContext = JSON.stringify([memberContext, sharedMemberCount]);
-  const [memberCodeEntry, setMemberCodeEntry] = useState<{ context: string; value: string } | null>(null);
-  const [memberCodeLoadedContext, setMemberCodeLoadedContext] = useState<string | null>(null);
   const [membersEntry, setMembersEntry] = useState<{ context: string; value: WorldMember[] } | null>(null);
   const [newOwnerEntry, setNewOwnerEntry] = useState<{ context: string; value: string } | null>(null);
-  const memberCode = memberCodeEntry?.context === memberContext ? memberCodeEntry.value : null;
   const members = membersEntry?.context === memberListContext ? membersEntry.value : [];
   const newOwnerId = newOwnerEntry?.context === memberContext ? newOwnerEntry.value : "";
   const setNewOwnerId = (value: string) => setNewOwnerEntry({ context: memberContext, value });
@@ -358,24 +355,12 @@ function App() {
   useEffect(() => {
     const context = JSON.stringify([sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner]);
     const listContext = JSON.stringify([context, sharedMemberCount]);
-    setMemberCodeEntry((current) => current?.context === context ? current : null);
     setMembersEntry(null);
     setNewOwnerEntry({ context, value: "" });
     if (sharedPhase !== "shared") {
       return;
     }
     let active = true;
-    sharing.getMyMemberCode().then((value) => {
-      if (active) {
-        setMemberCodeEntry({ context, value });
-        setMemberCodeLoadedContext(context);
-      }
-    }).catch((cause) => {
-      if (active) {
-        setMemberCodeLoadedContext(context);
-        setSharingError(typeof cause === "string" ? cause : "내 개인 코드를 불러오지 못했습니다.");
-      }
-    });
     if (sharedIsOwner) {
       sharing.listMembers().then((value) => {
         if (active) {
@@ -423,16 +408,6 @@ function App() {
       setSharingBusy(false);
       void broadcastDesktopEvent("world-state-updated");
     }
-  }
-
-  async function rotateMemberCode() {
-    const context = memberContext;
-    setSharingBusy(true);
-    setSharingError("");
-    try {
-      setMemberCodeEntry({ context, value: await sharing.rotateMyMemberCode() });
-    } catch (cause) { setSharingError(typeof cause === "string" ? cause : "초대 코드를 다시 발급하지 못했습니다."); }
-    finally { setSharingBusy(false); }
   }
 
   async function refresh() {
@@ -1160,10 +1135,10 @@ function App() {
               {sharedLoading && <LoadingStatus label="기록 동기화를 기다리며 그룹 정보를 확인하고 있습니다." />}
                 {shared?.phase === "shared" && shared.world && <>
                   <WorldCommunity name={shared.world.name} members={shared.planet_members ?? []} />
-                  {((sharedPhase === "shared" && memberCodeLoadedContext !== memberContext) || (sharedIsOwner && membersEntry?.context !== memberListContext))
+                  {(sharedIsOwner && membersEntry?.context !== memberListContext)
                     ? <LoadingStatus label="초대 및 참여자 정보를 불러오고 있습니다." />
                     : <>
-                      <InvitePanel memberCount={shared.world.member_count} isOwner={shared.world.is_owner} memberCode={memberCode} busy={sharingBusy} onRotate={rotateMemberCode} />
+                      <InvitePanel key={memberContext} contextKey={memberContext} memberCount={shared.world.member_count} isOwner={shared.world.is_owner} busy={sharingBusy} />
                       <section className="sharing-panel sharing-manage" aria-label="세계 관리">
                         <h2>세계 관리</h2>
                         {shared.world.is_owner && shared.world.member_count > 1 && <div className="owner-transfer"><label htmlFor="new-owner">소유권을 넘길 참여자</label><select id="new-owner" value={newOwnerId} onChange={(event) => setNewOwnerId(event.target.value)}><option value="">참여자 선택</option>{members.filter((member) => member.role === "member").map((member) => <option key={member.user_id} value={member.user_id}>참여자 {member.user_id.slice(-8)}</option>)}</select><button type="button" disabled={!newOwnerId || sharingBusy} onClick={() => void changeSharing(() => sharing.transferOwner(newOwnerId))}>소유권 이전</button></div>}

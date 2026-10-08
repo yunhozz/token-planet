@@ -1,5 +1,13 @@
 # Token Planet shared-world database
 
+## Current multiplayer policy (2026-10-08)
+
+The [approved policy](../docs/superpowers/specs/2026-10-08-token-planet-multiplayer-policy-design.md) keeps each member's planet independent. Private groups have at most 10 members and expose exact individual current/lifetime tokens, growth credits and ranks through membership-checked group responses. Group membership grants no permission to edit another planet.
+
+Current authentication is device-bound anonymous Auth. The current owner's personal code is reusable after a successful join; rotating it invalidates the previous value. Desired invitations expire after 7 days, allow one successful use, and support owner revocation. Those desired properties are not supplied by current reusable codes or equivalent to code rotation. Same-member recovery after session loss, new read-only visits, and joint goals remain deferred.
+
+Original logs, prompts, paths and original agent session identifiers stay local. Auth access/refresh tokens, wallet balance and credit history are excluded from group responses. The [verification record](../docs/2026-10-08-multiplayer-verification.md) separates P01–P05 document evidence from V01–V13 runtime evidence; earlier SQL/test checkpoints do not prove current two-user behavior or the 10-member capacity boundary in practice.
+
 The earlier migration chain and 121 pgTAP assertions were verified locally with Supabase CLI 2.118.0 and Docker (PostgreSQL 17). New anonymous-auth and personal-code changes require fresh verification before release.
 
 ```sh
