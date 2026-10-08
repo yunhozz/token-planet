@@ -67,9 +67,11 @@ A의 네이티브 프로세스만 재시작하면서 A 프로필 데이터와 Vi
 - [Supabase README](../supabase/README.md#current-multiplayer-policy-2026-10-08)
 - [출시 체크리스트](release-acceptance.md#current-multiplayer-baseline-2026-10-08)
 
+P02·P05의 재사용 개인 코드 및 초대 구현 유보 설명은 당시 문서 검토의 역사적 기록이다. 현재 브랜치에는 별도 초대 lifecycle이 구현되어 있으며 E2·E3의 범위로만 평가한다.
+
 ## 실제 두 사용자 검증 — V01–V13
 
-아래 방법·기대 결과는 승인 spec의 예정 기준이다. 실제 수행·관찰 근거와 미검증 범위는 각 행의 마지막 열과 E1에 연결한다. 공통 중단 요인은 A 창의 CUA 접근 불가이며, 다음 단계는 CEO가 대체 접근 경로 또는 수정에 대한 명시적 승인을 확보한 후 필요한 재실행 범위를 확정하는 것이다. 현재 런타임 통과·실패로 판정한 항목은 없다.
+아래 방법·기대 결과는 당시 승인 spec의 예정 기준이다. 개인 코드 관련 V02·V08·V12·V13은 역사적 검증 기준이며 현재 초대 lifecycle의 A/B 수용 기준을 대신하지 않는다. 실제 수행·관찰 근거와 미검증 범위는 각 행의 마지막 열과 E1에 연결한다. 공통 중단 요인은 A 창의 CUA 접근 불가이며, 다음 단계는 CEO가 대체 접근 경로 또는 수정에 대한 명시적 승인을 확보한 후 필요한 재실행 범위를 확정하는 것이다. 현재 런타임 통과·실패로 판정한 항목은 없다.
 
 | ID | 방법·범위 (예정) | 기대 결과·수용 기준 | 실행 상태 / 기준 판정 | 실제 관찰·증거 / 남은 범위 |
 | --- | --- | --- | --- | --- |
@@ -122,4 +124,60 @@ V05는 실제 payload 관찰 없이는 입증할 수 없다. V06은 기준값·�
 
 Reviewer가 제기했던 macOS `/tmp` canonical path 비교, 오래된 initial list 응답·오류의 최신 목록 덮어쓰기, visibilitychange 중 pending 초대 발급 잠금 해제의 세 finding은 수정과 해당 QA 재검증 후 최종 소스 검토에서 해소됐다.
 
-DB migration replay·pgTAP·적용 DB grants·실제 concurrency·native A/B 앱은 `environment blocked / not run`이다. 로컬 구현 수용은 merge/release gate를 열지 않는다. 승인된 격리 DB 검증과 남은 기준의 증거를 확보해야 한다. 위 E2는 과거 P 문서 검토와 V01–V13의 실행 결과를 대체하거나 소급 완료하지 않는다.
+E2 당시 QA 시도에서 DB migration replay·pgTAP·적용 DB grants·실제 concurrency·native A/B 앱은 `environment blocked / not run`이었다. 아래 E3가 migration replay·SQL suite의 상태만 후속 CI 증거로 갱신한다. CI SQL suite는 disposable DB의 grant/role 경계를 검증했다. hosted/대상 프로젝트의 grants·독립 세션 concurrency·native A/B 앱은 여전히 미검증이다. 로컬 구현 수용은 merge/release gate를 열지 않는다. 승인된 격리 DB 검증과 남은 기준의 증거를 확보해야 한다. 위 E2는 과거 P 문서 검토와 V01–V13의 실행 결과를 대체하거나 소급 완료하지 않는다.
+
+
+## 정확한 SHA의 원격 CI 검증 — E3
+
+CEO가 확인한 GitHub Actions 결과를 재사용한다. 기준 HEAD는 `2dba01ec7fd8427666897f2d50bc634ad3d6a857`이며 이 문서 작업에서 CI·테스트·앱을 재실행하지 않았다.
+
+| 증거 | 관찰 결과 | 범위·한계 |
+| --- | --- | --- |
+| [Migration CI run 37797049552](https://github.com/yunhozz/token-planet/actions/runs/37797049552) | success; `Replay migrations in a disposable local database` job에서 migration staging/runner 검사, local Docker guard, pinned image pulls, 전체 migration replay 및 SQL suites 통과. 초대 발급 권한, legacy 개인 코드 가입·anon RPC 접근 거부, 직접 테이블·비소유자 접근 거부의 grant/role assertions 포함 | disposable GitHub-hosted DB의 권한 경계 검증. hosted/production 프로젝트 적용·대상 프로젝트 grants 및 독립 세션 concurrency harness 실행 증거가 아님 |
+| [Desktop CI run 37797049574](https://github.com/yunhozz/token-planet/actions/runs/37797049574) | `validate` 통과; workflow의 `npm test`와 `npm run build` 실행 | package·release·Supabase Preview skipped. native A/B UI 검증이 아님 |
+
+E3는 E2의 과거 migration replay·SQL suite 미실행 상태를 위 SHA의 원격 CI 범위에서만 대체한다. SQL failure-first RED 관측이나 E2의 로컬 실행 이력을 소급 주장하지 않는다. V01–V13, 초대 독립 세션 동시성, hosted/대상 프로젝트 grants 및 native A/B 검증은 새 증거 없이 완료 처리하지 않으며 I01–I16 전체 완료 또는 merge/release 수용을 뜻하지 않는다. hosted migration/app 검증도 남아 있다.
+
+[PR #13](https://github.com/yunhozz/token-planet/pull/13)은 draft이며 latestReviews/reviewDecision은 비어 있다. PR 본문의 남은 검증 조건은 수용 gate로 유지한다. Branch-protection 조회는 404였고 repository rulesets는 비어 있어 이 조건을 GitHub가 강제하는 required checks로 표현하지 않는다.
+
+## 이 PC의 로컬 QA 재시도 — E4 (2026-10-09)
+
+사용자가 이 PC에서 QA 재시작을 요청한 뒤 수행한 QA 보고를 CEO가 전달했으며, 이 절은 그 증거를 재사용한다. 문서 작성자는 환경·테스트·앱을 재실행하지 않았다. 승인 대상은 `/tmp/token-planet-multiplayer-qa-20261008`, project ID `token-planet-multiplayer-qa-20261008`이었다.
+
+| 범위 | 관찰·실행 결과 | 상태·한계 |
+| --- | --- | --- |
+| 사전 환경 확인 | 예상 QA DB가 없고 port `56322`가 비어 있음. Supabase CLI `2.119.0`, Docker `desktop-linux` `29.8.2`, cached pinned Postgres image 확인 | 기존 QA DB 재사용이 아닌 격리 DB 시작 준비 |
+| 격리 DB 시작 | QA가 정확한 이름의 전용 private network와 임시 workdir/config/migrations/tests를 생성한 뒤 `supabase db start --workdir ... --network-id <owned id>` 실행. fail-closed Docker shim이 image pull 9회와 container prune 1회를 거부하여 exit 1 | `environment blocked / not run`; DB 기능 테스트의 실패·성공 판정이 아님 |
+| 자원·정리 경계 | image pull, DB container/volume/port 생성 없음. 비QA 자원 변경 없음. QA가 정확한 소유권과 attachment 0개를 확인한 뒤 자체 소유의 빈 network와 임시 workdir만 정리 | hosted Supabase 프로젝트 접근 없음 |
+| DB 검증 | migration replay·SQL suite·독립 세션 concurrency 실행하지 못함 | `environment blocked / not run` |
+| A/B 앱 검증 | Token Planet 창·프로필이 없고 Auth/REST images도 없음. `dev:local`은 CLI `2.118.0`을 다운로드하므로 사용하지 않음 | A/B `environment blocked / not run`; native UI 행동 증거 없음 |
+
+E4는 E3의 정확한 SHA 원격 CI 통과를 변경하지 않는다. hosted/대상 프로젝트 grants, 독립 세션 concurrency, hosted migration/deployment 및 native A/B gate는 계속 열려 있다. V01–V13 및 I01–I16 전체 완료, merge/release 수용으로 해석하지 않는다. 다음 검증에는 DB 시작을 막은 CLI·Docker shim 동작의 범위와 Auth/REST·A/B 실행 환경을 먼저 해결한 뒤 승인된 격리 대상에서 재시도해야 한다.
+
+### E4 후속: 공식 runner 재시도 (2026-10-09)
+
+사용자가 지정한 검증 순서에 따라 실행한 공식 runner의 QA 보고를 CEO가 전달했으며, 이 절은 그 결과를 재사용한다. 앞선 수동 격리 DB 시작 시도와 구분한다. 실행 명령은 다음과 같으며 비밀 없는 증거는 artifact 경로에 보존했다.
+
+```sh
+SUPABASE_BIN=/opt/homebrew/bin/supabase bash supabase/ci/run.sh --artifacts-dir /tmp/token-planet-invite-replay.RJvUfDj6
+```
+
+CLI `2.119.0`, cached pinned Postgres image, Docker Unix socket, loopback ports 및 32개 migration staging/preflight는 통과했다. Runner가 생성한 자체 소유 DB container는 healthy로 확인됐다. 이어 공식 guard가 PULL 9회와 PS 1회를 `DOCKER_COMMAND_IS_NOT_APPROVED`로 거부하여 runner가 reset·migration replay·SQL suite 전에 종료됐다. `reset.log`는 없고 TAP summary는 0개다. Image pull은 수행되지 않았다. Healthy 상태와 preflight 통과는 migration 또는 SQL 실행·성공 증거가 아니다.
+
+Runner 자체 cleanup이 정확히 자체 소유한 container·volume·network를 제거했고 임시 workdir도 제거됐다. 추가 정리는 이번 실행이 생성한 `supabase/ci/__pycache__`의 `.pyc` 파일로 한정했다. Artifact `/tmp/token-planet-invite-replay.RJvUfDj6`는 보존했다. Hosted 프로젝트 접근, 독립 세션 concurrency 및 A/B 실행은 없었다.
+
+이 공식 runner 시도 역시 `environment blocked / not run`이며 migration replay·SQL suite의 통과 또는 실패로 판정하지 않는다. E3 원격 CI 증거와 hosted/대상 프로젝트 grants·독립 세션 concurrency·native A/B 등 남은 gate는 그대로 유지한다.
+
+### E4 후속: 공식 runner SQL 검증 완료와 남은 gate (2026-10-09)
+
+CEO가 전달한 후속 실행 결과에 따르면 다음 공식 runner 명령은 Supabase CLI `2.119.0`에서 성공했다. 이 결과는 위의 차단된 시도 이후 별도 실행의 증거이며, 앞선 시도의 상태를 소급 변경하지 않는다.
+
+```sh
+SUPABASE_BIN=/opt/homebrew/bin/supabase bash supabase/ci/run.sh --artifacts-dir /tmp/token-planet-invite-replay.ready.He5GOo0U
+```
+
+32개 migration replay와 40개 SQL pgTAP suite가 모두 PASS였으며, runner는 종료 시 정확히 자체 소유한 container·volume·network를 제거했다. Hosted 대상에는 접근하지 않았다. 이 결과는 disposable CI runner DB의 migration·SQL/grant 경계 증거로 한정한다. Hosted/대상 프로젝트 grants, 독립 세션 concurrency 또는 실제 앱 동작의 통과 증거가 아니다.
+
+Step 2 concurrency 사전 확인에서 승인된 정확한 QA workdir·project·container·volume·network는 모두 없고 대상 ports는 비어 있었다. 로컬 `desktop-linux` Unix socket을 사용하며 connection override가 없음을 확인했다. 임시로 생성한 정확한 QA workdir에 migration 파일 32개를 staging하고 manifest를 검증했지만 migration은 하나도 적용하지 않았다. 기존 guard는 `token-planet-ci.*` workdir 아래의 `token-planet-ci-[0-9a-f]{24}` 프로젝트와 loopback port `56432`만 허용한다. 공식 runner의 입력은 `--artifacts-dir`뿐이며 종료 시 DB를 정리하므로 해당 DB를 남겨 별도 concurrency harness에 연결할 수 없었다. 기존 guard 계약은 이 QA identity와 port `56322`를 거부하므로 QA는 DB 생성 전에 중단했다. 이 Step 2에서는 PULL·PS·prune 및 hosted 접근을 수행하지 않았다. 자체 소유 임시 workdir만 제거했으며 종료 확인에서도 대상 Docker 자원은 없고 ports는 비어 있었다. Guard 변경이나 대체 shim은 허용되지 않아 독립 세션 concurrency는 `environment blocked / not run`으로 유지한다. 이는 앞선 Step 1 공식 runner의 성공한 DB·SQL 실행과 별개의 시도다.
+
+별도 local store·keychain·profile 지원이 없어 실제 앱 A/B도 `environment blocked / not run`이다. 최신 로컬 migration replay·SQL suite 상태만 위 성공 결과로 갱신하며, hosted grants·concurrency·native A/B gate와 미검증 V/I 기준은 완료 처리하지 않는다. I01–I16 전체 완료 또는 merge/release 수용을 뜻하지 않는다.
