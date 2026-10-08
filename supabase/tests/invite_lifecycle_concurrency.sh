@@ -1,17 +1,9 @@
 #!/usr/bin/env bash
-# Source-only in the current handoff. Execute only after separate DB approval.
+# Validate an approved QA target or an explicitly supplied disposable CI target.
 set -Eeuo pipefail
 umask 077
-if [[ $# != 4 || "$1" != --workdir || "$3" != --container ]]; then
-  printf 'Usage: %s --workdir <approved-workdir> --container <approved-container>\n' "$0" >&2
-  exit 2
-fi
-python3 - "$2" "$4" <<'PY'
-import json, os, pathlib, select, subprocess, sys, time, uuid
-
-workdir, container = sys.argv[1:]
-expected = 'token-planet-multiplayer-qa-20261008'
-root = pathlib.Path('/tmp/token-planet-multiplayer-qa-20261008')
+python3 - "$@" <<'PY'
+import json, os, pathlib, re, select, subprocess, sys, time, uuid
 
 def fail(message):
     raise RuntimeError(message)
@@ -19,38 +11,97 @@ def fail(message):
 def is_approved_workdir(workdir, approved_root):
     return pathlib.Path(workdir).resolve() == approved_root.resolve()
 
+def parse_arguments(args: list[str]) -> tuple[str, str, str, str | None, str | None]:
+    mode = 'ci' if args[:1] == ['--ci'] else 'qa'
+    values = args[1:] if mode == 'ci' else args
+    keys = {'--workdir', '--container'}
+    if mode == 'ci': keys |= {'--container-id', '--network-id'}
+    if len(values) != 2 * len(keys): raise ValueError('incomplete arguments')
+    parsed = {}
+    for key, value in zip(values[::2], values[1::2]):
+        if key not in keys or key in parsed or not value or value.startswith('--'):
+            raise ValueError('invalid arguments')
+        parsed[key] = value
+    return mode, parsed['--workdir'], parsed['--container'], parsed.get('--container-id'), parsed.get('--network-id')
+
+def resolve_target(mode: str, workdir: str, container: str,
+                   container_id: str | None = None, network_id: str | None = None) -> tuple[pathlib.Path, str, int]:
+    path = pathlib.Path(workdir)
+    if mode == 'qa':
+        root = pathlib.Path('/tmp/token-planet-multiplayer-qa-20261008')
+        project = root.name
+        if container_id is not None or network_id is not None or not is_approved_workdir(workdir, root) or container != 'supabase_db_' + project:
+            fail('approved QA workdir/container required')
+        return root, project, 56322
+    project = container.removeprefix('supabase_db_')
+    if (mode != 'ci' or not path.is_absolute()
+            or not re.fullmatch(r'token-planet-ci\.[A-Za-z0-9]{8}', path.resolve().name)
+            or not re.fullmatch(r'token-planet-ci-[0-9a-f]{24}', project)
+            or container != 'supabase_db_' + project
+            or not re.fullmatch(r'[0-9a-f]{64}', container_id or '')
+            or not re.fullmatch(r'[0-9a-f]{64}', network_id or '')):
+        fail('complete owned CI target required')
+    return path.resolve(), project, 56432
+
+def validate_target_identity(target: tuple[pathlib.Path, str, int], container: str,
+                             container_id: str | None, network_id: str | None, config: str,
+                             context: dict, container_info: dict, volume_info: dict,
+                             network_info: dict | None) -> str:
+    root, project, port = target
+    if not re.search(r'^project_id\s*=\s*"' + re.escape(project) + r'"\s*$', config, re.M):
+        fail('project identity mismatch')
+    endpoint = context.get('Endpoints', {}).get('docker', {}).get('Host', '')
+    if not endpoint.startswith('unix:///'): fail('local Docker socket required')
+    info = container_info
+    labels = info.get('Config', {}).get('Labels') or {}
+    if (info.get('Name', '').lstrip('/') != container
+            or labels.get('com.supabase.cli.project') != project
+            or labels.get('com.supabase.cli.workdir') != str(root)
+            or not info.get('State', {}).get('Running')
+            or not info.get('Id') or (container_id is not None and info.get('Id') != container_id)):
+        fail('container identity mismatch')
+    ports = info.get('NetworkSettings', {}).get('Ports') or {}
+    if any(b.get('HostIp') != '127.0.0.1' for entries in ports.values() for b in entries or []):
+        fail('loopback bindings required')
+    if ports.get('5432/tcp') != [{'HostIp': '127.0.0.1', 'HostPort': str(port)}]:
+        fail('exact database binding required')
+    mounts = [m for m in info.get('Mounts', []) if m.get('Destination') == '/var/lib/postgresql/data']
+    if len(mounts) != 1 or mounts[0].get('Type') != 'volume' or mounts[0].get('Name') != container or mounts[0].get('RW') is not True:
+        fail('database mount mismatch')
+    if volume_info.get('Name') != container or (volume_info.get('Labels') or {}).get('com.supabase.cli.project') != project:
+        fail('volume ownership mismatch')
+    if port == 56432:
+        network = network_info or {}
+        name = 'token-planet-ci-net-' + project.removeprefix('token-planet-ci-')
+        labels = network.get('Labels') or {}
+        attached = info.get('NetworkSettings', {}).get('Networks') or {}
+        if (network.get('Id') != network_id or network.get('Name') != name or network.get('Driver') != 'bridge'
+                or labels.get('com.tokenplanet.ci.project') != project
+                or labels.get('com.tokenplanet.ci.workdir') != str(root)
+                or (network.get('Options') or {}).get('com.docker.network.bridge.host_binding_ipv4') != '127.0.0.1'
+                or attached.get(name, {}).get('NetworkID') != network_id):
+            fail('network identity mismatch')
+    return info['Id']
+
 def docker(args):
-    result = subprocess.run(['docker', *args], capture_output=True, text=True)
+    result = subprocess.run(['docker', *args], capture_output=True, text=True, timeout=20)
     if result.returncode: fail('Docker identity operation failed; details withheld')
     return result.stdout
 
-# Fail closed before any SQL. Never infer another project or endpoint.
-if not is_approved_workdir(workdir, root) or container != 'supabase_db_' + expected:
-    fail('approved workdir/container required')
-if any(os.environ.get(key) for key in ('DOCKER_HOST','DOCKER_CONTEXT','DATABASE_URL','PGHOST','PGPORT','PGPASSWORD','SUPABASE_ACCESS_TOKEN')):
+try:
+    mode, workdir, container, requested_id, network_id = parse_arguments(sys.argv[1:])
+except ValueError:
+    print('invalid concurrency target arguments', file=sys.stderr)
+    raise SystemExit(2)
+root, expected, port = target = resolve_target(mode, workdir, container, requested_id, network_id)
+if any(os.environ.get(key) for key in ('DOCKER_HOST','DOCKER_CONTEXT','DOCKER_TLS_VERIFY','DOCKER_CERT_PATH','DATABASE_URL','PGHOST','PGHOSTADDR','PGPORT','PGDATABASE','PGUSER','PGPASSWORD','PGSERVICE','PGSERVICEFILE','SUPABASE_ACCESS_TOKEN')):
     fail('connection overrides are not allowed')
 config = (root/'supabase/config.toml').read_text()
-import re
-if not re.search(r'^project_id\s*=\s*"'+expected+r'"\s*$',config,re.M): fail('project identity mismatch')
-context = json.loads(docker(['context','inspect']))[0]
-endpoint = context.get('Endpoints',{}).get('docker',{}).get('Host','')
-if not endpoint.startswith('unix://'): fail('local Docker socket required')
-info = json.loads(docker(['container','inspect',container]))[0]
-labels = info.get('Config',{}).get('Labels',{})
-if labels.get('com.supabase.cli.project') != expected or labels.get('com.supabase.cli.workdir') != str(root):
-    fail('container ownership mismatch')
-if not info.get('State',{}).get('Running'): fail('approved database is not running')
-ports = info.get('NetworkSettings',{}).get('Ports',{})
-if any(binding.get('HostIp') != '127.0.0.1' for entries in ports.values() for binding in entries or []):
-    fail('database must publish on loopback only; no SQL executed')
-if not any(b.get('HostIp')=='127.0.0.1' and b.get('HostPort')=='56322' for b in ports.get('5432/tcp') or []):
-    fail('approved loopback port required')
-volume = 'supabase_db_' + expected
-if not any(m.get('Type')=='volume' and m.get('Name')==volume and m.get('Destination')=='/var/lib/postgresql/data' for m in info.get('Mounts',[])):
-    fail('database volume mismatch')
-v = json.loads(docker(['volume','inspect',volume]))[0]
-if v.get('Labels',{}).get('com.supabase.cli.project')!=expected: fail('volume ownership mismatch')
-container_id = info['Id']
+context = json.loads(docker(['context', 'inspect']))[0]
+info = json.loads(docker(['container', 'inspect', container]))[0]
+v = json.loads(docker(['volume', 'inspect', container]))[0]
+network = json.loads(docker(['network', 'inspect', network_id]))[0] if mode == 'ci' else None
+container_id = validate_target_identity(target, container, requested_id, network_id, config, context, info, v, network)
 run = 'invite_' + uuid.uuid4().hex
 users, worlds, processes = [], [], []
 

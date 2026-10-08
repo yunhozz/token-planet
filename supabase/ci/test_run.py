@@ -13,6 +13,13 @@ import unittest
 from product_docker_guard import HELPERS, POSTGRES_IMAGE
 
 
+CONCURRENCY_SCENARIOS = (
+    "same-code competition and retry", "last-slot competition", "accept versus revoke",
+    "accept versus transfer", "expiry during world-lock wait",
+    "same-user different-world competition", "independently committed rate-limit counter",
+)
+
+
 RUNNER = Path(__file__).with_name("run.sh")
 
 
@@ -345,6 +352,11 @@ def inspect_attempt(kind, threshold):
     return count
 record()
 state = read_state()
+if len(args) > 1 and args[1] == "rm" and os.environ.get("FAKE_RM_OUTPUT") == "1":
+    print(args[0] + "-rm-stdout-sentinel")
+    print(args[0] + "-rm-stderr-sentinel", file=sys.stderr)
+    if os.environ.get("FAKE_RM_FAIL") == args[0]:
+        sys.exit(56)
 if args[:2] == ["context", "show"]:
     print(os.environ.get("FAKE_DOCKER_CONTEXT", "default"))
 elif args[:2] == ["context", "inspect"]:
@@ -552,6 +564,15 @@ else:
         (self.tests / "sample.sql").write_text(
             "begin;\nselect plan(1);\nselect ok(true);\nselect * from finish();\nrollback;\n"
         )
+        (self.tests / "invite_lifecycle_concurrency.sh").write_text(
+            "#!/bin/sh\nexec python3 - \"$@\" <<'PY'\n"
+            "import json, os, sys\n"
+            "with open(os.environ['FAKE_EVENTS'], 'a') as stream:\n"
+            "    stream.write(json.dumps(dict(tool='concurrency', args=sys.argv[1:])) + '\\n')\n"
+            "print(os.environ.get('FAKE_CONCURRENCY_STDOUT', " + repr("\n".join("PASS " + name for name in CONCURRENCY_SCENARIOS)) + "))\n"
+            "print(os.environ.get('FAKE_CONCURRENCY_STDERR', ''), file=sys.stderr)\n"
+            "sys.exit(int(os.environ.get('FAKE_CONCURRENCY_EXIT', '0')))\nPY\n"
+        )
         self.fake_supabase = self.bin / "supabase"
         self.fake_docker = self.bin / "docker"
         self.fake_supabase.write_text(textwrap.dedent(self.FAKE_SUPABASE))
@@ -582,6 +603,15 @@ else:
                     printf 'credential-sentinel' >&2
                     exit 43
                 fi
+                case "$1" in
+                    */prepare_migrations.py)
+                        "{self.real_python}" -c 'import json, os, sys; f=open(os.environ["FAKE_EVENTS"], "a"); f.write(json.dumps(dict(tool="migration", args=sys.argv[1:])) + "\\n")' "$@"
+                        if [ "$FAKE_FINAL_VERIFY_FAIL" = "1" ] && [ "$2" = "verify" ]; then
+                            count=$("{self.real_python}" -c 'import json, os; print(sum(json.loads(s).get("tool") == "migration" and json.loads(s).get("args", [None, None])[1] == "verify" for s in open(os.environ["FAKE_EVENTS"])))')
+                            if [ "$count" = "3" ]; then exit 1; fi
+                        fi
+                        ;;
+                esac
                 exec "{self.real_python}" "$@"
                 '''
             )
@@ -621,6 +651,86 @@ else:
         if not self.events.exists():
             return []
         return [json.loads(line) for line in self.events.read_text().splitlines()]
+
+    def assert_owned_cleanup(self):
+        rows = self.event_rows()
+        positions = [next(i for i, e in enumerate(rows) if e['tool'] == 'docker' and e['args'][:2] == [kind, 'rm']) for kind in ('container', 'volume', 'network')]
+        self.assertEqual(positions, sorted(positions))
+        return positions
+
+    def test_cleanup_removal_output_is_private_on_success_and_failure(self):
+        for original_status in (0, 47):
+            for failed_kind in ('', 'container', 'volume', 'network'):
+                with self.subTest(original_status=original_status, failed_kind=failed_kind):
+                    shutil.rmtree(self.artifacts, ignore_errors=True)
+                    self.events.unlink(missing_ok=True)
+                    self.state.unlink(missing_ok=True)
+                    result = self.run_runner({'FAKE_RM_OUTPUT': '1', 'FAKE_RM_FAIL': failed_kind,
+                                              'FAKE_CONCURRENCY_EXIT': str(original_status)})
+                    self.assertEqual(result.returncode, original_status or (1 if failed_kind else 0))
+                    self.assert_owned_cleanup()
+                    cleanup = (self.artifacts / 'cleanup.log').read_text()
+                    for kind in ('container', 'volume', 'network'):
+                        status = 'FAIL' if kind == failed_kind else 'PASS'
+                        for channel in ('stdout', 'stderr'):
+                            sentinel = f'{kind}-rm-{channel}-sentinel'
+                            self.assertNotIn(sentinel, result.stdout + result.stderr)
+                            for artifact in self.artifacts.rglob('*'):
+                                if artifact.is_file():
+                                    self.assertNotIn(sentinel, artifact.read_text())
+                        self.assertIn(f'cleanup_status={status} kind={kind}_remove', cleanup)
+
+    def test_concurrency_runs_after_all_tap_suites_before_owned_cleanup(self):
+        result = self.run_runner()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        rows = self.event_rows()
+        calls = [i for i, e in enumerate(rows) if e['tool'] == 'concurrency']
+        self.assertEqual(len(calls), 1)
+        tap = max(i for i, e in enumerate(rows) if e['tool'] == 'docker' and e['args'][:1] == ['exec'] and '-f' in e['args'])
+        verify = max(i for i, e in enumerate(rows) if e['tool'] == 'migration' and e['args'][1] == 'verify')
+        self.assertLess(tap, verify)
+        self.assertLess(verify, calls[0])
+        self.assertLess(calls[0], self.assert_owned_cleanup()[0])
+
+    def test_concurrency_receives_exact_owned_target(self):
+        result = self.run_runner({'FAKE_RESET_RECREATE': '1'})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        state = json.loads(self.state.read_text())
+        calls = [e['args'] for e in self.event_rows() if e['tool'] == 'concurrency']
+        self.assertEqual(calls, [['--ci', '--workdir', str(Path(state['workdir']).resolve()), '--container', 'supabase_db_' + state['project_id'], '--container-id', 'recreated-container-id', '--network-id', state['network_id']]])
+
+    def test_concurrency_failure_preserves_exit_and_cleans_owned_resources(self):
+        result = self.run_runner({'FAKE_CONCURRENCY_EXIT': '47'})
+        self.assertEqual(result.returncode, 47)
+        self.assertEqual((self.artifacts / 'invite-lifecycle-concurrency-summary.log').read_text(), 'concurrency_status=FAIL exit=47 diagnostics=redacted\n')
+        self.assert_owned_cleanup()
+
+    def test_reset_or_tap_failure_skips_concurrency(self):
+        for env in ({'FAKE_FAIL_RESET': '1'}, {'FAKE_FAIL_PSQL': '1'}, {'FAKE_TAP': '1..1\nnot ok 1 - failed'}, {'FAKE_FINAL_VERIFY_FAIL': '1'}):
+            with self.subTest(env=env):
+                shutil.rmtree(self.artifacts, ignore_errors=True)
+                self.events.unlink(missing_ok=True); self.state.unlink(missing_ok=True)
+                result = self.run_runner(env)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertFalse(any(e['tool'] == 'concurrency' for e in self.event_rows()))
+                self.assert_owned_cleanup()
+
+    def test_concurrency_summary_requires_all_scenarios_and_redacts_output(self):
+        for complete in (True, False):
+            with self.subTest(complete=complete):
+                shutil.rmtree(self.artifacts, ignore_errors=True)
+                self.events.unlink(missing_ok=True); self.state.unlink(missing_ok=True)
+                expected = ['PASS ' + name for name in CONCURRENCY_SCENARIOS]
+                output = '\n'.join(expected if complete else expected[:-1]) + '\nsecret-sentinel'
+                result = self.run_runner({'FAKE_CONCURRENCY_STDOUT': output, 'FAKE_CONCURRENCY_STDERR': 'secret-sentinel'})
+                self.assertEqual(result.returncode, 0 if complete else 1, result.stderr)
+                self.assertNotIn('secret-sentinel', result.stdout + result.stderr)
+                for artifact in self.artifacts.rglob('*'):
+                    if artifact.is_file(): self.assertNotIn('secret-sentinel', artifact.read_text())
+                summary = (self.artifacts / 'invite-lifecycle-concurrency-summary.log').read_text()
+                if complete: self.assertEqual(summary.splitlines(), expected)
+                else: self.assertEqual(summary, 'concurrency_status=FAIL exit=1 diagnostics=redacted\n')
+                self.assert_owned_cleanup()
 
     def test_success_uses_database_only_start_and_resets_tests_and_cleans_resources_in_order(self):
         result = self.run_runner()
