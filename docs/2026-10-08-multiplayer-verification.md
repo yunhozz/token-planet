@@ -1,7 +1,7 @@
 # 멀티 공유 정책·두 사용자 검증 기록
 
 - 작성일: 2026-10-08
-- 단계: Task 6 QA 부분 관찰 및 별도 초대 lifecycle 소스·로컬 검증 결과 통합; 두 사용자 공유 검증 미완료
+- 단계: 2026-10-09 지정 hosted 대상 초대 migration 적용·읽기 전용 권한 확인 완료; 독립 세션 concurrency·native A/B 및 두 사용자 공유 검증 미완료
 - 기준: [승인 spec](superpowers/specs/2026-10-08-token-planet-multiplayer-policy-design.md), [실행 plan](superpowers/plans/2026-10-08-token-planet-multiplayer-policy.md)
 - 문서 검토 기준 commit: `956f2a82b22d9f9d16d17042294c0daaffb35cd2` 이후 이 문서와 함께 작성된 문서 변경분
 - 문서 검토는 실제 앱·Auth·서버·동기화 동작을 입증하지 않는다. 아래 QA 결과는 CEO가 전달한 최종 보고와 실행 handoff의 마지막 QA 절을 재사용했다. Secretary가 앱을 재실행하거나 재관찰하지 않았다.
@@ -181,3 +181,25 @@ SUPABASE_BIN=/opt/homebrew/bin/supabase bash supabase/ci/run.sh --artifacts-dir 
 Step 2 concurrency 사전 확인에서 승인된 정확한 QA workdir·project·container·volume·network는 모두 없고 대상 ports는 비어 있었다. 로컬 `desktop-linux` Unix socket을 사용하며 connection override가 없음을 확인했다. 임시로 생성한 정확한 QA workdir에 migration 파일 32개를 staging하고 manifest를 검증했지만 migration은 하나도 적용하지 않았다. 기존 guard는 `token-planet-ci.*` workdir 아래의 `token-planet-ci-[0-9a-f]{24}` 프로젝트와 loopback port `56432`만 허용한다. 공식 runner의 입력은 `--artifacts-dir`뿐이며 종료 시 DB를 정리하므로 해당 DB를 남겨 별도 concurrency harness에 연결할 수 없었다. 기존 guard 계약은 이 QA identity와 port `56322`를 거부하므로 QA는 DB 생성 전에 중단했다. 이 Step 2에서는 PULL·PS·prune 및 hosted 접근을 수행하지 않았다. 자체 소유 임시 workdir만 제거했으며 종료 확인에서도 대상 Docker 자원은 없고 ports는 비어 있었다. Guard 변경이나 대체 shim은 허용되지 않아 독립 세션 concurrency는 `environment blocked / not run`으로 유지한다. 이는 앞선 Step 1 공식 runner의 성공한 DB·SQL 실행과 별개의 시도다.
 
 별도 local store·keychain·profile 지원이 없어 실제 앱 A/B도 `environment blocked / not run`이다. 최신 로컬 migration replay·SQL suite 상태만 위 성공 결과로 갱신하며, hosted grants·concurrency·native A/B gate와 미검증 V/I 기준은 완료 처리하지 않는다. I01–I16 전체 완료 또는 merge/release 수용을 뜻하지 않는다.
+
+
+## 지정 hosted 대상 migration·권한 확인 — E5 (2026-10-09)
+
+CEO가 전달한 실행·읽기 전용 SQL 확인 결과를 재사용한다. 사용자가 이 브랜치의 hosted 대상으로 지정한 project ref는 `mafckfpptzcqxborwkkw`다. 문서 작성자는 migration·SQL·테스트를 실행하지 않았다.
+
+사전 CLI dry-run은 `supabase/migrations/20261008090000_invite_lifecycle.sql` 하나만 표시했다. 다음 명령으로 정확히 이 migration을 적용했고, 성공한 push에 version `20261008090000 invite_lifecycle`이 기록됐다. 사후 dry-run은 remote up to date를 보고했다.
+
+```sh
+supabase db push --project-ref mafckfpptzcqxborwkkw --skip-vault --yes
+```
+
+| 읽기 전용 확인 범위 | 관찰 결과 |
+| --- | --- |
+| 초대 public RPC 4개·private helper 4개 | 모두 존재. EXECUTE는 `authenticated=true`, `anon=false`, `PUBLIC=false` |
+| legacy `public.join_world_by_member_code(text)` | `authenticated`·`anon`·`PUBLIC` 모두 EXECUTE=false |
+| `public.world_invites` | RLS=true; anon/authenticated 직접 테이블 권한=false; PUBLIC ACL 비어 있음 |
+| `private` schema USAGE | authenticated=true, anon=false |
+
+Security advisor의 `public.world_invites`에 대한 `RLS Enabled No Policy` info는 직접 테이블 접근을 차단하고 RPC로만 접근하는 모델에서 예상되는 결과다. 무관한 advisor finding은 이 증거의 범위에 포함하지 않는다.
+
+이 증거는 지정 hosted 대상의 migration 적용과 위 정적 권한 상태 확인에 한정한다. 앱·사용자 데이터나 동시 세션은 실행하지 않았다. 독립 세션 concurrency와 native A/B 앱 검증은 계속 미완료이며, 다른 hosted 대상의 grants·실제 사용자 흐름·V01–V13/I01–I16 전체 완료 또는 release readiness를 입증하지 않는다. E3·E4의 이전 hosted 미검증 표기는 당시 시점의 기록으로 보존하고, 현재 지정 대상의 적용·권한 상태만 E5로 갱신한다.
