@@ -203,3 +203,29 @@ supabase db push --project-ref mafckfpptzcqxborwkkw --skip-vault --yes
 Security advisor의 `public.world_invites`에 대한 `RLS Enabled No Policy` info는 직접 테이블 접근을 차단하고 RPC로만 접근하는 모델에서 예상되는 결과다. 무관한 advisor finding은 이 증거의 범위에 포함하지 않는다.
 
 이 증거는 지정 hosted 대상의 migration 적용과 위 정적 권한 상태 확인에 한정한다. 앱·사용자 데이터나 동시 세션은 실행하지 않았다. 독립 세션 concurrency와 native A/B 앱 검증은 계속 미완료이며, 다른 hosted 대상의 grants·실제 사용자 흐름·V01–V13/I01–I16 전체 완료 또는 release readiness를 입증하지 않는다. E3·E4의 이전 hosted 미검증 표기는 당시 시점의 기록으로 보존하고, 현재 지정 대상의 적용·권한 상태만 E5로 갱신한다.
+
+## Hosted concurrency QA 부분 결과 — E6 (2026-10-09)
+
+CEO가 전달한 QA 결과를 재사용한다. 대상 ref는 `mafckfpptzcqxborwkkw`, CLI는 `2.119.0`이다. 별도 CLI query session을 사용할 수 있다는 선행 조건은 확인됐지만, 이는 경합 동작을 입증하지 않는다. 문서 작성자는 QA·SQL·테스트를 재실행하지 않았다.
+
+| 시나리오 | 관찰·실행 상태 | 판정·남은 범위 |
+| --- | --- | --- |
+| 1: 같은 코드 race | 이름을 지정한 acceptor 2개 중 1개만 Lock wait에서 관찰되어 barrier 조건을 충족하지 못하고 중단 | race 동작 미검증; 한 번의 소비·동시 성공 방지 통과로 판정하지 않음 |
+| 2·3·4·6 | 시나리오 1 barrier 실패 이후 not run | 미검증 유지 |
+| 5: expiry | 관찰 중 제한된 CLI timeout 발생 | expiry 동작 미검증; 기능 실패 또는 통과로 판정하지 않음 |
+| 7: rate-limit | `unavailable` 5회 이후 `rate_limited`, counter=5 | 이 시나리오의 rate-limit 검사 passed; 전체 concurrency 통과를 뜻하지 않음 |
+
+정확히 run 범위에 속한 fixture·session을 제거했다. 종료 확인에서 worlds, memberships, invites, synthetic users, member-code rows, attempt rows 및 소유 session의 잔여 count는 모두 0이었다. Artifact scan에서 UUID-like·64-hex·JWT-like 문자열은 발견되지 않았다. 비밀 값이나 초대 코드를 이 문서에 기록하지 않는다.
+
+증거 파일:
+
+- `/private/tmp/invite-hosted-qaic_040b392b8e204a-n56wg7c9/consolidated-qa-evidence.json`
+- `/private/tmp/invite-hosted-qaic_f3d39944f72f46-k7_zdyix/qa-evidence.json`
+
+E6는 hosted concurrency의 부분 실행 증거이며 전체 gate를 완료하지 않는다. 시나리오 1의 barrier와 시나리오 5의 bounded timeout을 해결하고 미실행 시나리오의 증거를 확보해야 한다. Native A/B 및 기존 V01–V13/I01–I16의 미검증 범위는 유지한다. Release readiness 또는 전체 concurrency 성공으로 해석하지 않는다.
+
+### E6 추가: bounded barrier 재확인 (2026-10-09)
+
+CEO가 전달한 읽기 전용 two-sleeper probe의 다섯 snapshot은 `[timeout, 1, 1, 1, 1]`이었다. 두 session을 함께 관찰한 snapshot이 없어 새 race fixture는 생성하지 않았으며 시나리오 1–6은 계속 미검증이다. 정확히 probe에 속한 session과 process는 정리됐다. 증거: `/private/tmp/invite-barrier-probe-qaic2_9945e46514b547a6-7tavl9rr/evidence.json`.
+
+별도 Supabase MCP `execute_sql` probe에서 병렬로 요청한 `pg_sleep(4)` 두 tool call은 오류 없이 총 11.5초가 걸렸다. 관찰 query는 겹치는 시점의 snapshot이 아니어서 0을 반환했으며, 이 경로도 concurrent-session barrier를 제공하지 못했다. 이 측정은 해당 실행 경로의 관찰 결과로 한정하며 근본 원인이나 DB의 concurrency 동작을 판정하지 않는다. 기존 미검증 gate는 유지한다.
