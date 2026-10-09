@@ -1440,13 +1440,13 @@ mod local_api_e2e_probe {
         .expect("the imported owner must share through the existing world API");
         std::fs::write(&world_id_path, &world.id)
             .expect("the owned runner needs the world id for targeted cleanup");
-        let member_code = tauri::async_runtime::block_on(client.my_member_code(&user_token))
-            .expect("the owner must receive the existing world member code");
+        let invite = tauri::async_runtime::block_on(client.create_world_invite(&user_token, &world.id))
+            .expect("the owner must issue a single-use world invitation");
         let joined = tauri::async_runtime::block_on(
-            client.join_world_by_member_code(&viewer_token, &member_code),
+            client.accept_world_invite(&viewer_token, &invite.code),
         )
         .expect("the distinct viewer must join through the existing world API");
-        assert_eq!(joined.world_id, world.id);
+        assert_eq!(joined.world_id.as_deref(), Some(world.id.as_str()));
 
         let hidden = tauri::async_runtime::block_on(client.world_planets(&viewer_token, &world.id))
             .expect("the viewer must be able to read the existing public world projection");

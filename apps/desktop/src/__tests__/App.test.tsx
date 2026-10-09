@@ -143,7 +143,7 @@ beforeEach(() => {
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "list_world_members") return [{ user_id: "owner", role: "owner" }, { user_id: "member", role: "member" }];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
 });
@@ -164,7 +164,7 @@ it("opens the cosmetic shop in the current window and restores exploration on re
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
     if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const openWindow = vi.spyOn(window, "open").mockImplementation(() => null);
@@ -264,7 +264,7 @@ it("selects the just purchased instance via result card then confirms placement 
       throw new Error(`unexpected request kind: ${request.kind}`);
     }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const { container } = render(<App />);
@@ -343,7 +343,7 @@ it("previews avatar equipment temporarily and renders only confirmed equipment o
       throw new Error(`unexpected request kind: ${request.kind}`);
     }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const { container } = render(<App />);
@@ -397,7 +397,7 @@ it("uses the canonical shop panel and keeps a confirmed landscape purchase in in
     }
     if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -427,7 +427,7 @@ it("uses the flat landscape only in personal detail and keeps exploration when s
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const { container } = render(<App />);
@@ -470,7 +470,7 @@ it.each(["account", "world", "cycle"] as const)("resets exploration and keeps th
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(activeSnapshot);
     if (command === "get_shop_state") return structuredClone(currentShop());
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const { container } = render(<App />);
@@ -518,7 +518,7 @@ it("clears exploration immediately while a world context is locked", async () =>
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(snapshot);
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const { container } = render(<App />);
@@ -550,7 +550,7 @@ it("keeps a canonical shop load error visible when leaving and reopening the sho
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_shop_state") throw new Error("상점 상태를 불러오지 못했습니다.");
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -577,7 +577,7 @@ it("ignores a late journal failure after leaving and reloads on reentry", async 
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_growth_journal") return journalReads++ === 0 ? oldRead.promise : currentRead.promise;
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -610,7 +610,7 @@ it("does not offer personal journal deletion in a signed-out local phase", async
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_growth_journal") return growthJournal();
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -637,7 +637,7 @@ it.each(["shared", "signed_in"] as const)("requires confirmation and then applie
     if (command === "get_growth_journal") return growthJournal();
     if (command === "delete_growth_journal") return structuredClone(deletedJournal);
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -670,7 +670,7 @@ it("shows a retryable journal error after delete fails", async () => {
     if (command === "get_growth_journal") return journalReads++ === 0 ? growthJournal() : growthJournal(2, null, true, 654_321);
     if (command === "delete_growth_journal") throw new Error("temporary delete failure");
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   vi.spyOn(window, "confirm").mockReturnValue(true);
@@ -703,7 +703,7 @@ it("refreshes owner candidates even when the member count stays the same", async
       roster += 1;
       return [{ user_id: "owner", role: "owner" }, { user_id: roster === 1 ? "member-b" : "member-c", role: "member" }];
     }
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -729,7 +729,7 @@ it("refreshes the confirmed canonical shop state after sync finishes", async () 
       return canonicalShopState(synced ? 100_000 : 0, synced ? 2 : 1);
     }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -758,7 +758,7 @@ it("retries an unavailable canonical shop state when the user asks to refresh", 
       return canonicalShopState(300_000, 2);
     }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -784,7 +784,7 @@ it("coalesces shop state loading while opening the canonical shop screen", async
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_shop_state") { reads += 1; return heldRead.promise; }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -807,7 +807,7 @@ it("filters context-changing events by the actual main window while the shop is 
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_shop_state") return canonicalShopState(500_000);
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -852,7 +852,7 @@ it("retries a failed canonical purchase with the same request after returning to
       return { status: "purchased", request_id: request.request_id, confirmed_quote: null, state: structuredClone(canonical) } satisfies ShopActionResult;
     }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -906,7 +906,7 @@ it("ignores a pending purchase result after the account changes", async () => {
       return pendingApply.promise;
     }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -954,7 +954,7 @@ it("applies a confirmed avatar equipment result after returning to the planet", 
       return pendingApply.promise;
     }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const { container } = render(<App />);
@@ -997,7 +997,7 @@ it("ignores pending avatar equipment after the account changes", async () => {
     if (command === "get_shop_state") return structuredClone(stateForCurrentAccount());
     if (command === "apply_shop_action") { request = args?.request ?? null; return pendingApply.promise; }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const { container } = render(<App />);
@@ -1036,7 +1036,7 @@ it("does not show the previous account shop state when the next account lookup f
       return canonicalShopState(600_000);
     }
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -1108,7 +1108,7 @@ it("retains_view_when_native_transition_fails", async () => {
     if (command === "set_detail_view") throw "window size unavailable";
     if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -1144,7 +1144,7 @@ it("opens_popover_after_profile_setup", async () => {
     if (command === "set_planet_profile") return structuredClone(localSnapshot);
     if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -1166,7 +1166,7 @@ it("keeps_unknown_usage_distinct_from_zero", async () => {
     if (command === "current_usage") return unknown;
     if (command === "get_shop_state") return canonicalShopState();
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -1182,7 +1182,7 @@ it("clears the canonical avatar preview when leaving the shop and personal detai
     if (command === "current_usage" || command === "refresh_usage") return structuredClone(localSnapshot);
     if (command === "get_shop_state") return canonicalShopState(600_000);
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   const { container } = render(<App />);
@@ -1214,7 +1214,7 @@ it("keeps the three token totals tied to their original fields", async () => {
     if (command === "current_usage") return distinct;
     if (command === "get_sharing_state") return structuredClone(ownerState);
     if (command === "list_world_members") return [];
-    if (command === "get_my_member_code") return "AB12CD34EF";
+    if (command === "list_world_invites") return [];
     return null;
   });
   render(<App />);
@@ -2479,4 +2479,51 @@ it("shows the latest visible growth object instead of a hidden recent kind", asy
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   expect(await screen.findByText("최근 생성: 나무")).toBeInTheDocument();
   expect(container.querySelector(".recent-object")).not.toHaveTextContent("양치식물");
+});
+
+
+it("uses owner invitations and clears the code when the group panel closes", async () => {
+  const base = invokeMock.getMockImplementation()!;
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "create_world_invite") return {invite_id: "one", code: "a".repeat(64), created_at: "2026-10-08T00:00:00Z", expires_at: "2026-10-15T00:00:00Z"};
+    return base(command, args);
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", {name: "행성·그룹 자세히 보기"}));
+  fireEvent.click(await screen.findByRole("tab", {name: "그룹"}));
+  fireEvent.click(await screen.findByRole("button", {name: "초대 발급"}));
+  await screen.findByText("a".repeat(64));
+  fireEvent.click(screen.getByRole("tab", {name: "내 행성"}));
+  fireEvent.click(screen.getByRole("tab", {name: "그룹"}));
+  await screen.findByRole("button", {name: "초대 발급"});
+  expect(screen.queryByText("a".repeat(64))).not.toBeInTheDocument();
+  expect(invokeMock.mock.calls.some(([name]) => ["get_my_member_code","rotate_my_member_code"].includes(name))).toBe(false);
+});
+
+
+it("shows a join failure and permits the same invitation retry without legacy fallback", async () => {
+  const base = invokeMock.getMockImplementation()!;
+  let attempts = 0;
+  invokeMock.mockImplementation(async (command: string, args?: unknown) => {
+    if (command === "get_sharing_state") return { ...ownerState, phase: "signed_in", world: null };
+    if (command === "join_world") {
+      attempts++;
+      if (attempts === 1) throw "가입 응답을 확인하지 못했습니다. 같은 초대 코드로 다시 시도하세요";
+      return ownerState;
+    }
+    return base(command, args);
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  fireEvent.click(screen.getByRole("button", {name: "행성·그룹 자세히 보기"}));
+  fireEvent.click(await screen.findByRole("tab", {name: "그룹"}));
+  fireEvent.change(await screen.findByLabelText("소유자가 알려준 64자리 초대 코드"), {target: {value: "a".repeat(64)}});
+  fireEvent.click(screen.getByRole("button", {name: "코드로 참여"}));
+  expect(await screen.findByText(/가입 응답을 확인하지 못했습니다/)).toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", {name: "코드로 참여"})).not.toBeDisabled());
+  fireEvent.click(screen.getByRole("button", {name: "코드로 참여"}));
+  await screen.findByRole("button", {name: "초대 발급"});
+  expect(attempts).toBe(2);
+  expect(invokeMock.mock.calls.some(([name]) => ["get_my_member_code","rotate_my_member_code"].includes(name))).toBe(false);
 });

@@ -1,6 +1,14 @@
 # Token Planet desktop
 
-Token Planet turns confirmed Codex and Claude Code token usage into a growing solo or shared planet. This directory contains the Tauri 2, React, and Rust desktop client. Solo use needs no account.
+Token Planet turns confirmed Codex and Claude Code token usage into independent personal planets, with optional private group comparison. This directory contains the Tauri 2, React, and Rust desktop client. Solo use needs no account.
+
+## Current multiplayer policy (2026-10-08)
+
+The [approved policy](../../docs/superpowers/specs/2026-10-08-token-planet-multiplayer-policy-design.md) defines independent personal planets and private groups of up to 10 members. Group members see exact individual current planet tokens, lifetime tokens, growth credits, and ranks. They cannot edit or grow another member's planet.
+
+Current device-bound anonymous Auth uses owner-issued invitations implemented in this branch under the [invite lifecycle design](../../docs/superpowers/specs/2026-10-08-token-planet-invite-lifecycle-design.md). Invitations expire after 7 days (168 hours), permit one successful join, and can be revoked by the owner before use. The server stores only a digest of each code. The new client replaces the reusable personal-code join path. Hosted migration and native A/B app validation remain pending. Losing the stored session loses the same member identity; account recovery is deferred. New read-only visits and joint goals are also deferred.
+
+Group responses exclude Auth tokens, wallet balances and credit history; original logs, prompts, paths and original agent session identifiers stay local. See the [verification record](../../docs/2026-10-08-multiplayer-verification.md) for document evidence and runtime status. Existing build/test notes are historical evidence and do not prove the current two-user flow.
 
 ## Run locally
 
@@ -33,9 +41,9 @@ npm --prefix apps/desktop run dev:local
 
 `dev:local` reads `API_URL` and `PUBLISHABLE_KEY` from the local CLI status, requires an HTTP loopback URL and a non-empty publishable key, then overrides only `TOKEN_PLANET_SUPABASE_URL` and `TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY` for `tauri dev`. This keeps a hosted URL inherited from a shell or launchd from being used by the local launch. The CLI status also contains secret keys; the launcher does not display or save its output or those keys.
 
-Shared-world entry creates a device-bound Supabase anonymous user. The app keeps its session in the operating system credential store. The member's nickname may match another member's; the Supabase user ID distinguishes them. Every member receives a unique 10-character personal code, but only the current world owner's code can admit a friend. The owner shares that code, and the friend enters it with a nickname when joining. Members can rotate their codes to invalidate the old value. If this Mac loses the session, the same member identity and its shared-world access cannot be recovered.
+Shared-world entry creates a device-bound Supabase anonymous user. The app keeps its session in the operating system credential store. The member's nickname may match another member's; the Supabase user ID distinguishes them. The world owner issues an invitation and shares its 64-character hexadecimal code; the friend pastes it with a nickname when joining. An invitation expires after 168 hours and is consumed by one successful join. The owner can revoke an unused invitation. The reusable 10-character personal-code flow is historical and is no longer the new client's join path. If this Mac loses the session, the same member identity and its shared-world access cannot be recovered.
 
-Each Mac has its own local database and Auth users. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_PLANET_SUPABASE_*` values need to be copied between machines. Two Macs using separate local stacks cannot exchange personal invitation codes or join the same shared world; that requires both apps to use one reachable Supabase project. To stop the local stack without deleting its data, run `npx --yes supabase@2.118.0 stop --project-id token-planet` from the repository root.
+Each Mac has its own local database and Auth users. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_PLANET_SUPABASE_*` values need to be copied between machines. Two Macs using separate local stacks cannot exchange invitations or join the same shared world; that requires both apps to use one reachable Supabase project. To stop the local stack without deleting its data, run `npx --yes supabase@2.118.0 stop --project-id token-planet` from the repository root.
 
 ### Hosted Supabase development
 

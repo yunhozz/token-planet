@@ -31,7 +31,9 @@ jobs:
       - name: Run migration staging and runner tests
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-        run: python3 -m unittest discover -s supabase/ci -p 'test_*.py' -v
+        run: |
+          python3 -m unittest discover -s supabase/ci -p 'test_*.py' -v
+          python3 -m unittest discover -s supabase/tests -p 'test_*.py' -v
 
       - name: Verify local Docker endpoint
         shell: bash

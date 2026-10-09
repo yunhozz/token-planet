@@ -11,7 +11,6 @@ PYTHON_BIN="$(command -v python3 || true)"
 POSTGRES_IMAGE="public.ecr.aws/supabase/postgres:17.6.1.171"
 DB_PORT=56432
 SHADOW_PORT=56430
-EXCLUDED_SERVICES="gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor"
 
 usage() {
   printf 'Usage: %s --artifacts-dir <absolute-path>\n' "$0" >&2
@@ -506,10 +505,10 @@ cleanup_on_exit() {
       if [[ -n "$current_id" ]]; then
         CONTAINER_ID="$current_id"
         CONTAINER_OWNED=1
-        if docker container rm --force "$CONTAINER_ID" >>"$CLEANUP_LOG" 2>&1; then
-          printf 'Removed owned container %s\n' "$CONTAINER_ID" >>"$CLEANUP_LOG"
+        if docker container rm --force "$CONTAINER_ID" >"$WORKDIR/container-remove.stdout" 2>"$WORKDIR/container-remove.stderr"; then
+          printf 'cleanup_status=PASS kind=container_remove code=owned_resource_removed\n' >>"$CLEANUP_LOG"
         else
-          printf 'Failed to remove owned container %s\n' "$CONTAINER_ID" >>"$CLEANUP_LOG"
+          printf 'cleanup_status=FAIL kind=container_remove code=remove_failed exit=%s diagnostics=redacted\n' "$?" >>"$CLEANUP_LOG"
           cleanup_status=1
         fi
       else
@@ -528,10 +527,10 @@ cleanup_on_exit() {
       current_volume="$(owned_identity volume "$inspect_file" 2>>"$WORKDIR/volume-cleanup.stderr")"
       if [[ -n "$current_volume" ]]; then
         VOLUME_OWNED=1
-        if docker volume rm "$current_volume" >>"$CLEANUP_LOG" 2>&1; then
-          printf 'Removed owned volume %s\n' "$current_volume" >>"$CLEANUP_LOG"
+        if docker volume rm "$current_volume" >"$WORKDIR/volume-remove.stdout" 2>"$WORKDIR/volume-remove.stderr"; then
+          printf 'cleanup_status=PASS kind=volume_remove code=owned_resource_removed\n' >>"$CLEANUP_LOG"
         else
-          printf 'Failed to remove owned volume %s\n' "$current_volume" >>"$CLEANUP_LOG"
+          printf 'cleanup_status=FAIL kind=volume_remove code=remove_failed exit=%s diagnostics=redacted\n' "$?" >>"$CLEANUP_LOG"
           cleanup_status=1
         fi
       else
@@ -555,10 +554,10 @@ cleanup_on_exit() {
       if [[ -n "$current_id" ]]; then
         NETWORK_ID="$current_id"
         NETWORK_OWNED=1
-        if docker network rm "$NETWORK_ID" >>"$CLEANUP_LOG" 2>&1; then
-          printf 'Removed owned network %s\n' "$NETWORK_ID" >>"$CLEANUP_LOG"
+        if docker network rm "$NETWORK_ID" >"$WORKDIR/network-remove.stdout" 2>"$WORKDIR/network-remove.stderr"; then
+          printf 'cleanup_status=PASS kind=network_remove code=owned_resource_removed\n' >>"$CLEANUP_LOG"
         else
-          printf 'Failed to remove owned network %s\n' "$NETWORK_ID" >>"$CLEANUP_LOG"
+          printf 'cleanup_status=FAIL kind=network_remove code=remove_failed exit=%s diagnostics=redacted\n' "$?" >>"$CLEANUP_LOG"
           cleanup_status=1
         fi
       else
@@ -765,7 +764,7 @@ if (
   TOKEN_PLANET_GUARD_NETWORK_ID="$NETWORK_ID" \
   TOKEN_PLANET_GUARD_NETWORK_NAME="$NETWORK_NAME" \
   TOKEN_PLANET_GUARD_PHASE=start \
-  "$SUPABASE_BIN" start --network-id "$NETWORK_ID" --exclude "$EXCLUDED_SERVICES"
+  "$SUPABASE_BIN" db start --network-id "$NETWORK_ID"
 ) >"$WORKDIR/start.raw.log" 2>&1; then
   :
 else
@@ -890,5 +889,37 @@ if [[ "$test_count" -eq 0 ]]; then
   fail 1 "no SQL pgTAP suites were found"
 fi
 python3 "$SCRIPT_DIR/prepare_migrations.py" verify --source "$SOURCE_MIGRATIONS" --output "$WORKDIR/supabase/migrations" >"$ARTIFACTS_DIR/verify-after-tests.log" 2>&1 || fail 1 "migration staging changed during SQL tests"
-log "Completed local replay and $test_count SQL pgTAP suites for $PROJECT_ID"
+# Keep raw harness diagnostics private. Export only the seven fixed results.
+concurrency_status=0
+if bash "$REPO_ROOT/supabase/tests/invite_lifecycle_concurrency.sh" \
+  --ci --workdir "$WORKDIR" --container "$CONTAINER_NAME" \
+  --container-id "$CONTAINER_ID" --network-id "$NETWORK_ID" \
+  >"$WORKDIR/invite-concurrency.stdout" 2>"$WORKDIR/invite-concurrency.stderr"; then
+  if python3 - "$WORKDIR/invite-concurrency.stdout" "$ARTIFACTS_DIR/invite-lifecycle-concurrency-summary.log" <<'PY'
+import pathlib
+import sys
+scenarios = (
+    "same-code competition and retry", "last-slot competition", "accept versus revoke",
+    "accept versus transfer", "expiry during world-lock wait",
+    "same-user different-world competition", "independently committed rate-limit counter",
+)
+lines = pathlib.Path(sys.argv[1]).read_text(errors="replace").splitlines()
+expected = ["PASS " + name for name in scenarios]
+if any(lines.count(line) != 1 for line in expected):
+    raise SystemExit(1)
+pathlib.Path(sys.argv[2]).write_text("\n".join(expected) + "\n")
+PY
+  then
+    :
+  else
+    concurrency_status=1
+  fi
+else
+  concurrency_status="$?"
+fi
+if [[ "$concurrency_status" != 0 ]]; then
+  printf 'concurrency_status=FAIL exit=%s diagnostics=redacted\n' "$concurrency_status" >"$ARTIFACTS_DIR/invite-lifecycle-concurrency-summary.log"
+  fail "$concurrency_status" "invite lifecycle concurrency failed; diagnostics redacted"
+fi
+log "Completed local replay and $test_count SQL pgTAP suites and seven invite concurrency scenarios for $PROJECT_ID"
 exit 0
