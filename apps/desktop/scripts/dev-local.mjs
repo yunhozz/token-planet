@@ -15,10 +15,17 @@ if (!npmCli) {
   fail("Run this script with `npm run dev:local`.");
 }
 
+const selectedWorkdir = process.env.TOKEN_PLANET_LOCAL_SUPABASE_WORKDIR;
+if (selectedWorkdir && selectedWorkdir !== "/tmp/token-planet-group-chat-supabase") {
+  fail("Only the approved group-chat scratch workdir may override the repository local project.");
+}
+const statusArgs = [npmCli, "exec", "--yes", "--package=supabase@2.118.0", "--", "supabase", "status", "-o", "json"];
+if (selectedWorkdir) statusArgs.push("--workdir", selectedWorkdir);
+
 const statusResult = spawnSync(
   process.execPath,
-  [npmCli, "exec", "--yes", "--package=supabase@2.118.0", "--", "supabase", "status", "-o", "json"],
-  { cwd: repositoryRoot, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+  statusArgs,
+  { cwd: repositoryRoot, encoding: "utf8", timeout: 20000, stdio: ["ignore", "pipe", "ignore"] },
 );
 
 if (statusResult.error || statusResult.status !== 0) {
@@ -46,6 +53,9 @@ if (
   apiUrl.password
 ) {
   fail("API_URL must use HTTP on localhost or a loopback address.");
+}
+if (selectedWorkdir && apiUrl.toString() !== "http://127.0.0.1:54321/") {
+  fail("The group-chat scratch API must use http://127.0.0.1:54321.");
 }
 
 const publishableKey = localStatus.PUBLISHABLE_KEY;

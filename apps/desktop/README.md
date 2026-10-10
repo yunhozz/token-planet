@@ -27,23 +27,28 @@ On each macOS machine, install and start [Docker Desktop](https://docs.docker.co
 
 From the repository root, install desktop dependencies and start the local Supabase services used by desktop Auth:
 
-If a DB-only `token-planet` local stack is already running, stop it first; rerunning `start` will not add Auth to that stack. This preserves its database backup and volume. Do not use `--no-backup`:
-
-```sh
-npx --yes supabase@2.118.0 stop --project-id token-planet
-```
+The repository configuration names the default local project `token-planet`. For a separately approved, fresh repository-local stack, run these commands from the repository root; Auth, REST, and Realtime remain enabled:
 
 ```sh
 npm --prefix apps/desktop ci
-npx --yes supabase@2.118.0 start --exclude realtime,storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor,mailpit
+npx --yes supabase@2.118.0 start --workdir . --exclude storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor,mailpit
 npm --prefix apps/desktop run dev:local
 ```
+
+An existing DB-only stack does not gain services by rerunning `start`. Do not implicitly stop or reset another stack, or reuse occupied ports. The group-chat validation uses the **already-running** isolated project `token-planet-group-chat-qa`, config `/tmp/token-planet-group-chat-supabase/supabase/config.toml`, API `http://127.0.0.1:54321`, DB port `54322`:
+
+```sh
+TOKEN_PLANET_LOCAL_SUPABASE_WORKDIR=/tmp/token-planet-group-chat-supabase \
+  npm --prefix apps/desktop run dev:local
+```
+
+The launcher accepts only that exact scratch workdir as an explicit override, uses CLI 2.118.0 with a 20-second status timeout, and requires its exact loopback API. Without the override it reads the repository project's status. It does not start, stop, reset, or link Supabase. Two independent test identities must use the same scratch instance; two separate local stacks cannot share chat.
 
 `dev:local` reads `API_URL` and `PUBLISHABLE_KEY` from the local CLI status, requires an HTTP loopback URL and a non-empty publishable key, then overrides only `TOKEN_PLANET_SUPABASE_URL` and `TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY` for `tauri dev`. This keeps a hosted URL inherited from a shell or launchd from being used by the local launch. The CLI status also contains secret keys; the launcher does not display or save its output or those keys.
 
 Shared-world entry creates a device-bound Supabase anonymous user. The app keeps its session in the operating system credential store. The member's nickname may match another member's; the Supabase user ID distinguishes them. The world owner issues an invitation and shares its 64-character hexadecimal code; the friend pastes it with a nickname when joining. An invitation expires after 168 hours and is consumed by one successful join. The owner can revoke an unused invitation. The reusable 10-character personal-code flow is historical and is no longer the new client's join path. If this Mac loses the session, the same member identity and its shared-world access cannot be recovered.
 
-Each Mac has its own local database and Auth users. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_PLANET_SUPABASE_*` values need to be copied between machines. Two Macs using separate local stacks cannot exchange invitations or join the same shared world; that requires both apps to use one reachable Supabase project. To stop the local stack without deleting its data, run `npx --yes supabase@2.118.0 stop --project-id token-planet` from the repository root.
+Each Mac has its own local database and Auth users. Git carries the configuration and migrations, not this local data. The local launcher reads that Mac's generated publishable key, so no `TOKEN_PLANET_SUPABASE_*` values need to be copied between machines. Two Macs using separate local stacks cannot exchange invitations or join the same shared world; that requires both apps to use one reachable Supabase project. Keep the isolated chat QA stack running during verification; do not stop or reset it as a fallback.
 
 ### Hosted Supabase development
 
@@ -99,3 +104,13 @@ Planet profiles, cycles, objects, wallets, and synced metrics are isolated by th
 Only the Rust process scans local JSONL and opens the native folder picker. The React window invokes narrow commands for usage, source settings, world membership, invitations, and sync controls. No arbitrary file read command or filesystem plugin permission is exposed to React. When configured, Supabase Auth access and refresh tokens are stored through the operating system's credential store in Rust, not in React storage. Raw logs, prompts, local paths, and session IDs are not part of the aggregate RPC body. The server accepts self-reported aggregates from an authenticated client; a modified client can fabricate usage, so the MVP does not promise fraud-resistant totals. Copying the same agent logs to another installation can count them twice under the selected device-scoped rule.
 
 A macOS release `.app` bundle has been built and launched through Launch Services. Its compact window showed the planet and distinct source status. Launch after copying the bundle to Applications remains unchecked. Native Windows build, tray click and keyboard behavior, and a real native Windows Claude Code transcript with usage fields remain to be checked before claiming a cross-platform release. macOS status-bar icon click and keyboard behavior also need a direct manual check; the automated UI surface could inspect the app window but not the status-bar icon.
+
+## Text group chat (2026-10-10)
+
+The group tab has a collapsible **그룹 채팅** entry and a contextual unread badge. Chat stays connected while collapsed in the group tab; leaving that tab or successfully leaving the group clears its scope. Token sharing pause and deleting shared aggregates do not disable chat. Rust owns the keyring session, WebSocket connection, refresh, reconnect, and cleanup; React receives no chat Auth token or private Auth user mapping.
+
+Messages contain the server's snapshot of the author's own nickname and built-in pixel avatar at send time. A paused profile remains usable for this purpose without exposing token/planet statistics. With no server profile, the snapshot is `행성 동기화 대기` / `masculine`. Profile changes and member departure do not rewrite existing snapshots. The first version is plain text only, at most 2,000 Unicode code points, with no edit or attachment feature.
+
+Failed transmission retains the draft and offers **같은 메시지 다시 전송**, reusing the same request ID/body. Do not change the body of a retry. Own-message deletion clears the active DB body and leaves an irreversible tombstone. New and rejoining members see only messages after their membership cutoff. Messages otherwise remain until group deletion; leaving preserves messages for remaining authorized members. This does not guarantee immediate erasure from backups. Permanent account deletion is not a newly provided product flow.
+
+See [group-chat verification](../../docs/2026-10-10-group-chat-verification.md) and [local verification commands](../../supabase/README.md#group-chat-local-verification). Live API/WebSocket evidence is separate from actual native two-user UI, screen-render P95, OS keyring/TLS, and accessibility release checks.

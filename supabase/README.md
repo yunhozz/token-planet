@@ -10,19 +10,17 @@ Original logs, prompts, paths and original agent session identifiers stay local.
 
 The earlier migration chain and 121 pgTAP assertions were verified locally with Supabase CLI 2.118.0 and Docker (PostgreSQL 17). Exact-SHA remote CI has since passed the full migration replay and SQL suites in a disposable GitHub-hosted database; see E3 in the verification record. The CI SQL suite exercised invite RPC grant/role boundaries, including issuance privileges, denial of legacy personal-code joining and anonymous RPC access, and direct-table/non-owner denial. The designated hosted target’s invite RPC/table grants were subsequently verified read-only on 2026-10-09 (E5); that evidence is limited to that target. Independent-session concurrency and native A/B app validation remain release gates.
 
-```sh
-npx --yes supabase@2.118.0 start --exclude gotrue,realtime,storage-api,imgproxy,kong,mailpit,postgrest,postgres-meta,studio,edge-runtime,logflare,vector,supavisor
-npx --yes supabase@2.118.0 db reset
-npx --yes supabase@2.118.0 test db
-```
+### Local service selection
 
-For local Auth and REST development, start Supabase with Auth, Kong, and PostgREST enabled:
+DB-only SQL/CI checks do not prove Auth or Realtime behavior. The CI replay runner below uses its own disposable project; group-chat validation uses only the already-running approved scratch instance described in [Group chat local verification](#group-chat-local-verification).
+
+For a separately approved, fresh default repository-local `token-planet` project, run from the repository root with Auth, Kong, PostgREST, and Realtime enabled:
 
 ```sh
-npx --yes supabase@2.118.0 start --exclude realtime,storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor,mailpit
+npx --yes supabase@2.118.0 start --workdir . --exclude storage-api,imgproxy,postgres-meta,studio,edge-runtime,logflare,vector,supavisor,mailpit
 ```
 
-If the DB-only stack above is already running, stop this local project first with `npx --yes supabase@2.118.0 stop --project-id token-planet`, then run the Auth start command. Stopping without `--no-backup` preserves its local database data.
+An already-running DB-only project will not gain services by rerunning `start`. Do not implicitly stop/reset another project or reuse occupied ports. The chat QA target below is already running and must not be restarted or reset by the verification harness.
 
 The desktop creates a Supabase anonymous user when someone first starts sharing. Its session is stored in the operating system credential store, and its user ID identifies the member; nicknames may repeat. Losing that session loses access to the same member identity. Each Mac is a separate member, even when both use the same hosted project. Email, password, OTP, SMTP, and Mailpit are not part of this flow.
 
@@ -71,3 +69,23 @@ Validation uses a separate disposable project at `/private/tmp/token-planet-shop
 The authenticated effect worker now connects the personal timeline, validated local contribution rebuild, and the exact nine-field canonical aggregate payload. User consent permits echoing only the same project's `get_my_planet_state` response, with wallet balance/credits replaced by 0/[]; no local profile, objects, or wallet claims are uploaded. A missing server state holds synchronization rather than cold-bootstrapping it. A pending guest shop import blocks account transitions before ownership/snapshot changes, while scan-only restoration continues local collection for that explicit hold.
 
 Local or server sharing pause holds the contribution upsert and public snapshot uploads, since the existing upsert also updates the public planet projection. Personal timeline reads and local rebuilds may continue. The typed held result is not a completed reset preupload. Independent local QA passed account-switch4/worker14/full Rust202 with the three known sandbox socket tests excluded; the reviewer cleared the first-login, sharing-pause, and startup-restore findings. Signed reset command/UI and durable reset-intent recovery remain unconnected. Complete guest import, revamped public sharing, and actual native/browser validation remain pending. No hosted migration, live user aggregate upload, live removal transaction, or deployment was performed.
+
+## Group chat local verification
+
+Approved target: `/tmp/token-planet-group-chat-supabase`, project `token-planet-group-chat-qa`, API `http://127.0.0.1:54321`, DB port `54322`, Supabase CLI **2.118.0**. All commands below run from the repository root. The scratch config links this checkout's migrations/tests; it is distinct from the default repository project's `token-planet` identity. Never link this harness to hosted/production, restart/reset the scratch stack, or remove Docker data. Current repository and scratch configs enable Realtime.
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s supabase/tests -p test_group_chat_realtime.py
+PYTHONDONTWRITEBYTECODE=1 python3 supabase/tests/test_group_chat_target_guard.py
+npx --yes supabase@2.118.0 test db --local --workdir /tmp/token-planet-group-chat-supabase supabase/tests/group_chat_access.sql supabase/tests/group_chat_membership.sql supabase/tests/group_chat_rpc.sql
+bash supabase/tests/group_chat_concurrency.sh
+PYTHONDONTWRITEBYTECODE=1 python3 supabase/tests/group_chat_realtime.py --run
+```
+
+The pure harness tests perform no network or DB changes. The live harness requires explicit `--run`, accepts no target overrides, rejects connection/proxy environment overrides, verifies Docker Unix context plus immutable local DB container identity/project/workdir/ports and local API identity before fixture writes, and does not follow HTTP redirects. CLI status (including credentials) is captured only in memory; credentials never appear in argv or reports. HTTP/WebSocket operations have five-second deadlines, child commands have 20-second timeouts, sends have a five-minute scenario deadline, and WebSocket heartbeat is sent every 15 seconds. Its only output is an allowlisted aggregate of fixed check IDs/statuses and numeric latency metrics; arbitrary exception text, tokens, IDs, profiles, and bodies are withheld.
+
+The live harness creates four independent anonymous users A/B/C/D in this same local instance, two worlds, and synthetic messages; it cleans only these recorded fixtures. Repeated runs may reach local Auth anonymous-signup limits. Do not reset the stack or switch projects to bypass that condition. It verifies REST/RPC privileges separately from SELECT RLS and Postgres Changes delivery, including new membership, departure/rejoin, private author/read/request mappings, server profile fallback/paused sharing, idempotency, and cascade. Publication includes the needed public message table; private chat tables are not published. Tombstones use **UPDATE**, `REPLICA IDENTITY DEFAULT`, and an old payload without the previous body. Hard DELETE events are not an authorized chat delivery path because Supabase does not filter them using RLS. No user objects are added to the locked `realtime` schema.
+
+`R15` uses at least 100 online samples and reports `unmet` if server-to-WebSocket P95 exceeds 1,000 ms. Its parser receipt timing is transport evidence, not desktop rendering latency; it does not validate React/Tauri display P95. Disconnect recovery closes/rejoins a client socket and queries missing inserts/tombstones; it never restarts Supabase or the desktop application. The [15-criterion verification record](../docs/2026-10-10-group-chat-verification.md) distinguishes proven subchecks from remaining native/UI/platform/restart gates.
+
+Only the authenticated sender's server `planet_member_state.nickname`/`avatar` are snapshotted. Paused sharing does not reveal token/planet statistics through chat. Public chat payloads use an opaque author key, not Auth user IDs. Member leave and Auth-row removal preserve allowed message bodies/snapshots; group deletion cascades chat state. Own-message deletion removes the active DB body and keeps a tombstone; it does not promise immediate backup/log erasure or invent a permanent-account deletion UI policy.

@@ -1,3 +1,4 @@
+pub mod chat;
 pub mod collectors;
 pub mod commands;
 pub mod domain;
@@ -73,6 +74,7 @@ pub struct AppState {
     usage_scan_failed: AtomicBool,
     pub(crate) sync_failed: Mutex<bool>,
     pub(crate) sync_gate: tokio::sync::Mutex<()>,
+    pub(crate) chat: commands::chat::ChatController,
     pub(crate) window_mode: Mutex<WindowMode>,
     mode_transitioning: AtomicBool,
     pub(crate) tray_press_pending: AtomicBool,
@@ -479,6 +481,7 @@ mod account_switch_tests {
             usage_scan_failed: AtomicBool::new(false),
             sync_failed: Mutex::new(false),
             sync_gate: tokio::sync::Mutex::new(()),
+            chat: crate::commands::chat::ChatController::new(None, std::sync::Arc::new(|_| {})),
             window_mode: Mutex::new(WindowMode::Popup),
             mode_transitioning: AtomicBool::new(false),
             tray_press_pending: AtomicBool::new(false),
@@ -1523,7 +1526,15 @@ pub fn run() {
             commands::sharing::pause_sharing,
             commands::sharing::transfer_world_owner,
             commands::sharing::leave_world,
-            commands::sharing::delete_synced_usage
+            commands::sharing::delete_synced_usage,
+            commands::chat::get_group_chat_context,
+            commands::chat::list_group_chat_messages,
+            commands::chat::sync_group_chat_changes,
+            commands::chat::send_group_chat_message,
+            commands::chat::delete_group_chat_message,
+            commands::chat::mark_group_chat_read,
+            commands::chat::start_group_chat,
+            commands::chat::stop_group_chat,
         ])
         .setup(|app| {
             #[cfg(target_os = "macos")]
@@ -1556,6 +1567,15 @@ pub fn run() {
                 usage_scan_failed: AtomicBool::new(false),
                 sync_failed: Mutex::new(false),
                 sync_gate: tokio::sync::Mutex::new(()),
+                chat: commands::chat::ChatController::new(
+                    AuthConfig::from_env(),
+                    std::sync::Arc::new({
+                        let handle = app.handle().clone();
+                        move |event| {
+                            let _ = handle.emit_to("main", commands::chat::CHAT_EVENT, event);
+                        }
+                    }),
+                ),
                 window_mode: Mutex::new(WindowMode::Popup),
                 mode_transitioning: AtomicBool::new(false),
                 tray_press_pending: AtomicBool::new(false),
@@ -1644,6 +1664,14 @@ pub fn run() {
             if window.label() != "main" {
                 return;
             }
+            if matches!(event, WindowEvent::Destroyed) {
+                let handle = window.app_handle().clone();
+                tauri::async_runtime::spawn(async move {
+                    if let Some(state) = handle.try_state::<AppState>() {
+                        state.chat.stop_all().await;
+                    }
+                });
+            }
             if let WindowEvent::CloseRequested { api, .. } = event {
                 api.prevent_close();
                 let _ = window.hide();
@@ -1660,6 +1688,13 @@ pub fn run() {
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit | tauri::RunEvent::ExitRequested { .. }) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    tauri::async_runtime::block_on(state.chat.stop_all());
+                }
+            }
+        });
 }

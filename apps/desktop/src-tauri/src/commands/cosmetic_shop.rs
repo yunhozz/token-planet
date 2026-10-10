@@ -1051,6 +1051,7 @@ mod tests {
             usage_scan_failed: AtomicBool::new(false),
             sync_failed: Mutex::new(false),
             sync_gate: tokio::sync::Mutex::new(()),
+            chat: crate::commands::chat::ChatController::new(None, std::sync::Arc::new(|_| {})),
             window_mode: Mutex::new(WindowMode::Popup),
             mode_transitioning: AtomicBool::new(false),
             tray_press_pending: AtomicBool::new(false),
