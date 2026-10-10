@@ -3,6 +3,7 @@ import { FormattedTokens } from "./components/FormattedTokens";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
+import { GroupChat } from "./components/GroupChat";
 import { InvitePanel } from "./components/InvitePanel";
 import { GrowthJournal } from "./components/GrowthJournal";
 import { FormattedNumber } from "./components/FormattedNumber";
@@ -1135,6 +1136,7 @@ function App() {
               {sharedLoading && <LoadingStatus label="기록 동기화를 기다리며 그룹 정보를 확인하고 있습니다." />}
                 {shared?.phase === "shared" && shared.world && <>
                   <WorldCommunity name={shared.world.name} members={shared.planet_members ?? []} />
+                  <GroupChat key={JSON.stringify([shared.user_id, shared.world.id])} worldId={shared.world.id} />
                   {(sharedIsOwner && membersEntry?.context !== memberListContext)
                     ? <LoadingStatus label="초대 및 참여자 정보를 불러오고 있습니다." />
                     : <>
@@ -1151,8 +1153,9 @@ function App() {
                 {shared?.phase === "unavailable" && <p className="detail-note">공동 세계 서버 설정을 확인하세요. 나의 행성은 이 기기에서 계속 자랍니다.</p>}
                 {!shared && !sharedLoading && <p className="detail-note">공동 세계 정보를 확인하지 못했습니다.</p>}
               <details className="privacy-disclosure">
-                <summary>그룹에는 행성 모습과 집계값만 공유됩니다</summary>
+                <summary>그룹에는 행성 정보와 채팅 메시지가 공유됩니다</summary>
                 <p>그룹 멤버에게는 닉네임, 아바타, 행성 모습, 이번 행성 토큰, 누적 토큰과 성장 점수가 표시됩니다.</p>
+                <p>채팅에 직접 입력한 메시지는 그룹원에게 표시됩니다. 토큰 공유를 일시정지해도 채팅은 계속 사용할 수 있습니다.</p>
                 <p>프롬프트, 응답, 파일 경로와 원본 세션 기록은 기기 밖으로 전송하지 않습니다.</p>
               </details>
             </div>

@@ -412,40 +412,103 @@ pub async fn transfer_world_owner(
     get_sharing_state(state).await
 }
 
+fn leave_scope_matches(
+    before: Option<(String, String, chrono_tz::Tz)>,
+    after: Option<(String, String, chrono_tz::Tz)>,
+) -> bool {
+    before == after
+}
+async fn leave_without_local_gate<F, T>(gate: &tokio::sync::Mutex<()>, network: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    // Drain an earlier local transition, then release before polling network work.
+    {
+        let _guard = gate.lock().await;
+    }
+    network.await
+}
 #[tauri::command]
 pub async fn leave_world(state: State<'_, AppState>) -> Result<SharingState, String> {
-    let _gate = state.sync_gate.lock().await;
-    let (client, session) = signed_in().await?;
-    let shell = client
-        .current_world(&session.access_token)
-        .await
-        .map_err(|_| "공동 세계를 불러올 수 없습니다")?
-        .ok_or("참여 중인 공동 세계가 없습니다")?;
+    let before = {
+        let _guard = state.sync_gate.lock().await;
+        state
+            .ledger
+            .lock()
+            .map_err(|_| "로컬 공동 세계 오류")?
+            .cached_world_scope()
+            .map_err(|_| "로컬 공동 세계 오류")?
+    };
+    let chat_before = state
+        .chat
+        .scope_for_world(before.as_ref().map(|s| s.0.as_str()));
+    let (client, session, shell) = leave_without_local_gate(&state.sync_gate, async {
+        let (client, session) = signed_in().await?;
+        let shell = client
+            .current_world(&session.access_token)
+            .await
+            .map_err(|_| "공동 세계를 불러올 수 없습니다")?
+            .ok_or("참여 중인 공동 세계가 없습니다")?;
+        if before
+            .as_ref()
+            .is_some_and(|(world, user, _)| world != &shell.id || user != &session.user.id)
+        {
+            return Err("공동 세계 정보가 변경되었습니다".to_string());
+        }
+        let left = client
+            .leave_world(&session.access_token, &shell.id)
+            .await
+            .map_err(|_| "세계에서 나갈 수 없습니다. 소유자는 먼저 소유권을 이전하세요")?;
+        if !left {
+            return Err("세계에서 나간 결과를 확인할 수 없습니다".into());
+        }
+        Ok::<_, String>((client, session, shell))
+    })
+    .await?;
+    drop(client);
+    if let Some(scope) = chat_before.filter(|scope| scope.world_id == shell.id) {
+        state.chat.stop(&scope).await;
+    }
     let timezone: chrono_tz::Tz = shell.timezone.parse().map_err(|_| "세계 시간대 오류")?;
     let today = chrono::Utc::now()
         .with_timezone(&timezone)
         .format("%Y-%m-%d")
         .to_string();
-    client
-        .leave_world(&session.access_token, &shell.id)
-        .await
-        .map_err(|_| "세계에서 나갈 수 없습니다. 소유자는 먼저 소유권을 이전하세요")?;
-    {
+    let response = {
+        let _guard = state.sync_gate.lock().await;
+        let config = configured()?;
+        let current = SessionStore::new(&config)
+            .map_err(|_| "보안 저장소 오류")?
+            .load()
+            .map_err(|_| "보안 저장소 오류")?;
         let mut ledger = state
             .ledger
             .lock()
             .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
-        ledger
-            .stop_sharing_through(&today)
-            .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
-        ledger
-            .clear_sharing_scope()
-            .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
-    }
-    drop(_gate);
-    get_sharing_state(state).await
+        let after = ledger
+            .cached_world_scope()
+            .map_err(|_| "로컬 공동 세계 오류")?;
+        // A late completion must never clear a newer account/world's local state.
+        if current
+            .as_ref()
+            .is_some_and(|saved| saved.user.id == session.user.id)
+            && leave_scope_matches(before, after)
+        {
+            ledger
+                .stop_sharing_through(&today)
+                .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
+            ledger
+                .clear_sharing_scope()
+                .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
+        }
+        drop(ledger);
+        match current {
+            Some(saved) => local_state(&state, "signed_in", Some(saved.user.id)),
+            None => local_state(&state, "signed_out", None),
+        }
+    };
+    Ok(response)
 }
-
 #[tauri::command]
 pub async fn delete_synced_usage(state: State<'_, AppState>) -> Result<SharingState, String> {
     let _gate = state.sync_gate.lock().await;
@@ -475,4 +538,29 @@ pub async fn delete_synced_usage(state: State<'_, AppState>) -> Result<SharingSt
     }
     drop(_gate);
     get_sharing_state(state).await
+}
+
+#[cfg(test)]
+mod chat_leave_tests {
+    #[tokio::test]
+    async fn leave_network_wait_does_not_hold_local_gate() {
+        let gate = tokio::sync::Mutex::new(());
+        let result = super::leave_without_local_gate(&gate, async {
+            assert!(gate.try_lock().is_ok());
+            Ok::<_, crate::sync::client::SyncError>(true)
+        })
+        .await;
+        assert_eq!(result, Ok(true));
+    }
+    #[test]
+    fn late_leave_result_cannot_clear_another_scope() {
+        assert!(super::leave_scope_matches(
+            Some(("old".into(), "user".into(), chrono_tz::UTC)),
+            Some(("old".into(), "user".into(), chrono_tz::UTC))
+        ));
+        assert!(!super::leave_scope_matches(
+            Some(("old".into(), "user".into(), chrono_tz::UTC)),
+            Some(("new".into(), "user".into(), chrono_tz::UTC))
+        ));
+    }
 }
