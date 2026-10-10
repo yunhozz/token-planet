@@ -1,4 +1,5 @@
 begin;
+create extension if not exists pgtap with schema extensions;
 select plan(17);
 insert into auth.users(id) values ('00000000-0000-0000-0000-000000009001'),('00000000-0000-0000-0000-000000009002'),('00000000-0000-0000-0000-000000009003');
 insert into public.worlds(id,owner_id,name,timezone) values ('90000000-0000-0000-0000-000000000001','00000000-0000-0000-0000-000000009001','Chat','UTC');
