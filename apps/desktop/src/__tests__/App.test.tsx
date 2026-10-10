@@ -1135,6 +1135,23 @@ it("escape_hides_only_popup", async () => {
   isTauriMock.mockReturnValue(false);
 });
 
+it("escape_listener_reads_current_detail_view", async () => {
+  isTauriMock.mockReturnValue(true);
+  const addListener = vi.spyOn(window, "addEventListener");
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  const escapeListener = addListener.mock.calls.find(([type]) => type === "keydown")![1] as EventListener;
+  fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
+  await screen.findByRole("tab", { name: "내 행성" });
+  invokeMock.mockClear();
+  // Exercise the callback across the view commit without depending on passive effect timing.
+  act(() => escapeListener(new KeyboardEvent("keydown", { key: "Escape" })));
+  expect(invokeMock).not.toHaveBeenCalledWith("hide_popover");
+  expect(screen.getByRole("tab", { name: "내 행성" })).toBeInTheDocument();
+  addListener.mockRestore();
+  isTauriMock.mockReturnValue(false);
+});
+
 it("opens_popover_after_profile_setup", async () => {
   const unprofiled = structuredClone(localSnapshot);
   unprofiled.planet.profile = null;

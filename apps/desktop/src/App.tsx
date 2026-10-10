@@ -1,6 +1,6 @@
 import { isPlanetObjectVisible } from "./components/planetObjectVisibility";
 import { FormattedTokens } from "./components/FormattedTokens";
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { invoke, isTauri } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { GroupChat } from "./components/GroupChat";
@@ -119,6 +119,10 @@ function App() {
   featureScreenRef.current = featureScreen;
   const [snapshot, setSnapshot] = useState<WorldSnapshot | null>(null);
   const [detail, setDetail] = useState(initialFeatureScreen !== "planet");
+  const detailRef = useRef(detail);
+  useLayoutEffect(() => {
+    detailRef.current = detail;
+  }, [detail]);
   const popupRef = useRef<HTMLElement | null>(null);
   const compactHeight = useCompactPopup(popupRef, !detail && navigator.platform.startsWith("Mac") && Boolean(snapshot?.planet.profile));
   const [detailTab, setDetailTab] = useState<"planet" | "group">("planet");
@@ -344,14 +348,14 @@ function App() {
 
   useEffect(() => {
     function hidePopoverOnEscape(event: KeyboardEvent) {
-      if (event.key !== "Escape" || detail || !isTauri()) return;
+      if (event.key !== "Escape" || detailRef.current || !isTauri()) return;
       void invoke("hide_popover").catch(() => {
         setTransitionError("팝오버를 닫지 못했습니다. 다시 시도하세요.");
       });
     }
     window.addEventListener("keydown", hidePopoverOnEscape);
     return () => window.removeEventListener("keydown", hidePopoverOnEscape);
-  }, [detail]);
+  }, []);
 
   useEffect(() => {
     const context = JSON.stringify([sharedPhase, sharedUserId, sharedWorldId, sharedIsOwner]);
