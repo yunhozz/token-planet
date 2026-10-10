@@ -855,6 +855,7 @@ impl Ledger {
                 ],
             )?;
         }
+        super::ledger::record_ordinal_history_in(&transaction, target_account_id, planet_state)?;
         transaction.execute("DELETE FROM planet_wallet_credit", [])?;
         for credit in &planet_state.wallet_credits {
             transaction.execute(
@@ -2628,6 +2629,40 @@ pub(crate) mod guest_import_v2_capture_tests {
             )
             .unwrap();
         assert_eq!(owner, TARGET_ACCOUNT);
+    }
+
+    #[test]
+    fn cycle_ordinal_completed_import_uses_canonical_credits_only() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut ledger = prepared_first_reset_ledger_at(&directory.path().join("ordinal.sqlite"));
+        let before = ledger.planet_ordinal().unwrap();
+        let PendingGuestShopImport::V2(capture) = ledger
+            .capture_guest_shop_import_request(TARGET_ACCOUNT)
+            .unwrap()
+        else {
+            panic!("capture expected");
+        };
+        assert_eq!(
+            ledger.planet_ordinal().unwrap(),
+            before,
+            "pending payload must not increase ordinal"
+        );
+        ledger.set_selected_auth_account(TARGET_ACCOUNT).unwrap();
+        ledger
+            .mark_guest_shop_import_attempt_started(
+                TARGET_ACCOUNT,
+                uuid::Uuid::parse_str(&capture.request.snapshot.import_id).unwrap(),
+            )
+            .unwrap();
+        let result = imported_result_for(&capture.request);
+        ledger
+            .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+        ledger
+            .complete_guest_shop_import(TARGET_ACCOUNT, &result)
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
     }
 
     #[test]

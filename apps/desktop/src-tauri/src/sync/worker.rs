@@ -270,6 +270,9 @@ pub(crate) async fn sync_private_effect_contribution<C: PrivateEffectSyncApi>(
             return Err("서버 행성 주기를 확인할 수 없습니다".into());
         }
         ledger
+            .record_canonical_planet_history(&format!("account:{account_id}"), &remote_state)
+            .map_err(|_| "행성 순서 이력을 반영할 수 없습니다")?;
+        ledger
             .merge_remote_planet_state(&remote_state)
             .map_err(|_| "행성 동기화 상태를 반영할 수 없습니다")?;
         require_planet_sync_context(&ledger, account_id, &remote_state.current_cycle_id)?;
@@ -333,6 +336,9 @@ pub(crate) async fn sync_private_effect_contribution<C: PrivateEffectSyncApi>(
         if canonical_state.current_cycle_id != cycle_id {
             return Err("서버 응답의 행성 주기가 변경되었습니다".into());
         }
+        ledger
+            .record_canonical_planet_history(&format!("account:{account_id}"), &canonical_state)
+            .map_err(|_| "행성 순서 이력을 반영할 수 없습니다")?;
         ledger
             .merge_remote_planet_state(&canonical_state)
             .map_err(|_| "행성 동기화 상태를 반영할 수 없습니다")?;
@@ -509,6 +515,33 @@ async fn finish_signed_reset_intent<C: SignedResetSyncApi>(
 }
 
 pub async fn sync_once(state: &AppState) -> Result<(), String> {
+    sync_once_event(state).await.data
+}
+
+pub(crate) async fn sync_once_event(
+    state: &AppState,
+) -> crate::domain::device_reset::LocalEnvelope<Result<(), String>> {
+    let generation = state.lifecycle.generation().await;
+    let permit = match state.lifecycle.enter(generation).await {
+        Ok(permit) => permit,
+        Err(error) => {
+            return crate::domain::device_reset::LocalEnvelope {
+                generation: error.generation,
+                data: Err(error.message),
+            }
+        }
+    };
+    let result = sync_once_inner(state).await;
+    if let Ok(mut failed) = state.sync_failed.lock() {
+        *failed = result.is_err();
+    }
+    crate::domain::device_reset::LocalEnvelope {
+        generation: permit.generation(),
+        data: result,
+    }
+}
+
+async fn sync_once_inner(state: &AppState) -> Result<(), String> {
     let _gate = state.sync_gate.lock().await;
     sync_after_guest_import_check(state).await
 }
@@ -952,7 +985,6 @@ mod tests {
         sync::{atomic::AtomicBool, Mutex},
     };
 
-
     fn add_usage(ledger: &mut Ledger, event_key: &str, at: &str, tokens: u64) {
         ledger
             .insert(&ParsedRecord {
@@ -993,6 +1025,9 @@ mod tests {
         );
         let cycle_id = ledger.planet_cycle_id().unwrap();
         let state = AppState {
+            lifecycle: crate::lifecycle::LocalLifecycle::new(
+                &crate::domain::device_reset::DeviceResetState::default(),
+            ),
             config: Mutex::new(SourceConfig {
                 codex_root: Path::new("/private/tmp/token-planet-empty-codex").to_path_buf(),
                 claude_root: Path::new("/private/tmp/token-planet-empty-claude").to_path_buf(),
@@ -1013,6 +1048,9 @@ mod tests {
 
     fn app_state_from_ledger(ledger: Ledger) -> AppState {
         let state = AppState {
+            lifecycle: crate::lifecycle::LocalLifecycle::new(
+                &crate::domain::device_reset::DeviceResetState::default(),
+            ),
             config: Mutex::new(SourceConfig {
                 codex_root: Path::new("/private/tmp/token-planet-empty-codex").to_path_buf(),
                 claude_root: Path::new("/private/tmp/token-planet-empty-claude").to_path_buf(),
@@ -2343,6 +2381,9 @@ mod tests {
             [&guest_account],
         ).unwrap();
         let state = AppState {
+            lifecycle: crate::lifecycle::LocalLifecycle::new(
+                &crate::domain::device_reset::DeviceResetState::default(),
+            ),
             config: Mutex::new(SourceConfig {
                 codex_root: Path::new("/tmp/token-planet-missing-codex").to_path_buf(),
                 claude_root: Path::new("/tmp/token-planet-missing-claude").to_path_buf(),

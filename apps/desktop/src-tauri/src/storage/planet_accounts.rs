@@ -48,6 +48,10 @@ impl Ledger {
             "CREATE INDEX IF NOT EXISTS planet_usage_owner_account_event
              ON planet_usage_owner(account_id, event_key);",
         )?;
+        if super::device_reset::recovery_required(&tx) {
+            tx.commit()?;
+            return Ok(());
+        }
         // Older versions did not record the planet's account. A cached world
         // may belong to an earlier login, so preserve previously shared data
         // separately and restore the signed-in account from its server state.
@@ -59,12 +63,17 @@ impl Ledger {
                ELSE 'local' END",
             [],
         )?;
-        tx.execute(
-            "INSERT OR IGNORE INTO planet_usage_owner(event_key,account_id)
-             SELECT event_key,(SELECT value FROM setting WHERE key='planet_account_id')
-             FROM usage_record",
-            [],
-        )?;
+        // Reset-era inserts assign ownership only after the strict cutoff and
+        // record-kind checks. Missing owners are intentional exclusions, not
+        // legacy rows awaiting migration.
+        if super::device_reset::cutoff_in_connection(&tx)?.is_none() {
+            tx.execute(
+                "INSERT OR IGNORE INTO planet_usage_owner(event_key,account_id)
+                 SELECT event_key,(SELECT value FROM setting WHERE key='planet_account_id')
+                 FROM usage_record",
+                [],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }

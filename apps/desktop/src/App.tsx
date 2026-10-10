@@ -1,7 +1,9 @@
+import { DeviceResetPanel } from "./components/DeviceResetPanel";
+import { invokeLocal as invoke, suspendLocalActions, bootstrapLocalLifecycle, acceptLocalGeneration, acceptResetView, subscribeLocalLifecycle, localGeneration, localActionsBlocked, type DeviceResetView, type LocalEnvelope } from "./lib/localLifecycle";
 import { isPlanetObjectVisible } from "./components/planetObjectVisibility";
 import { FormattedTokens } from "./components/FormattedTokens";
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
-import { invoke, isTauri } from "@tauri-apps/api/core";
+import { invoke as invokeUi, isTauri } from "@tauri-apps/api/core";
 import { emit, listen } from "@tauri-apps/api/event";
 import { InvitePanel } from "./components/InvitePanel";
 import { GrowthJournal } from "./components/GrowthJournal";
@@ -59,6 +61,7 @@ function FeatureToolMenu({
 }
 
 const EMPTY_SNAPSHOT: WorldSnapshot = {
+  generation: 0, planet_ordinal:{status:"unknown",current:null},
   usage: {
     codex: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: null, coverage: "unavailable" },
     claude_code: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: null, coverage: "unavailable" },
@@ -90,7 +93,7 @@ function sameNaturalKey(left: NaturalObjectKey, right: NaturalObjectKey): boolea
 function worldContext(shared: SharingState | null, snapshot: WorldSnapshot | null) {
   return JSON.stringify([shared?.phase ?? null, shared?.user_id ?? null,
     shared?.world?.id ?? null, shared?.world?.is_owner ?? false,
-    snapshot?.planet.current_cycle_id ?? null]);
+    snapshot?.planet.current_cycle_id ?? null, snapshot?.generation ?? null]);
 }
 
 function confirmedResetViewUnavailable(error: unknown): ConfirmedResetViewUnavailable | null {
@@ -107,7 +110,7 @@ function confirmedResetViewUnavailable(error: unknown): ConfirmedResetViewUnavai
   return value as ConfirmedResetViewUnavailable;
 }
 
-function App() {
+function PlanetApp() {
   const requestedWindow = new URLSearchParams(window.location.search).get("window");
   const initialFeatureScreen: FeatureScreen = requestedWindow === "cosmetic-shop" || requestedWindow === "growth-journal"
     ? requestedWindow
@@ -174,11 +177,12 @@ function App() {
       ? { account_id: `account:${shared.user_id}`, is_guest: false }
       : null);
   const shopIdentity = shopAccount && snapshot?.planet.current_cycle_id
-    ? JSON.stringify([shopAccount.account_id, snapshot.planet.current_cycle_id])
+    ? JSON.stringify([shopAccount.account_id, snapshot.planet.current_cycle_id, snapshot.generation])
     : "unverified-shop-context";
   const shopActionsAvailable = Boolean(shopAccount && snapshot?.planet.current_cycle_id)
     && !featureActionsBlocked && shared?.sync_status !== "paused";
   const shopActions = useShopActions({
+    local_generation: snapshot?.generation ?? localGeneration() ?? 0,
     account_id: shopAccount?.account_id ?? "",
     current_cycle_id: snapshot?.planet.current_cycle_id ?? "",
     is_guest: shopAccount?.is_guest ?? false,
@@ -289,11 +293,11 @@ function App() {
         setSharedLoading(true);
       }
     };
-    const unlisten = listen<WorldSnapshot>("usage-updated", (event) => {
-      if (active) { setSnapshot(event.payload); setError(false); }
+    const unlisten = listen<LocalEnvelope<WorldSnapshot>>("usage-updated", (event) => {
+      if (active && event.payload.generation === localGeneration() && !localActionsBlocked()) { setSnapshot(event.payload.data); setError(false); }
     }).catch(() => () => {});
-    const unlistenScanFailed = listen("usage-scan-failed", () => {
-      if (active) setError(true);
+    const unlistenScanFailed = listen<{generation:number}>("usage-scan-failed", (event) => {
+      if (active && event.payload.generation === localGeneration() && !localActionsBlocked()) setError(true);
     }).catch(() => () => {});
     const unlistenCompact = listen("show-compact", () => {
       if (active) {
@@ -344,7 +348,7 @@ function App() {
   useEffect(() => {
     function hidePopoverOnEscape(event: KeyboardEvent) {
       if (event.key !== "Escape" || detail || !isTauri()) return;
-      void invoke("hide_popover").catch(() => {
+      void invokeUi("hide_popover").catch(() => {
         setTransitionError("팝오버를 닫지 못했습니다. 다시 시도하세요.");
       });
     }
@@ -477,13 +481,17 @@ function App() {
       || resetViewRefreshRequired?.context === resetContext
       || resetPendingOwnerRef.current !== null
       || sourceBusyRef.current !== null || refreshing || planetBusy) return;
-    if (!window.confirm("현재 행성을 초기화할까요? 확인된 이번 행성 토큰은 지갑에 적립되고, 자연 생태계부터 다시 시작합니다.")) return;
+    const ordinal = snapshot?.planet_ordinal;
+    const moveMessage = ordinal?.status === "verified" && ordinal.current !== null
+      ? `현재 기록된 ${ordinal.current}번째 행성입니다. ${ordinal.current + 1}번째 행성으로 이동할까요?`
+      : "현재 행성 순서를 확인할 수 없습니다. 다음 행성으로 이동할까요?";
+    if (!window.confirm(`${moveMessage} 확인된 이번 행성 토큰은 지갑에 적립되고, 새 행성을 자연 생태계부터 시작합니다.`)) return;
     if ((!isGuestResetEligible && !isSignedResetEligible) || !resetContextIsCurrent()) return;
     resetPendingOwnerRef.current = resetOwner;
     setPlanetBusy(true);
     setPlanetError("");
     try {
-      const updated = await invoke<WorldSnapshot>("reset_planet");
+      const updated = await invoke<WorldSnapshot>("reset_planet", { expected: { generation: snapshot!.generation, account_id: resetAccountId, current_cycle_id: resetCycleId } });
       if (!thisResetIsCurrent()) return;
       setSnapshot(updated);
       broadcastDesktopEvent("world-state-updated");
@@ -569,7 +577,7 @@ function App() {
     setTransitionError("");
     setTransitionTarget(null);
     try {
-      if (isTauri()) await invoke("set_detail_view", { detail: next });
+      if (isTauri()) await invokeUi("set_detail_view", { detail: next });
       setDetail(next);
       if (next) setDetailTab("planet");
     } catch {
@@ -685,7 +693,7 @@ function App() {
   const resetAccessMessage = !shopAccount
     ? "계정 상태 확인 중이므로 초기화할 수 없습니다."
     : activeResetViewRefresh
-      ? "서버에서 행성 초기화가 완료되었습니다. 새 행성 상태를 불러와 주세요."
+      ? "서버에서 행성 이동이 완료되었습니다. 새 행성 상태를 불러와 주세요."
       : shopAccount.is_guest
         ? null
         : !shopActionsAvailable
@@ -758,7 +766,7 @@ function App() {
   }, [featureScreen, journalContext, sharedLoading]);
   useEffect(() => {
     if (initialFeatureScreen !== "planet" && isTauri()) {
-      void invoke("set_detail_view", { detail: true }).catch(() => {});
+      void invokeUi("set_detail_view", { detail: true }).catch(() => {});
     }
   }, []);
 
@@ -1095,7 +1103,7 @@ function App() {
                   <div><dt>토큰 획득</dt><dd>{(currentShopState.effects.token_earning_bps / 100).toFixed(2)}%</dd></div>
                   <div><dt>문명 성장</dt><dd>{(currentShopState.effects.civilization_growth_bps / 100).toFixed(2)}%</dd></div>
                   <div><dt>상점 할인</dt><dd>{(currentShopState.effects.shop_discount_bps / 100).toFixed(2)}%</dd></div>
-                  <div><dt>초기화 대기시간</dt><dd>{(currentShopState.effects.reset_cooldown_bps / 100).toFixed(2)}%</dd></div>
+                  <div><dt>행성 이동 대기시간</dt><dd>{(currentShopState.effects.reset_cooldown_bps / 100).toFixed(2)}%</dd></div>
                   <div><dt>자연물 제거 할인</dt><dd>{(currentShopState.effects.natural_removal_discount_bps / 100).toFixed(2)}%</dd></div>
                   <div><dt>시대 보상</dt><dd><FormattedTokens value={currentShopState.effects.era_reward_tokens} /> 토큰</dd></div>
                   <div><dt>연속 보상</dt><dd><FormattedTokens value={currentShopState.effects.streak_reward_tokens} /> 토큰</dd></div>
@@ -1122,12 +1130,12 @@ function App() {
                 <SourceStatus agent="claude_code" usage={view.usage.claude_code} health={view.usage.claude_code_source} onToggle={toggleSource} onSelectFolder={selectFolder} busy={sourceBusy !== null || planetBusy || refreshing} pending={sourceBusy === "claude_code"} error={sourceError?.agent === "claude_code" ? sourceError.message : undefined} />
               </div>
               <div className="reset-row">
-                <span className="reset-note">{resetAccessMessage ?? "확인된 이번 행성 토큰은 지갑에 적립되며, 행성을 자연 생태계부터 다시 시작합니다."}{shopAccount?.is_guest && !canReset && planet.reset_available_at_utc && <><br />다음 초기화 가능: {new Date(planet.reset_available_at_utc).toLocaleString("ko-KR")}</>}</span>
-                <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!resetAvailable || featureActionsBlocked || activeResetViewRefresh !== null || planetBusy || sourceBusy !== null || refreshing}>{planetBusy ? "처리 중" : activeResetViewRefresh ? "초기화 완료" : "행성 초기화"}</button>
+                <span className="reset-note">{resetAccessMessage ?? "확인된 이번 행성 토큰은 지갑에 적립되며, 행성을 자연 생태계부터 다시 시작합니다."}{shopAccount?.is_guest && !canReset && planet.reset_available_at_utc && <><br />다음 이동 가능: {new Date(planet.reset_available_at_utc).toLocaleString("ko-KR")}</>}</span>
+                <button className="reset-button" type="button" onClick={() => void resetPlanet()} disabled={!resetAvailable || featureActionsBlocked || activeResetViewRefresh !== null || planetBusy || sourceBusy !== null || refreshing}>{planetBusy ? "처리 중" : activeResetViewRefresh ? "이동 완료" : "다음 행성으로"}</button>
               </div>
               {activeResetViewRefresh && <p className="reset-completed-note" role="status">
-                서버에서 초기화가 완료됐습니다. 화면 갱신만 필요합니다.
-                {" "}<button className="error-retry" type="button" onClick={() => void refresh()} disabled={planetBusy || sourceBusy !== null || refreshing}>완료된 초기화 상태 새로고침</button>
+                서버에서 행성 이동이 완료됐습니다. 화면 갱신만 필요합니다.
+                {" "}<button className="error-retry" type="button" onClick={() => void refresh()} disabled={planetBusy || sourceBusy !== null || refreshing}>완료된 이동 상태 새로고침</button>
               </p>}
             </div>
           </section> : <section id="panel-group" className="detail-panel group-panel" role="tabpanel" aria-labelledby="tab-group" tabIndex={0}>
@@ -1179,6 +1187,33 @@ function App() {
       />}
     </main>
   );
+}
+
+function App() {
+  const [view, setView] = useState<DeviceResetView | null>(null);
+  const [revision, setRevision] = useState(0);
+  const [statusError, setStatusError] = useState(false);
+  async function recheck() {
+    try { const next = await bootstrapLocalLifecycle(); setView(next); setStatusError(false); }
+    catch { setStatusError(true); throw new Error("기기 상태를 확인할 수 없습니다."); }
+  }
+  useEffect(() => {
+    let active = true;
+    const unsubscribe = subscribeLocalLifecycle(() => { if (active) setRevision(value => value + 1); });
+    const stop = listen<LocalEnvelope<DeviceResetView>>("device-reset-updated", event => {
+      if (active && acceptLocalGeneration(event.payload.generation) && acceptResetView(event.payload.data)) setView(event.payload.data);
+    }).catch(() => () => {});
+    const onFocus = () => { suspendLocalActions(); void recheck().catch(() => {}); };
+    window.addEventListener("focus", onFocus);
+    void recheck().catch(() => {});
+    return () => { active = false; unsubscribe(); window.removeEventListener("focus", onFocus); void stop.then(fn => fn()); };
+  }, []);
+  void revision;
+  return <div className="local-app-shell">
+    <DeviceResetPanel view={view} onChanged={recheck} />
+    {statusError && <p role="alert">기기 상태를 확인할 수 없습니다. <button type="button" onClick={() => void recheck().catch(() => {})}>기기 상태 다시 확인</button></p>}
+    {view && <PlanetApp key={`${localGeneration()}:${localActionsBlocked()}`} />}
+  </div>;
 }
 
 export default App;

@@ -5,6 +5,7 @@ import type { ShopActionsContext, ShopActionsTransport } from "../useShopActions
 import type { ShopActionResult, ShopQuote, ShopRequest, ShopState } from "../../types/usage";
 
 const BASE_CONTEXT: ShopActionsContext = {
+  local_generation:0,
   account_id: "local",
   current_cycle_id: "cycle-1",
   is_guest: true,
@@ -566,4 +567,13 @@ describe("useShopActions", () => {
     expect(result.current.reconfirmationRequired).toBe(true);
     expect(api.apply).toHaveBeenCalledTimes(1);
   });
+});
+
+it("drops the shop cache when local generation changes within the same account and cycle", async () => {
+  const api: ShopActionsTransport = {refresh:vi.fn().mockResolvedValue(shopState()),quote:vi.fn(),apply:vi.fn()};
+  const {result,rerender} = renderHook(({generation}) => useShopActions({...BASE_CONTEXT,local_generation:generation},api),{initialProps:{generation:0}});
+  await act(async () => { await result.current.refresh(); });
+  expect(result.current.state).not.toBeNull();
+  rerender({generation:1});
+  expect(result.current.state).toBeNull();
 });

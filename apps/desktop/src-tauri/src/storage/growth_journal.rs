@@ -50,6 +50,9 @@ impl Ledger {
                 PRIMARY KEY(account_id, device_id, cycle_id, bucket_date, agent)
              );",
         )?;
+        if super::device_reset::recovery_required(&self.connection) {
+            return Ok(());
+        }
         let account_id = self.current_planet_account_id()?;
         self.connection.execute(
             "INSERT OR IGNORE INTO growth_journal_state(account_id) VALUES (?1)",

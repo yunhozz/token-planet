@@ -226,7 +226,12 @@ pub struct CreatedWorldInvite {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InviteStatus { Active, Used, Revoked, Expired }
+pub enum InviteStatus {
+    Active,
+    Used,
+    Revoked,
+    Expired,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorldInvite {
@@ -239,16 +244,32 @@ pub struct WorldInvite {
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InviteRevokeStatus { Revoked, AlreadyRevoked, Used }
+pub enum InviteRevokeStatus {
+    Revoked,
+    AlreadyRevoked,
+    Used,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct InviteRevokeResult { pub status: InviteRevokeStatus }
+pub struct InviteRevokeResult {
+    pub status: InviteRevokeStatus,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum InviteAcceptStatus { Accepted, AlreadyAccepted, Unavailable, AlreadyMember, WorldFull, RateLimited }
+pub enum InviteAcceptStatus {
+    Accepted,
+    AlreadyAccepted,
+    Unavailable,
+    AlreadyMember,
+    WorldFull,
+    RateLimited,
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct InviteAcceptResult { pub status: InviteAcceptStatus, pub world_id: Option<String> }
+pub struct InviteAcceptResult {
+    pub status: InviteAcceptStatus,
+    pub world_id: Option<String>,
+}
 
 impl SupabaseSyncClient {
     pub fn new(base_url: &str, publishable_key: &str) -> Self {
@@ -553,33 +574,89 @@ impl SupabaseSyncClient {
         .await
     }
 
-    pub async fn accept_world_invite(&self, access_token: &str, code: &str) -> Result<InviteAcceptResult, SyncError> {
-        let rows: Vec<InviteAcceptResult> = self.post_rpc(access_token,"accept_world_invite",&serde_json::json!({"p_code":code})).await?;
+    pub async fn accept_world_invite(
+        &self,
+        access_token: &str,
+        code: &str,
+    ) -> Result<InviteAcceptResult, SyncError> {
+        let rows: Vec<InviteAcceptResult> = self
+            .post_rpc(
+                access_token,
+                "accept_world_invite",
+                &serde_json::json!({"p_code":code}),
+            )
+            .await?;
         let result = one_row(rows)?;
-        let success = matches!(result.status, InviteAcceptStatus::Accepted | InviteAcceptStatus::AlreadyAccepted);
-        if success != result.world_id.is_some() || result.world_id.as_ref().is_some_and(|id| uuid::Uuid::parse_str(id).is_err()) {
+        let success = matches!(
+            result.status,
+            InviteAcceptStatus::Accepted | InviteAcceptStatus::AlreadyAccepted
+        );
+        if success != result.world_id.is_some()
+            || result
+                .world_id
+                .as_ref()
+                .is_some_and(|id| uuid::Uuid::parse_str(id).is_err())
+        {
             return Err(SyncError::InvalidResponse);
         }
         Ok(result)
     }
 
-    pub async fn create_world_invite(&self, access_token: &str, world_id: &str) -> Result<CreatedWorldInvite, SyncError> {
-        let rows: Vec<CreatedWorldInvite> = self.post_rpc(access_token,"create_world_invite",&serde_json::json!({"p_world_id":world_id})).await?;
+    pub async fn create_world_invite(
+        &self,
+        access_token: &str,
+        world_id: &str,
+    ) -> Result<CreatedWorldInvite, SyncError> {
+        let rows: Vec<CreatedWorldInvite> = self
+            .post_rpc(
+                access_token,
+                "create_world_invite",
+                &serde_json::json!({"p_world_id":world_id}),
+            )
+            .await?;
         let result = one_row(rows)?;
-        let created = chrono::DateTime::parse_from_rfc3339(&result.created_at).map_err(|_| SyncError::InvalidResponse)?;
-        let expires = chrono::DateTime::parse_from_rfc3339(&result.expires_at).map_err(|_| SyncError::InvalidResponse)?;
-        if uuid::Uuid::parse_str(&result.invite_id).is_err() || result.code.len()!=64
-            || !result.code.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            || expires-created!=chrono::Duration::hours(168) { return Err(SyncError::InvalidResponse); }
+        let created = chrono::DateTime::parse_from_rfc3339(&result.created_at)
+            .map_err(|_| SyncError::InvalidResponse)?;
+        let expires = chrono::DateTime::parse_from_rfc3339(&result.expires_at)
+            .map_err(|_| SyncError::InvalidResponse)?;
+        if uuid::Uuid::parse_str(&result.invite_id).is_err()
+            || result.code.len() != 64
+            || !result
+                .code
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            || expires - created != chrono::Duration::hours(168)
+        {
+            return Err(SyncError::InvalidResponse);
+        }
         Ok(result)
     }
 
-    pub async fn list_world_invites(&self, access_token: &str, world_id: &str) -> Result<Vec<WorldInvite>, SyncError> {
-        self.post_rpc(access_token,"list_world_invites",&serde_json::json!({"p_world_id":world_id})).await
+    pub async fn list_world_invites(
+        &self,
+        access_token: &str,
+        world_id: &str,
+    ) -> Result<Vec<WorldInvite>, SyncError> {
+        self.post_rpc(
+            access_token,
+            "list_world_invites",
+            &serde_json::json!({"p_world_id":world_id}),
+        )
+        .await
     }
 
-    pub async fn revoke_world_invite(&self, access_token: &str, invite_id: &str) -> Result<InviteRevokeResult, SyncError> {
-        let rows: Vec<InviteRevokeResult> = self.post_rpc(access_token,"revoke_world_invite",&serde_json::json!({"p_invite_id":invite_id})).await?;
+    pub async fn revoke_world_invite(
+        &self,
+        access_token: &str,
+        invite_id: &str,
+    ) -> Result<InviteRevokeResult, SyncError> {
+        let rows: Vec<InviteRevokeResult> = self
+            .post_rpc(
+                access_token,
+                "revoke_world_invite",
+                &serde_json::json!({"p_invite_id":invite_id}),
+            )
+            .await?;
         one_row(rows)
     }
 
@@ -940,8 +1017,10 @@ mod tests {
 
     #[test]
     fn invite_accept_decodes_status_and_uses_invite_endpoint() {
-        let (url, server) = spawn_rpc_server(MockResponse::Json(200,
-            r#"[{"status":"accepted","world_id":"81000000-0000-0000-0000-000000000001"}]"#.into()));
+        let (url, server) = spawn_rpc_server(MockResponse::Json(
+            200,
+            r#"[{"status":"accepted","world_id":"81000000-0000-0000-0000-000000000001"}]"#.into(),
+        ));
         let client = SupabaseSyncClient::new(&url, "publishable-key");
         let result = run_async(client.accept_world_invite("account-token", &"a".repeat(64)));
         let request = server.join().unwrap();
@@ -953,35 +1032,74 @@ mod tests {
     #[test]
     fn invite_rpc_management_contracts_and_failures() {
         let cases = [
-            ("create", r#"[{"invite_id":"81000000-0000-0000-0000-000000000002","code":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2026-10-08T00:00:00Z","expires_at":"2026-10-15T00:00:00Z"}]"#),
-            ("list", r#"[{"invite_id":"81000000-0000-0000-0000-000000000002","created_at":"2026-10-08T00:00:00Z","expires_at":"2026-10-15T00:00:00Z","used_at":null,"revoked_at":null,"status":"active"}]"#),
+            (
+                "create",
+                r#"[{"invite_id":"81000000-0000-0000-0000-000000000002","code":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2026-10-08T00:00:00Z","expires_at":"2026-10-15T00:00:00Z"}]"#,
+            ),
+            (
+                "list",
+                r#"[{"invite_id":"81000000-0000-0000-0000-000000000002","created_at":"2026-10-08T00:00:00Z","expires_at":"2026-10-15T00:00:00Z","used_at":null,"revoked_at":null,"status":"active"}]"#,
+            ),
             ("revoke", r#"[{"status":"revoked"}]"#),
         ];
         for (name, body) in cases {
             let (url, server) = spawn_rpc_server(MockResponse::Json(200, body.into()));
             let client = SupabaseSyncClient::new(&url, "publishable-key");
             match name {
-                "create" => assert!(run_async(client.create_world_invite("account-token", "world-id")).is_ok()),
-                "list" => assert_eq!(run_async(client.list_world_invites("account-token", "world-id")).unwrap().len(), 1),
-                _ => assert!(run_async(client.revoke_world_invite("account-token", "invite-id")).is_ok()),
+                "create" => assert!(run_async(
+                    client.create_world_invite("account-token", "world-id")
+                )
+                .is_ok()),
+                "list" => assert_eq!(
+                    run_async(client.list_world_invites("account-token", "world-id"))
+                        .unwrap()
+                        .len(),
+                    1
+                ),
+                _ => assert!(
+                    run_async(client.revoke_world_invite("account-token", "invite-id")).is_ok()
+                ),
             }
             let request = server.join().unwrap();
-            assert_account_request(&request, &format!("/rest/v1/rpc/{name}_world_invite{}", if name=="list" {"s"} else {""}));
-            assert_eq!(request.body, if name=="revoke" {serde_json::json!({"p_invite_id":"invite-id"})} else {serde_json::json!({"p_world_id":"world-id"})});
+            assert_account_request(
+                &request,
+                &format!(
+                    "/rest/v1/rpc/{name}_world_invite{}",
+                    if name == "list" { "s" } else { "" }
+                ),
+            );
+            assert_eq!(
+                request.body,
+                if name == "revoke" {
+                    serde_json::json!({"p_invite_id":"invite-id"})
+                } else {
+                    serde_json::json!({"p_world_id":"world-id"})
+                }
+            );
         }
-        for body in ["[]", "null", r#"[{"status":"accepted","world_id":null}]"#,
+        for body in [
+            "[]",
+            "null",
+            r#"[{"status":"accepted","world_id":null}]"#,
             r#"[{"status":"unavailable","world_id":"81000000-0000-0000-0000-000000000001"}]"#,
-            r#"[{"status":"future","world_id":null}]"#] {
+            r#"[{"status":"future","world_id":null}]"#,
+        ] {
             let (url, server) = spawn_rpc_server(MockResponse::Json(200, body.into()));
-            let client = SupabaseSyncClient::new(&url,"publishable-key");
-            assert!(matches!(run_async(client.accept_world_invite("account-token","hidden")),Err(SyncError::InvalidResponse)));
-            assert_account_request(&server.join().unwrap(),"/rest/v1/rpc/accept_world_invite");
+            let client = SupabaseSyncClient::new(&url, "publishable-key");
+            assert!(matches!(
+                run_async(client.accept_world_invite("account-token", "hidden")),
+                Err(SyncError::InvalidResponse)
+            ));
+            assert_account_request(&server.join().unwrap(), "/rest/v1/rpc/accept_world_invite");
         }
-        for response in [MockResponse::Json(401,"sensitive body".into()),MockResponse::Disconnect] {
+        for response in [
+            MockResponse::Json(401, "sensitive body".into()),
+            MockResponse::Disconnect,
+        ] {
             let (url, server) = spawn_rpc_server(response);
-            let client = SupabaseSyncClient::new(&url,"publishable-key");
-            assert!(run_async(client.accept_world_invite("account-token","hidden")).is_err());
-            assert_account_request(&server.join().unwrap(),"/rest/v1/rpc/accept_world_invite");
+            let client = SupabaseSyncClient::new(&url, "publishable-key");
+            assert!(run_async(client.accept_world_invite("account-token", "hidden")).is_err());
+            assert_account_request(&server.join().unwrap(), "/rest/v1/rpc/accept_world_invite");
         }
     }
 
@@ -1593,6 +1711,67 @@ mod tests {
             request.headers.get("authorization").map(String::as_str),
             Some("Bearer account-token")
         );
+    }
+
+    #[test]
+    fn cycle_ordinal_server_planet_and_upload_wire_keep_the_original_key_set() {
+        let state = empty_planet_state("cycle-1");
+        let value = serde_json::to_value(&state).unwrap();
+        let mut actual: Vec<_> = value
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        actual.sort_unstable();
+        let mut expected = vec![
+            "version",
+            "profile",
+            "timezone",
+            "current_cycle_id",
+            "cycle_started_at_utc",
+            "last_reset_at_utc",
+            "wallet_balance",
+            "wallet_credits",
+            "current_planet_tokens",
+            "lifetime_tokens",
+            "growth_credit",
+            "stage",
+            "progress_to_next",
+            "incomplete",
+            "can_reset",
+            "reset_available_at_utc",
+            "objects",
+            "removed_natural_keys",
+        ];
+        expected.sort_unstable();
+        assert_eq!(actual, expected);
+        let contribution = PlanetDeviceContribution {
+            device_id: "device".into(),
+            current_cycle_id: "cycle-1".into(),
+            lifetime_tokens: 0,
+            current_planet_tokens: 0,
+            daily_tokens: Default::default(),
+            incomplete: true,
+        };
+        let contribution = PlanetDeviceContributionSnapshot {
+            raw: contribution,
+            canonical_version: 0,
+            daily_segments: vec![],
+            activity_days: vec![],
+        };
+        let body = upload_planet_state_with_effects_rpc_body(&state, &contribution);
+        assert_eq!(
+            body["p_state"]
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect::<Vec<_>>(),
+            actual
+        );
+        let decoded: PlanetState = serde_json::from_value(value).unwrap();
+        assert_eq!(decoded.current_cycle_id, "cycle-1");
     }
 
     #[test]

@@ -5,3 +5,7 @@ pub mod landscape_geometry;
 pub mod planet;
 pub mod shop_effects;
 pub mod usage;
+
+pub mod device_reset;
+
+pub mod planet_ordinal;

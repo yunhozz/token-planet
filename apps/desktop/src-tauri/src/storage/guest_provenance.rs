@@ -170,6 +170,9 @@ pub(crate) fn initialize_guest_provenance_schema(
             );
          END;",
     )?;
+    if super::device_reset::recovery_required(connection) {
+        return Ok(());
+    }
     connection.execute(
         "INSERT OR IGNORE INTO guest_provenance_meta(singleton,seed_allowed) VALUES (1,?1)",
         [i64::from(allow_new_lineage)],
@@ -540,6 +543,9 @@ pub(crate) fn record_guest_occurrence_in_connection(
     record: &ParsedRecord,
     now: DateTime<Utc>,
 ) -> Result<(), ScanError> {
+    if !super::device_reset::record_eligible_after_reset(connection, record)? {
+        return Ok(());
+    }
     let account_id: Option<String> = connection
         .query_row(
             "SELECT value FROM setting WHERE key='planet_account_id'",

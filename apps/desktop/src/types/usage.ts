@@ -34,7 +34,11 @@ export type ScanSummary = {
 
 export type SourceHealth = "ready" | "not_found" | "permission_denied" | "unsupported_format" | "usage_unavailable" | "partial" | "user_disabled";
 
+export type PlanetOrdinal = { status: "verified" | "unknown"; current: number | null };
+
 export type WorldSnapshot = {
+  generation: number;
+  planet_ordinal: PlanetOrdinal;
   usage: ScanSummary;
   growth_credit: number;
   stage: number;

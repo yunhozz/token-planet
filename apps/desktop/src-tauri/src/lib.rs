@@ -2,6 +2,7 @@ pub mod collectors;
 pub mod commands;
 pub mod domain;
 pub mod growth;
+pub mod lifecycle;
 pub mod platform;
 pub mod storage;
 pub mod sync;
@@ -67,6 +68,7 @@ pub(crate) fn should_hide_on_blur(mode: WindowMode, tray_press_pending: bool) ->
 }
 
 pub struct AppState {
+    pub(crate) lifecycle: crate::lifecycle::LocalLifecycle,
     config: Mutex<SourceConfig>,
     pub(crate) ledger: Mutex<Ledger>,
     pub(crate) latest: Mutex<Option<WorldSnapshot>>,
@@ -467,6 +469,9 @@ mod account_switch_tests {
 
     fn test_state(ledger: Ledger) -> AppState {
         AppState {
+            lifecycle: crate::lifecycle::LocalLifecycle::new(
+                &crate::domain::device_reset::DeviceResetState::default(),
+            ),
             config: Mutex::new(SourceConfig {
                 codex_root: Path::new("/private/tmp/token-planet-account-switch-codex")
                     .to_path_buf(),
@@ -1056,6 +1061,28 @@ impl AppState {
         Ok(changed)
     }
 
+    pub(crate) async fn scan_background(
+        &self,
+    ) -> Result<
+        crate::domain::device_reset::LocalEnvelope<WorldSnapshot>,
+        crate::domain::device_reset::LocalCommandError,
+    > {
+        let generation = self.lifecycle.generation().await;
+        let permit = self.lifecycle.enter(generation).await?;
+        let result = restore_saved_planet_account_for_scan(self).and_then(|_| self.scan());
+        result
+            .map(|data| crate::domain::device_reset::LocalEnvelope {
+                generation: permit.generation(),
+                data,
+            })
+            .map_err(|error| {
+                crate::domain::device_reset::LocalCommandError::from_error(
+                    permit.generation(),
+                    error,
+                )
+            })
+    }
+
     pub(crate) fn scan(&self) -> Result<WorldSnapshot, String> {
         let result = self.scan_inner();
         self.usage_scan_failed
@@ -1168,8 +1195,7 @@ fn restore_saved_planet_account_for_scan(state: &AppState) -> Result<(), String>
     allow_local_scan_on_guest_shop_hold(restore_saved_planet_account_inner(state))
 }
 
-#[tauri::command]
-async fn refresh_usage(app: AppHandle) -> Result<WorldSnapshot, String> {
+async fn refresh_usage_inner(app: AppHandle) -> Result<WorldSnapshot, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let state = app.state::<AppState>();
         restore_saved_planet_account_for_scan(&state)?;
@@ -1181,8 +1207,7 @@ async fn refresh_usage(app: AppHandle) -> Result<WorldSnapshot, String> {
     .map_err(|_| "사용량 새로고침 작업을 완료하지 못했습니다".to_string())?
 }
 
-#[tauri::command]
-fn current_usage(state: State<'_, AppState>) -> Result<Option<WorldSnapshot>, String> {
+fn current_usage_inner(state: State<'_, AppState>) -> Result<Option<WorldSnapshot>, String> {
     let snapshot = state
         .latest
         .lock()
@@ -1194,8 +1219,7 @@ fn current_usage(state: State<'_, AppState>) -> Result<Option<WorldSnapshot>, St
     Ok(snapshot)
 }
 
-#[tauri::command]
-fn set_planet_profile(
+fn set_planet_profile_inner(
     nickname: String,
     avatar: PlanetAvatar,
     state: State<'_, AppState>,
@@ -1289,13 +1313,54 @@ fn signed_reset_snapshot(
     }
 }
 
-#[tauri::command]
-async fn reset_planet(
+fn require_expected_planet_context(
+    ledger: &storage::ledger::Ledger,
+    expected: &crate::domain::device_reset::ExpectedPlanetContext,
+) -> Result<(), String> {
+    if ledger.local_generation().map_err(|_| "행성 상태 오류")? != expected.generation
+        || ledger.cosmetic_account_id().map_err(|_| "행성 상태 오류")? != expected.account_id
+        || ledger.planet_cycle_id().map_err(|_| "행성 상태 오류")? != expected.current_cycle_id
+    {
+        return Err("행성 상태가 변경되었습니다. 다시 확인해 주세요.".into());
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod cycle_ordinal_context_tests {
+    #[test]
+    fn cycle_ordinal_stale_account_cycle_or_generation_is_rejected() {
+        let ledger =
+            crate::storage::ledger::Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC)
+                .unwrap();
+        let mut expected = crate::domain::device_reset::ExpectedPlanetContext {
+            generation: 0,
+            account_id: "local".into(),
+            current_cycle_id: ledger.planet_cycle_id().unwrap(),
+        };
+        assert!(super::require_expected_planet_context(&ledger, &expected).is_ok());
+        expected.current_cycle_id = "old".into();
+        assert!(super::require_expected_planet_context(&ledger, &expected).is_err());
+        expected.current_cycle_id = ledger.planet_cycle_id().unwrap();
+        expected.account_id = "other".into();
+        assert!(super::require_expected_planet_context(&ledger, &expected).is_err());
+        expected.account_id = "local".into();
+        expected.generation = 1;
+        assert!(super::require_expected_planet_context(&ledger, &expected).is_err());
+    }
+}
+
+async fn reset_planet_inner(
     state: State<'_, AppState>,
     app: AppHandle,
+    expected: &crate::domain::device_reset::ExpectedPlanetContext,
 ) -> Result<WorldSnapshot, ResetPlanetCommandError> {
     let _gate = state.sync_gate.lock().await;
     restore_saved_planet_account(&state)?;
+    require_expected_planet_context(
+        &*state.ledger.lock().map_err(|_| "행성 상태 오류")?,
+        expected,
+    )?;
     let account_id = {
         let ledger = state
             .ledger
@@ -1378,6 +1443,10 @@ async fn reset_planet(
         let _ = platform::tray::refresh_status(&app, &snapshot);
         return Ok(snapshot);
     }
+    require_expected_planet_context(
+        &*state.ledger.lock().map_err(|_| "행성 상태 오류")?,
+        expected,
+    )?;
     let _ = with_guest_planet_reset_authority(&account_id, || state.scan())?;
     state
         .ledger
@@ -1395,8 +1464,7 @@ async fn reset_planet(
     Ok(snapshot)
 }
 
-#[tauri::command]
-fn set_source_enabled(
+fn set_source_enabled_inner(
     agent: Agent,
     enabled: bool,
     state: State<'_, AppState>,
@@ -1419,8 +1487,16 @@ async fn choose_source_folder(
     agent: Agent,
     app: AppHandle,
     state: State<'_, AppState>,
-) -> Result<Option<WorldSnapshot>, String> {
-    restore_saved_planet_account_for_scan(&state)?;
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<Option<WorldSnapshot>>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    use crate::domain::device_reset::{LocalCommandError, LocalEnvelope};
+    let permit = state.lifecycle.enter(context.generation).await?;
+    restore_saved_planet_account_for_scan(&state)
+        .map_err(|error| LocalCommandError::from_error(permit.generation(), error))?;
+    drop(permit);
     let title = match agent {
         Agent::Codex => "Codex sessions 폴더 선택",
         Agent::ClaudeCode => "Claude Code projects 폴더 선택",
@@ -1434,34 +1510,52 @@ async fn choose_source_folder(
             .blocking_pick_folder()
     })
     .await
-    .map_err(|_| "folder dialog unavailable")?;
+    .map_err(|_| {
+        LocalCommandError::new(
+            context.generation,
+            "command_failed",
+            "folder dialog unavailable",
+        )
+    })?;
+    // Dialogs may remain open across a reset. Validate only after the user returns.
+    let permit = state.lifecycle.enter(context.generation).await?;
     let Some(folder) = selection else {
-        return Ok(None);
+        return Ok(LocalEnvelope {
+            generation: permit.generation(),
+            data: None,
+        });
     };
-    let folder = folder.into_path().map_err(|_| "folder unavailable")?;
-    if !folder.is_dir() {
-        return Err("folder unavailable".into());
-    }
-    state
-        .ledger
-        .lock()
-        .map_err(|_| "local ledger unavailable")?
-        .set_custom_root(agent, &folder)
-        .map_err(|_| "source setting unavailable")?;
-    {
-        let mut config = state
-            .config
-            .lock()
-            .map_err(|_| "source settings unavailable")?;
-        match agent {
-            Agent::Codex => config.codex_root = folder,
-            Agent::ClaudeCode => config.claude_root = folder,
+    let result = (|| -> Result<WorldSnapshot, String> {
+        let folder = folder.into_path().map_err(|_| "folder unavailable")?;
+        if !folder.is_dir() {
+            return Err("folder unavailable".into());
         }
-    }
-    restore_saved_planet_account_for_scan(&state)?;
-    let snapshot = state.scan()?;
+        state
+            .ledger
+            .lock()
+            .map_err(|_| "local ledger unavailable")?
+            .set_custom_root(agent, &folder)
+            .map_err(|_| "source setting unavailable")?;
+        {
+            let mut config = state
+                .config
+                .lock()
+                .map_err(|_| "source settings unavailable")?;
+            match agent {
+                Agent::Codex => config.codex_root = folder,
+                Agent::ClaudeCode => config.claude_root = folder,
+            }
+        }
+        restore_saved_planet_account_for_scan(&state)?;
+        state.scan()
+    })();
+    let snapshot =
+        result.map_err(|error| LocalCommandError::from_error(permit.generation(), error))?;
     let _ = platform::tray::refresh_status(&app, &snapshot);
-    Ok(Some(snapshot))
+    Ok(LocalEnvelope {
+        generation: permit.generation(),
+        data: Some(snapshot),
+    })
 }
 
 #[tauri::command]
@@ -1504,6 +1598,9 @@ pub fn run() {
             set_detail_view,
             hide_popover,
             choose_source_folder,
+            commands::device_reset::get_device_reset_state,
+            commands::device_reset::reset_device_data,
+            commands::device_reset::retry_device_reset,
             commands::cosmetic_shop::get_legacy_cosmetic_shop_state,
             commands::cosmetic_shop::get_shop_state,
             commands::cosmetic_shop::quote_shop_action,
@@ -1550,6 +1647,7 @@ pub fn run() {
             .ok_or_else(|| io::Error::other("home directory unavailable"))?;
             let config = resolve_roots(&roots);
             let state = AppState {
+                lifecycle: ledger.device_reset_state().map(|reset| crate::lifecycle::LocalLifecycle::new(&reset)).unwrap_or_else(|_| crate::lifecycle::LocalLifecycle::unavailable()),
                 config: Mutex::new(config),
                 ledger: Mutex::new(ledger),
                 latest: Mutex::new(None),
@@ -1573,19 +1671,24 @@ pub fn run() {
                     let worker_handle = handle.clone();
                     std::thread::spawn(move || {
                         let state = worker_handle.state::<AppState>();
-                        let initial_scan = restore_saved_planet_account_for_scan(&state)
-                            .and_then(|_| state.scan());
-                        state
-                            .usage_scan_failed
-                            .store(initial_scan.is_err(), Ordering::SeqCst);
+                        if let Err(error) = tauri::async_runtime::block_on(commands::device_reset::recover_device_reset_before_startup(&state,&worker_handle)) {
+                            let _ = worker_handle.emit("device-reset-recovery-required",&error);
+                            // Only the shell/recovery commands run until a user retry finishes recovery.
+                            loop {
+                                let completed = state.ledger.lock().ok().and_then(|ledger| ledger.device_reset_state().ok()).is_some_and(|reset| reset.phase==crate::domain::device_reset::DeviceResetPhase::Completed);
+                                if completed { break; }
+                                std::thread::sleep(std::time::Duration::from_secs(1));
+                            }
+                        }
+                        let initial_scan = tauri::async_runtime::block_on(state.scan_background());
                         let startup_mode = initial_mode_after_scan(
                             initial_scan
                                 .as_ref()
-                                .map(|snapshot| snapshot.planet.profile.is_some()),
+                                .map(|snapshot| snapshot.data.planet.profile.is_some()),
                         );
                         match &initial_scan {
                             Ok(snapshot) => {
-                                let _ = platform::tray::refresh_status(&worker_handle, snapshot);
+                                let _ = platform::tray::refresh_status(&worker_handle, &snapshot.data);
                                 let _ = worker_handle.emit("usage-updated", snapshot);
                             }
                             Err(error) => {
@@ -1610,30 +1713,25 @@ pub fn run() {
                         loop {
                             let state = worker_handle.state::<AppState>();
                             if !first_cycle {
-                                match restore_saved_planet_account_for_scan(&state)
-                                    .and_then(|_| state.scan())
+                                match tauri::async_runtime::block_on(state.scan_background())
                                 {
                                     Ok(snapshot) => {
                                         let _ = platform::tray::refresh_status(
                                             &worker_handle,
-                                            &snapshot,
+                                            &snapshot.data,
                                         );
                                         let _ = worker_handle.emit("usage-updated", snapshot);
                                     }
                                     Err(error) => {
-                                        state.usage_scan_failed.store(true, Ordering::SeqCst);
                                         let _ = worker_handle.emit("usage-scan-failed", error);
                                     }
                                 }
                             }
                             first_cycle = false;
-                            let result =
-                                tauri::async_runtime::block_on(sync::worker::sync_once(&state));
-                            if let Ok(mut failed) = state.sync_failed.lock() {
-                                *failed = result.is_err();
-                            }
-                            let _ = worker_handle.emit("sync-status-updated", ());
-                            std::thread::sleep(retry.next_after(result.is_ok()));
+                            let event = tauri::async_runtime::block_on(sync::worker::sync_once_event(&state));
+                            let success = event.data.is_ok();
+                            let _ = worker_handle.emit("sync-status-updated", crate::domain::device_reset::LocalEnvelope { generation: event.generation, data: () });
+                            std::thread::sleep(retry.next_after(success));
                         }
                     });
                 })
@@ -1662,4 +1760,163 @@ pub fn run() {
         })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[tauri::command]
+async fn refresh_usage(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<WorldSnapshot>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = refresh_usage_inner(app).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+async fn current_usage(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<Option<WorldSnapshot>>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = current_usage_inner(state.clone());
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+async fn set_planet_profile(
+    nickname: String,
+    avatar: PlanetAvatar,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<WorldSnapshot>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = set_planet_profile_inner(nickname, avatar, state.clone(), app);
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+async fn reset_planet(
+    state: State<'_, AppState>,
+    app: AppHandle,
+    expected: crate::domain::device_reset::ExpectedPlanetContext,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<WorldSnapshot>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    if context.generation != expected.generation {
+        return Err(crate::domain::device_reset::LocalCommandError::new(
+            permit.generation(),
+            "stale_generation",
+            "행성 상태를 다시 확인해 주세요.",
+        ));
+    }
+    let result = reset_planet_inner(state.clone(), app, &expected).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+async fn set_source_enabled(
+    agent: Agent,
+    enabled: bool,
+    state: State<'_, AppState>,
+    app: AppHandle,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<WorldSnapshot>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = set_source_enabled_inner(agent, enabled, state.clone(), app);
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[cfg(test)]
+mod local_lifecycle_integration_tests {
+    use super::*;
+    #[test]
+    fn local_reset_lifecycle_background_blocks_restore_and_scan() {
+        tauri::async_runtime::block_on(async {
+            let mut ledger =
+                Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+            let reset = ledger
+                .prepare_device_reset(0, "test-service", chrono::Utc::now())
+                .unwrap();
+            let cycle = ledger.planet_cycle_id().unwrap();
+            let state = AppState {
+                lifecycle: crate::lifecycle::LocalLifecycle::new(&reset),
+                config: Mutex::new(SourceConfig {
+                    codex_root: "/nonexistent-isolated-codex".into(),
+                    claude_root: "/nonexistent-isolated-claude".into(),
+                    timezone: chrono_tz::UTC,
+                }),
+                ledger: Mutex::new(ledger),
+                latest: Mutex::new(None),
+                usage_scan_failed: AtomicBool::new(false),
+                sync_failed: Mutex::new(false),
+                sync_gate: tokio::sync::Mutex::new(()),
+                window_mode: Mutex::new(WindowMode::Popup),
+                mode_transitioning: AtomicBool::new(false),
+                tray_press_pending: AtomicBool::new(false),
+            };
+            assert_eq!(
+                state.scan_background().await.err().unwrap().code,
+                "reset_recovery_required"
+            );
+            assert_eq!(
+                state.ledger.lock().unwrap().planet_cycle_id().unwrap(),
+                cycle
+            );
+            assert!(state.latest.lock().unwrap().is_none());
+            assert!(sync::worker::sync_once(&state).await.is_err());
+            assert!(!*state.sync_failed.lock().unwrap());
+        });
+    }
 }

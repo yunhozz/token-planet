@@ -1,4 +1,4 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invokeLocal as invoke } from "./localLifecycle";
 import type { WorldPlanet } from "../types/usage";
 
 export type SharedWorld = {

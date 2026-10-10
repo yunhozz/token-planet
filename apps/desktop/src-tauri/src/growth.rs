@@ -11,6 +11,8 @@ pub const STAGE_THRESHOLDS: [f64; 4] = [5.0, 20.0, 50.0, 100.0];
 
 #[derive(Clone, Debug, Serialize)]
 pub struct WorldSnapshot {
+    pub generation: u64,
+    pub planet_ordinal: crate::domain::planet_ordinal::PlanetOrdinal,
     pub usage: ScanSummary,
     pub growth_credit: f64,
     pub stage: u8,
@@ -100,6 +102,8 @@ pub fn world_snapshot(ledger: &Ledger, usage: ScanSummary) -> Result<WorldSnapsh
         removed_natural_keys: ledger.planet_removed_natural_keys()?,
     };
     Ok(WorldSnapshot {
+        generation: ledger.local_generation()?,
+        planet_ordinal: ledger.planet_ordinal()?,
         usage,
         growth_credit,
         stage,
@@ -220,6 +224,24 @@ mod tests {
                 usage: usage(Some(tokens), UsageCoverage::Complete),
             })
             .unwrap();
+    }
+
+    #[test]
+    fn cycle_ordinal_snapshot_fields_are_local_only() {
+        let ledger = fixture_ledger();
+        let world = world_snapshot(
+            &ledger,
+            summary(
+                usage(None, UsageCoverage::Unavailable),
+                usage(None, UsageCoverage::Unavailable),
+            ),
+        )
+        .unwrap();
+        let value = serde_json::to_value(world).unwrap();
+        assert_eq!(value["generation"], 0);
+        assert_eq!(value["planet_ordinal"]["current"], 1);
+        assert!(value["planet"].get("generation").is_none());
+        assert!(value["planet"].get("planet_ordinal").is_none());
     }
 
     #[test]

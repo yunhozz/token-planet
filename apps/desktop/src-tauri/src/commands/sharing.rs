@@ -5,7 +5,10 @@ use crate::domain::planet::{PlanetAvatar, WorldPlanet};
 use crate::sync::auth::{
     AuthConfig, AuthError, SessionStore, StoredSession, SupabaseAuthClient, SESSION_GATE,
 };
-use crate::sync::client::{CreatedWorldInvite, InviteAcceptStatus, InviteRevokeResult, SupabaseSyncClient, SyncError, WorldInvite, WorldMember};
+use crate::sync::client::{
+    CreatedWorldInvite, InviteAcceptStatus, InviteRevokeResult, SupabaseSyncClient, SyncError,
+    WorldInvite, WorldMember,
+};
 use crate::AppState;
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -139,8 +142,7 @@ async fn world_id(client: &SupabaseSyncClient, session: &StoredSession) -> Resul
         .ok_or_else(|| "참여 중인 공동 세계가 없습니다".into())
 }
 
-#[tauri::command]
-pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingState, String> {
+pub async fn get_sharing_state_inner(state: State<'_, AppState>) -> Result<SharingState, String> {
     let _gate = state.sync_gate.lock().await;
     let Some(config) = AuthConfig::from_env() else {
         return Ok(local_state(&state, "unavailable", None));
@@ -240,8 +242,9 @@ pub async fn get_sharing_state(state: State<'_, AppState>) -> Result<SharingStat
     })
 }
 
-#[tauri::command]
-pub async fn start_anonymous_session(state: State<'_, AppState>) -> Result<SharingState, String> {
+pub async fn start_anonymous_session_inner(
+    state: State<'_, AppState>,
+) -> Result<SharingState, String> {
     let sync_gate = state.sync_gate.lock().await;
     let _session_gate = SESSION_GATE.lock().await;
     let config = configured()?;
@@ -262,7 +265,7 @@ pub async fn start_anonymous_session(state: State<'_, AppState>) -> Result<Shari
     state.select_planet_account(&session.user.id)?;
     drop(_session_gate);
     drop(sync_gate);
-    get_sharing_state(state).await
+    get_sharing_state_inner(state).await
 }
 
 fn save_sharing_nickname(state: &AppState, nickname: &str) -> Result<(), String> {
@@ -284,8 +287,7 @@ fn save_sharing_nickname(state: &AppState, nickname: &str) -> Result<(), String>
         .map_err(|_| "행성 닉네임을 저장할 수 없습니다".into())
 }
 
-#[tauri::command]
-pub async fn create_shared_world(
+pub async fn create_shared_world_inner(
     name: String,
     nickname: String,
     state: State<'_, AppState>,
@@ -306,54 +308,63 @@ pub async fn create_shared_world(
         .create_world(&session.access_token, &session.user.id, name, &timezone)
         .await
         .map_err(|_| "세계를 만들 수 없습니다. 이미 다른 세계에 참여 중인지 확인하세요")?;
-    get_sharing_state(state).await
+    get_sharing_state_inner(state).await
 }
 
-#[tauri::command]
-pub async fn join_world(
+pub async fn join_world_inner(
     code: String,
     nickname: String,
     state: State<'_, AppState>,
 ) -> Result<SharingState, String> {
     let (client, session) = signed_in().await?;
     save_sharing_nickname(&state, &nickname)?;
-    let result = client.accept_world_invite(&session.access_token, code.trim()).await
+    let result = client
+        .accept_world_invite(&session.access_token, code.trim())
+        .await
         .map_err(|_| "가입 응답을 확인하지 못했습니다. 같은 초대 코드로 다시 시도하세요")?;
     match result.status {
-        InviteAcceptStatus::Accepted | InviteAcceptStatus::AlreadyAccepted => {},
-        InviteAcceptStatus::Unavailable => return Err("사용할 수 없는 초대입니다. 소유자에게 새 초대를 요청하세요".into()),
+        InviteAcceptStatus::Accepted | InviteAcceptStatus::AlreadyAccepted => {}
+        InviteAcceptStatus::Unavailable => {
+            return Err("사용할 수 없는 초대입니다. 소유자에게 새 초대를 요청하세요".into())
+        }
         InviteAcceptStatus::AlreadyMember => return Err("이미 다른 그룹에 참여 중입니다".into()),
         InviteAcceptStatus::WorldFull => return Err("그룹 정원 10명이 모두 찼습니다".into()),
-        InviteAcceptStatus::RateLimited => return Err("시도가 너무 많습니다. 15분 후 다시 시도하세요".into()),
+        InviteAcceptStatus::RateLimited => {
+            return Err("시도가 너무 많습니다. 15분 후 다시 시도하세요".into())
+        }
     }
-    get_sharing_state(state).await
+    get_sharing_state_inner(state).await
 }
 
-#[tauri::command]
-pub async fn create_world_invite() -> Result<CreatedWorldInvite, String> {
+pub async fn create_world_invite_inner() -> Result<CreatedWorldInvite, String> {
     let (client, session) = signed_in().await?;
     let id = world_id(&client, &session).await?;
-    client.create_world_invite(&session.access_token, &id).await
-        .map_err(|_| "발급 응답을 확인하지 못했습니다. 목록에서 초대를 철회한 뒤 다시 발급하세요".into())
+    client
+        .create_world_invite(&session.access_token, &id)
+        .await
+        .map_err(|_| {
+            "발급 응답을 확인하지 못했습니다. 목록에서 초대를 철회한 뒤 다시 발급하세요".into()
+        })
 }
 
-#[tauri::command]
-pub async fn list_world_invites() -> Result<Vec<WorldInvite>, String> {
+pub async fn list_world_invites_inner() -> Result<Vec<WorldInvite>, String> {
     let (client, session) = signed_in().await?;
     let id = world_id(&client, &session).await?;
-    client.list_world_invites(&session.access_token, &id).await
+    client
+        .list_world_invites(&session.access_token, &id)
+        .await
         .map_err(|_| "초대 목록을 불러오지 못했습니다".into())
 }
 
-#[tauri::command]
-pub async fn revoke_world_invite(invite_id: String) -> Result<InviteRevokeResult, String> {
+pub async fn revoke_world_invite_inner(invite_id: String) -> Result<InviteRevokeResult, String> {
     let (client, session) = signed_in().await?;
-    client.revoke_world_invite(&session.access_token, &invite_id).await
+    client
+        .revoke_world_invite(&session.access_token, &invite_id)
+        .await
         .map_err(|_| "초대를 철회하지 못했습니다".into())
 }
 
-#[tauri::command]
-pub async fn list_world_members() -> Result<Vec<WorldMember>, String> {
+pub async fn list_world_members_inner() -> Result<Vec<WorldMember>, String> {
     let (client, session) = signed_in().await?;
     let world_id = world_id(&client, &session).await?;
     client
@@ -362,8 +373,7 @@ pub async fn list_world_members() -> Result<Vec<WorldMember>, String> {
         .map_err(|_| "참여자 목록을 불러올 수 없습니다".into())
 }
 
-#[tauri::command]
-pub async fn pause_sharing(
+pub async fn pause_sharing_inner(
     paused: bool,
     state: State<'_, AppState>,
 ) -> Result<SharingState, String> {
@@ -395,11 +405,10 @@ pub async fn pause_sharing(
         .set_sharing_paused(paused)
         .map_err(|_| "로컬 동기화 상태를 변경할 수 없습니다")?;
     drop(_gate);
-    get_sharing_state(state).await
+    get_sharing_state_inner(state).await
 }
 
-#[tauri::command]
-pub async fn transfer_world_owner(
+pub async fn transfer_world_owner_inner(
     new_owner_id: String,
     state: State<'_, AppState>,
 ) -> Result<SharingState, String> {
@@ -409,11 +418,10 @@ pub async fn transfer_world_owner(
         .transfer_owner(&session.access_token, &world_id, &new_owner_id)
         .await
         .map_err(|_| "소유권을 이전할 수 없습니다")?;
-    get_sharing_state(state).await
+    get_sharing_state_inner(state).await
 }
 
-#[tauri::command]
-pub async fn leave_world(state: State<'_, AppState>) -> Result<SharingState, String> {
+pub async fn leave_world_inner(state: State<'_, AppState>) -> Result<SharingState, String> {
     let _gate = state.sync_gate.lock().await;
     let (client, session) = signed_in().await?;
     let shell = client
@@ -443,11 +451,10 @@ pub async fn leave_world(state: State<'_, AppState>) -> Result<SharingState, Str
             .map_err(|_| "로컬 대기열을 정리할 수 없습니다")?;
     }
     drop(_gate);
-    get_sharing_state(state).await
+    get_sharing_state_inner(state).await
 }
 
-#[tauri::command]
-pub async fn delete_synced_usage(state: State<'_, AppState>) -> Result<SharingState, String> {
+pub async fn delete_synced_usage_inner(state: State<'_, AppState>) -> Result<SharingState, String> {
     let _gate = state.sync_gate.lock().await;
     let (client, session) = signed_in().await?;
     let world_id = world_id(&client, &session).await?;
@@ -474,5 +481,252 @@ pub async fn delete_synced_usage(state: State<'_, AppState>) -> Result<SharingSt
             .map_err(|_| "로컬 동기화 상태를 변경할 수 없습니다")?;
     }
     drop(_gate);
-    get_sharing_state(state).await
+    get_sharing_state_inner(state).await
+}
+
+#[tauri::command]
+pub async fn get_sharing_state(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<SharingState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = get_sharing_state_inner(state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn start_anonymous_session(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<SharingState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = start_anonymous_session_inner(state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn create_shared_world(
+    name: String,
+    nickname: String,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<SharingState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = create_shared_world_inner(name, nickname, state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn join_world(
+    code: String,
+    nickname: String,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<SharingState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = join_world_inner(code, nickname, state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn create_world_invite(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<CreatedWorldInvite>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = create_world_invite_inner().await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn list_world_invites(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<Vec<WorldInvite>>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = list_world_invites_inner().await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn revoke_world_invite(
+    invite_id: String,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<InviteRevokeResult>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = revoke_world_invite_inner(invite_id).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn list_world_members(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<Vec<WorldMember>>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = list_world_members_inner().await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn pause_sharing(
+    paused: bool,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<SharingState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = pause_sharing_inner(paused, state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn transfer_world_owner(
+    new_owner_id: String,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<SharingState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = transfer_world_owner_inner(new_owner_id, state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn leave_world(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<SharingState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = leave_world_inner(state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn delete_synced_usage(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<SharingState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = delete_synced_usage_inner(state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
 }

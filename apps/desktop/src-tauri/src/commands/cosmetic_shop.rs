@@ -617,8 +617,7 @@ fn stale_equip_result(
     })
 }
 
-#[tauri::command]
-pub async fn get_shop_state(state: State<'_, AppState>) -> Result<ShopState, String> {
+pub async fn get_shop_state_inner(state: State<'_, AppState>) -> Result<ShopState, String> {
     let _gate = state.sync_gate.lock().await;
     match shop_session(&state).await? {
         ShopSession::Guest => {
@@ -641,8 +640,7 @@ pub async fn get_shop_state(state: State<'_, AppState>) -> Result<ShopState, Str
     }
 }
 
-#[tauri::command]
-pub async fn quote_shop_action(
+pub async fn quote_shop_action_inner(
     target: QuoteTarget,
     state: State<'_, AppState>,
 ) -> Result<ShopQuote, String> {
@@ -678,8 +676,7 @@ pub async fn quote_shop_action(
     }
 }
 
-#[tauri::command]
-pub async fn apply_shop_action(
+pub async fn apply_shop_action_inner(
     request: ShopRequest,
     state: State<'_, AppState>,
 ) -> Result<ShopActionResult, String> {
@@ -736,8 +733,7 @@ pub async fn apply_shop_action(
     }
 }
 
-#[tauri::command]
-pub async fn get_legacy_cosmetic_shop_state(
+pub async fn get_legacy_cosmetic_shop_state_inner(
     state: State<'_, AppState>,
 ) -> Result<CosmeticShopState, String> {
     let _gate = state.sync_gate.lock().await;
@@ -752,8 +748,7 @@ pub async fn get_legacy_cosmetic_shop_state(
     }
 }
 
-#[tauri::command]
-pub async fn purchase_cosmetic(
+pub async fn purchase_cosmetic_inner(
     sku: String,
     state: State<'_, AppState>,
 ) -> Result<CosmeticPurchaseAction, String> {
@@ -814,8 +809,7 @@ pub async fn purchase_cosmetic(
     }
 }
 
-#[tauri::command]
-pub async fn equip_cosmetic(
+pub async fn equip_cosmetic_inner(
     slot_id: String,
     sku: Option<String>,
     cycle_id: String,
@@ -1041,6 +1035,9 @@ mod tests {
 
     fn test_state(ledger: Mutex<Ledger>) -> AppState {
         AppState {
+            lifecycle: crate::lifecycle::LocalLifecycle::new(
+                &crate::domain::device_reset::DeviceResetState::default(),
+            ),
             config: Mutex::new(SourceConfig {
                 codex_root: std::path::PathBuf::from("/private/tmp/shop-command-codex"),
                 claude_root: std::path::PathBuf::from("/private/tmp/shop-command-claude"),
@@ -2155,4 +2152,132 @@ mod tests {
         assert_eq!(stale_version.version, 4);
         assert!(stale_equip_result("new-cycle", 4, &latest, "sky").is_none());
     }
+}
+
+#[tauri::command]
+pub async fn get_shop_state(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<ShopState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = get_shop_state_inner(state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn quote_shop_action(
+    target: QuoteTarget,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<ShopQuote>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = quote_shop_action_inner(target, state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn apply_shop_action(
+    request: ShopRequest,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<ShopActionResult>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = apply_shop_action_inner(request, state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn get_legacy_cosmetic_shop_state(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<CosmeticShopState>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = get_legacy_cosmetic_shop_state_inner(state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn purchase_cosmetic(
+    sku: String,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<CosmeticPurchaseAction>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = purchase_cosmetic_inner(sku, state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn equip_cosmetic(
+    slot_id: String,
+    sku: Option<String>,
+    cycle_id: String,
+    expected_version: u64,
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<CosmeticEquipAction>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result =
+        equip_cosmetic_inner(slot_id, sku, cycle_id, expected_version, state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
 }

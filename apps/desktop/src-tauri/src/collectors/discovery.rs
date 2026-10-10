@@ -50,6 +50,12 @@ pub struct SourceConfig {
     pub timezone: Tz,
 }
 
+pub fn prepare_default_source_config(timezone: Tz) -> Result<SourceConfig, String> {
+    let options = RootOptions::from_env(None, None, timezone)
+        .ok_or_else(|| "default source home unavailable".to_owned())?;
+    Ok(resolve_roots(&options))
+}
+
 pub fn resolve_roots(options: &RootOptions) -> SourceConfig {
     SourceConfig {
         codex_root: options.codex_custom.clone().unwrap_or_else(|| {

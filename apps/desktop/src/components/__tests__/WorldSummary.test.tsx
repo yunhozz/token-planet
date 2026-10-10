@@ -6,6 +6,7 @@ import { SourceStatus } from "../SourceStatus";
 import { PlanetScene } from "../PlanetScene";
 
 const snapshot: WorldSnapshot = {
+  generation:0, planet_ordinal:{status:"verified",current:1},
   usage: {
     codex: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: 125000, coverage: "complete" },
     claude_code: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: null, coverage: "unavailable" },
