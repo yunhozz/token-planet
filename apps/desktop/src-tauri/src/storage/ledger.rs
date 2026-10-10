@@ -114,7 +114,7 @@ impl Ledger {
         since: Option<DateTime<Utc>>,
     ) -> Result<Vec<SharedDailyTotal>, ScanError> {
         let mut statement = self.connection.prepare("SELECT agent,occurred_at_utc,input_tokens,output_tokens,
-            cache_read_tokens,cache_write_tokens,total_tokens,coverage FROM usage_record r
+            cache_read_tokens,cache_write_tokens,total_tokens,coverage,r.kind FROM usage_record r
             WHERE (?1 IS NULL OR (r.occurred_at_utc > ?1 AND EXISTS (
                 SELECT 1 FROM planet_usage_owner o WHERE o.event_key=r.event_key
                 AND o.account_id=(SELECT value FROM setting WHERE key='planet_account_id')
@@ -133,15 +133,24 @@ impl Ledger {
                 row.get::<_, Option<i64>>(5)?,
                 row.get::<_, Option<i64>>(6)?,
                 row.get::<_, String>(7)?,
+                row.get::<_, String>(8)?,
             ))
         })?;
         let mut groups: BTreeMap<(String, String), (SharedDailyTotal, bool, bool)> =
             BTreeMap::new();
+        let reset_cutoff = self.device_reset_cutoff()?;
         for row in rows {
-            let (agent, occurred_at, input, output, cache_read, cache_write, total, coverage) =
+            let (agent, occurred_at, input, output, cache_read, cache_write, total, coverage, kind) =
                 row?;
             let timestamp = chrono::DateTime::parse_from_rfc3339(&occurred_at)
                 .map_err(|_| ScanError::Database)?;
+            if !super::device_reset::record_after_reset_cutoff(
+                timestamp.with_timezone(&Utc),
+                reset_cutoff,
+            ) || (reset_cutoff.is_some() && kind != "response")
+            {
+                continue;
+            }
             let date = timestamp
                 .with_timezone(&timezone)
                 .format("%Y-%m-%d")
@@ -256,6 +265,7 @@ impl Ledger {
                 created_at_utc TEXT NOT NULL
             );",
         )?;
+        super::device_reset::initialize_device_reset_schema(&connection)?;
         initialize_guest_provenance_schema(&connection, !has_existing_schema)?;
         let saved: Option<String> = connection
             .query_row(
@@ -274,34 +284,36 @@ impl Ledger {
                 [timezone.to_string()],
             )?;
         }
-        if setting_value(&connection, "planet_activation_at_utc")?.is_none() {
-            set_setting_value(
-                &connection,
-                "planet_activation_at_utc",
-                &Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
-            )?;
-        }
-        if setting_value(&connection, "planet_current_cycle_id")?.is_none() {
-            set_setting_value(
-                &connection,
-                "planet_current_cycle_id",
-                &uuid::Uuid::new_v4().to_string(),
-            )?;
-        }
-        if setting_value(&connection, "planet_cycle_started_at_utc")?.is_none() {
-            let activation = setting_value(&connection, "planet_activation_at_utc")?
-                .ok_or(ScanError::Database)?;
-            set_setting_value(&connection, "planet_cycle_started_at_utc", &activation)?;
-        }
-        if setting_value(&connection, "planet_timezone")?.is_none() {
-            set_setting_value(&connection, "planet_timezone", &timezone.to_string())?;
-        }
-        if setting_value(&connection, "planet_device_id")?.is_none() {
-            set_setting_value(
-                &connection,
-                "planet_device_id",
-                &uuid::Uuid::new_v4().to_string(),
-            )?;
+        if !super::device_reset::recovery_required(&connection) {
+            if setting_value(&connection, "planet_activation_at_utc")?.is_none() {
+                set_setting_value(
+                    &connection,
+                    "planet_activation_at_utc",
+                    &Utc::now().to_rfc3339_opts(SecondsFormat::Micros, true),
+                )?;
+            }
+            if setting_value(&connection, "planet_current_cycle_id")?.is_none() {
+                set_setting_value(
+                    &connection,
+                    "planet_current_cycle_id",
+                    &uuid::Uuid::new_v4().to_string(),
+                )?;
+            }
+            if setting_value(&connection, "planet_cycle_started_at_utc")?.is_none() {
+                let activation = setting_value(&connection, "planet_activation_at_utc")?
+                    .ok_or(ScanError::Database)?;
+                set_setting_value(&connection, "planet_cycle_started_at_utc", &activation)?;
+            }
+            if setting_value(&connection, "planet_timezone")?.is_none() {
+                set_setting_value(&connection, "planet_timezone", &timezone.to_string())?;
+            }
+            if setting_value(&connection, "planet_device_id")?.is_none() {
+                set_setting_value(
+                    &connection,
+                    "planet_device_id",
+                    &uuid::Uuid::new_v4().to_string(),
+                )?;
+            }
         }
         let mut ledger = Self {
             connection,
@@ -1163,6 +1175,7 @@ impl Ledger {
             &reset_state.cycle_started_at_utc,
         )?;
 
+        record_ordinal_history_in(&transaction, &account_id, reset_state)?;
         apply_confirmed_reset_planet_state_in_transaction(
             &transaction,
             reset_state,
@@ -1561,11 +1574,18 @@ pub(crate) fn insert_record(
     let mut provenance_record = record.clone();
     provenance_record.event_key = event_key.clone();
     record_guest_occurrence_in_connection(connection, &provenance_record, Utc::now())?;
-    connection.execute(
-        "INSERT OR IGNORE INTO planet_usage_owner(event_key,account_id)
-         VALUES (?1,(SELECT value FROM setting WHERE key='planet_account_id'))",
-        [&event_key],
-    )?;
+    if super::device_reset::record_eligible_after_reset(connection, record)? {
+        connection.execute(
+            "INSERT OR IGNORE INTO planet_usage_owner(event_key,account_id)
+             VALUES (?1,(SELECT value FROM setting WHERE key='planet_account_id'))",
+            [&event_key],
+        )?;
+    } else {
+        connection.execute(
+            "DELETE FROM planet_usage_owner WHERE event_key=?1",
+            [&event_key],
+        )?;
+    }
     Ok(changed > 0)
 }
 
@@ -4015,5 +4035,464 @@ mod guest_import_v2_reset_tests {
         );
         assert_eq!(retry_credit, Some(1_000_000));
         assert_eq!(table_count(&ledger, "guest_provenance_reset_receipt"), 1);
+    }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CanonicalOrdinalHistory {
+    verified: bool,
+    credits: Vec<PlanetWalletCredit>,
+}
+
+fn ordinal_chronology_is_valid(
+    credits: &[PlanetWalletCredit],
+    cycle_started_at: &str,
+    last_reset_at: Option<&str>,
+) -> bool {
+    let Ok(cycle_start) = DateTime::parse_from_rfc3339(cycle_started_at) else {
+        return false;
+    };
+    let last_reset = match last_reset_at.map(DateTime::parse_from_rfc3339).transpose() {
+        Ok(value) => value,
+        Err(_) => return false,
+    };
+    if last_reset.is_some_and(|reset| reset > cycle_start) {
+        return false;
+    }
+    let mut matching_reset = last_reset.is_none();
+    for credit in credits {
+        let Ok(completed_at) = DateTime::parse_from_rfc3339(&credit.created_at_utc) else {
+            return false;
+        };
+        if completed_at > cycle_start || last_reset.is_some_and(|reset| completed_at > reset) {
+            return false;
+        }
+        matching_reset |= last_reset == Some(completed_at);
+    }
+    matching_reset
+}
+
+impl Ledger {
+    pub fn planet_ordinal(
+        &self,
+    ) -> Result<crate::domain::planet_ordinal::PlanetOrdinal, ScanError> {
+        use crate::domain::planet_ordinal::{PlanetOrdinal, PlanetOrdinalStatus};
+        let account = self.cosmetic_account_id()?;
+        let cycle = self.planet_cycle_id()?;
+        let credits = if account == "local" || account == "legacy" {
+            self.planet_wallet_credits()?
+        } else {
+            let key = format!("ordinal_history:{account}:{cycle}");
+            let Some(raw) = setting_value(&self.connection, &key)? else {
+                return Ok(PlanetOrdinal::unknown());
+            };
+            let history: CanonicalOrdinalHistory =
+                serde_json::from_str(&raw).map_err(|_| ScanError::Database)?;
+            if !history.verified {
+                return Ok(PlanetOrdinal::unknown());
+            }
+            history.credits
+        };
+        let Some(cycle_started_at) =
+            setting_value(&self.connection, "planet_cycle_started_at_utc")?
+        else {
+            return Ok(PlanetOrdinal::unknown());
+        };
+        let last_reset_at = setting_value(&self.connection, "planet_last_reset_at_utc")?;
+        if !ordinal_chronology_is_valid(&credits, &cycle_started_at, last_reset_at.as_deref()) {
+            return Ok(PlanetOrdinal::unknown());
+        }
+        let mut unique = std::collections::BTreeMap::new();
+        for credit in credits {
+            if credit.previous_cycle_id.trim().is_empty()
+                || credit.previous_cycle_id == cycle
+                || DateTime::parse_from_rfc3339(&credit.created_at_utc).is_err()
+            {
+                return Ok(PlanetOrdinal::unknown());
+            }
+            if let Some(previous) = unique.insert(credit.previous_cycle_id.clone(), credit.clone())
+            {
+                if previous != credit {
+                    return Ok(PlanetOrdinal::unknown());
+                }
+            }
+        }
+        Ok(PlanetOrdinal {
+            status: PlanetOrdinalStatus::Verified,
+            current: Some(unique.len() as u64 + 1),
+        })
+    }
+
+    pub fn record_canonical_planet_history(
+        &mut self,
+        account_id: &str,
+        state: &PlanetState,
+    ) -> Result<(), ScanError> {
+        if self.cosmetic_account_id()? != account_id {
+            return Err(ScanError::InvalidShopState);
+        }
+        record_ordinal_history_in(&self.connection, account_id, state)
+    }
+}
+
+pub(crate) fn record_ordinal_history_in(
+    connection: &Connection,
+    account: &str,
+    state: &PlanetState,
+) -> Result<(), ScanError> {
+    let mut unique = std::collections::BTreeMap::new();
+    let mut verified = !state.current_cycle_id.trim().is_empty()
+        && ordinal_chronology_is_valid(
+            &state.wallet_credits,
+            &state.cycle_started_at_utc,
+            state.last_reset_at_utc.as_deref(),
+        );
+    for credit in &state.wallet_credits {
+        verified &= !credit.previous_cycle_id.trim().is_empty()
+            && credit.previous_cycle_id != state.current_cycle_id
+            && DateTime::parse_from_rfc3339(&credit.created_at_utc).is_ok();
+        if let Some(previous) = unique.insert(credit.previous_cycle_id.clone(), credit.clone()) {
+            verified &= previous == *credit;
+        }
+    }
+    let mut query = connection.prepare("SELECT previous_cycle_id FROM planet_wallet_credit")?;
+    for id in query.query_map([], |row| row.get::<_, String>(0))? {
+        verified &= unique.contains_key(&id?);
+    }
+    // Keep the known completion set across cycles, even if economic caches are replaced.
+    let mut query = connection.prepare("SELECT value FROM setting WHERE key LIKE ?1")?;
+    for raw in query.query_map([format!("ordinal_history:{account}:%")], |row| {
+        row.get::<_, String>(0)
+    })? {
+        let history: CanonicalOrdinalHistory =
+            serde_json::from_str(&raw?).map_err(|_| ScanError::Database)?;
+        for credit in history.credits {
+            verified &= unique.contains_key(&credit.previous_cycle_id);
+        }
+    }
+    let history = CanonicalOrdinalHistory {
+        verified,
+        credits: unique.into_values().collect(),
+    };
+    connection.execute("INSERT INTO setting(key,value) VALUES (?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+        params![format!("ordinal_history:{account}:{}",state.current_cycle_id),serde_json::to_string(&history).map_err(|_| ScanError::Database)?])?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod cycle_ordinal_tests {
+    use super::*;
+    fn ledger() -> Ledger {
+        Ledger::open(Path::new(":memory:"), chrono_tz::UTC).unwrap()
+    }
+    fn planet(ledger: &Ledger) -> PlanetState {
+        let usage = TokenUsage {
+            input_tokens: None,
+            output_tokens: None,
+            cache_read_tokens: None,
+            cache_write_tokens: None,
+            total_tokens: None,
+            coverage: UsageCoverage::Unavailable,
+        };
+        crate::growth::world_snapshot(
+            ledger,
+            crate::collectors::discovery::ScanSummary {
+                codex: usage.clone(),
+                claude_code: usage,
+                codex_source: crate::collectors::discovery::SourceHealth::NotFound,
+                claude_code_source: crate::collectors::discovery::SourceHealth::NotFound,
+                confirmed_subtotal: None,
+                complete_total: None,
+                scanned_at_utc: Utc::now(),
+            },
+        )
+        .unwrap()
+        .planet
+    }
+    fn credit(id: &str, amount: u64) -> PlanetWalletCredit {
+        PlanetWalletCredit {
+            previous_cycle_id: id.into(),
+            amount,
+            created_at_utc: "2026-10-01T00:00:00Z".into(),
+        }
+    }
+    #[test]
+    fn cycle_ordinal_purchase_balance_and_journal_deletion_do_not_change_sequence() {
+        let mut ledger = ledger();
+        ledger.connection.execute("INSERT INTO planet_wallet_credit VALUES ('completed',500000,'2026-10-01T00:00:00Z')", []).unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+        let purchase = ledger
+            .purchase_guest_cosmetic("11111111-1111-4111-8111-111111111111", "star_cluster_v2")
+            .unwrap();
+        assert_eq!(purchase.available_balance, 0);
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+        let account = setting_value(&ledger.connection, "planet_account_id")
+            .unwrap()
+            .unwrap();
+        for table in ["growth_journal_cycle", "growth_journal_remote_cycle"] {
+            ledger.connection.execute(&format!("INSERT INTO {table}(account_id,cycle_id,wallet_credit) VALUES (?1,'journal-completed',500000)"), [&account]).unwrap();
+            let count: i64 = ledger
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE account_id=?1"),
+                    [&account],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(count > 0);
+        }
+        ledger
+            .apply_growth_journal_state(&crate::domain::growth_journal::GrowthJournal {
+                generation: 1,
+                deleted_at_utc: Some("2026-10-10T00:00:00Z".into()),
+                timezone: Some("UTC".into()),
+                cycles: vec![],
+                entries: vec![],
+            })
+            .unwrap();
+        for table in ["growth_journal_cycle", "growth_journal_remote_cycle"] {
+            let count: i64 = ledger
+                .connection
+                .query_row(
+                    &format!("SELECT COUNT(*) FROM {table} WHERE account_id=?1"),
+                    [&account],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 0);
+        }
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+    }
+    #[test]
+    fn cycle_ordinal_account_switch_restores_each_canonical_sequence() {
+        let mut ledger = ledger();
+        let accounts = [
+            "11111111-1111-4111-8111-111111111111",
+            "22222222-2222-4222-8222-222222222222",
+        ];
+        for (index, account) in accounts.iter().enumerate() {
+            ledger.ensure_planet_account(account).unwrap();
+            let mut remote = planet(&ledger);
+            remote.wallet_credits = (0..=index)
+                .map(|n| credit(&format!("completed-{n}"), 0))
+                .collect();
+            ledger.merge_remote_planet_state(&remote).unwrap();
+            ledger
+                .record_canonical_planet_history(&format!("account:{account}"), &remote)
+                .unwrap();
+            assert_eq!(
+                ledger.planet_ordinal().unwrap().current,
+                Some(index as u64 + 2)
+            );
+        }
+        for (index, account) in accounts.iter().enumerate() {
+            ledger.ensure_planet_account(account).unwrap();
+            assert_eq!(
+                ledger.planet_ordinal().unwrap().current,
+                Some(index as u64 + 2)
+            );
+        }
+    }
+    #[test]
+    fn cycle_ordinal_fresh_guest_starts_at_one_and_zero_credit_counts() {
+        let ledger = ledger();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(1));
+        ledger.connection.execute("INSERT INTO planet_wallet_credit VALUES ('legacy-completed',0,'2026-10-01T00:00:00Z')",[]).unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+        ledger
+            .connection
+            .execute("DELETE FROM growth_journal_entry", [])
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+    }
+    #[test]
+    fn cycle_ordinal_signed_cache_unknown_until_complete_canonical_history() {
+        let mut ledger = ledger();
+        ledger
+            .ensure_planet_account("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        let remote = planet(&ledger);
+        ledger.merge_remote_planet_state(&remote).unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+        ledger
+            .record_canonical_planet_history(
+                "account:11111111-1111-4111-8111-111111111111",
+                &remote,
+            )
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(1));
+    }
+    #[test]
+    fn cycle_ordinal_canonical_dedupes_exact_and_rejects_conflict_or_current_cycle() {
+        let mut ledger = ledger();
+        let account = "account:11111111-1111-4111-8111-111111111111";
+        ledger
+            .ensure_planet_account("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        let mut remote = planet(&ledger);
+        remote.wallet_credits = vec![credit("legacy-completed", 0), credit("legacy-completed", 0)];
+        ledger
+            .record_canonical_planet_history(account, &remote)
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+        remote.wallet_credits[1].amount = 1;
+        ledger
+            .record_canonical_planet_history(account, &remote)
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+        remote.wallet_credits = vec![credit(&remote.current_cycle_id, 0)];
+        ledger
+            .record_canonical_planet_history(account, &remote)
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+    }
+    #[test]
+    fn cycle_ordinal_valid_legacy_and_guest_retry_preserve_recorded_sequence() {
+        let mut ledger = ledger();
+        let at = Utc::now() + Duration::hours(1);
+        let cycle = ledger.planet_cycle_id().unwrap();
+        let request = uuid::Uuid::new_v4().to_string();
+        ledger.reset_guest_planet(&request, &cycle, at).unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+        ledger.reset_guest_planet(&request, &cycle, at).unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+        ledger
+            .connection
+            .execute(
+                "UPDATE setting SET value='legacy' WHERE key='planet_account_id'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(2));
+    }
+
+    #[test]
+    fn cycle_ordinal_chronology_canonical_future_completion_is_unknown() {
+        let mut ledger = ledger();
+        ledger
+            .ensure_planet_account("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        let mut remote = planet(&ledger);
+        remote.cycle_started_at_utc = "2026-10-02T00:00:00Z".into();
+        remote.wallet_credits = vec![PlanetWalletCredit {
+            previous_cycle_id: "future-completed".into(),
+            amount: 0,
+            created_at_utc: "2026-10-03T00:00:00Z".into(),
+        }];
+        ledger
+            .record_canonical_planet_history(
+                "account:11111111-1111-4111-8111-111111111111",
+                &remote,
+            )
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+    }
+    #[test]
+    fn cycle_ordinal_chronology_canonical_latest_reset_requires_matching_completion() {
+        let mut ledger = ledger();
+        ledger
+            .ensure_planet_account("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        let mut remote = planet(&ledger);
+        remote.cycle_started_at_utc = "2026-10-02T00:00:00Z".into();
+        remote.last_reset_at_utc = Some(remote.cycle_started_at_utc.clone());
+        remote.wallet_credits = vec![credit("older-completed", 0)];
+        ledger
+            .record_canonical_planet_history(
+                "account:11111111-1111-4111-8111-111111111111",
+                &remote,
+            )
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+    }
+    #[test]
+    fn cycle_ordinal_chronology_future_completion_is_unknown() {
+        let mut ledger = ledger();
+        let start = "2026-10-02T00:00:00Z";
+        set_setting_value(&ledger.connection, "planet_cycle_started_at_utc", start).unwrap();
+        ledger.connection.execute("INSERT INTO planet_wallet_credit VALUES ('future-completed',0,'2026-10-03T00:00:00Z')", []).unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+        ledger
+            .ensure_planet_account("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        let mut remote = planet(&ledger);
+        remote.cycle_started_at_utc = start.into();
+        remote.wallet_credits = vec![PlanetWalletCredit {
+            previous_cycle_id: "future-completed".into(),
+            amount: 0,
+            created_at_utc: "2026-10-03T00:00:00Z".into(),
+        }];
+        ledger
+            .record_canonical_planet_history(
+                "account:11111111-1111-4111-8111-111111111111",
+                &remote,
+            )
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+    }
+    #[test]
+    fn cycle_ordinal_chronology_latest_reset_requires_matching_completion() {
+        let mut ledger = ledger();
+        let start = "2026-10-02T00:00:00Z";
+        set_setting_value(&ledger.connection, "planet_cycle_started_at_utc", start).unwrap();
+        set_setting_value(&ledger.connection, "planet_last_reset_at_utc", start).unwrap();
+        ledger.connection.execute("INSERT INTO planet_wallet_credit VALUES ('older-completed',0,'2026-10-01T00:00:00Z')", []).unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+        ledger
+            .ensure_planet_account("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        let mut remote = planet(&ledger);
+        remote.cycle_started_at_utc = start.into();
+        remote.last_reset_at_utc = Some(start.into());
+        remote.wallet_credits = vec![credit("older-completed", 0)];
+        ledger
+            .record_canonical_planet_history(
+                "account:11111111-1111-4111-8111-111111111111",
+                &remote,
+            )
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+        remote.wallet_credits.push(PlanetWalletCredit {
+            previous_cycle_id: "latest-completed".into(),
+            amount: 0,
+            created_at_utc: "2026-10-02T09:00:00+09:00".into(),
+        });
+        ledger
+            .record_canonical_planet_history(
+                "account:11111111-1111-4111-8111-111111111111",
+                &remote,
+            )
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, Some(3));
+    }
+
+    #[test]
+    fn cycle_ordinal_reset_marker_without_completion_is_unknown() {
+        let mut ledger = ledger();
+        let account = "account:11111111-1111-4111-8111-111111111111";
+        ledger
+            .ensure_planet_account("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        let mut remote = planet(&ledger);
+        remote.last_reset_at_utc = Some(remote.cycle_started_at_utc.clone());
+        ledger
+            .record_canonical_planet_history(account, &remote)
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
+    }
+
+    #[test]
+    fn cycle_ordinal_known_missing_history_remains_unknown() {
+        let mut ledger = ledger();
+        let account = "account:11111111-1111-4111-8111-111111111111";
+        ledger
+            .ensure_planet_account("11111111-1111-4111-8111-111111111111")
+            .unwrap();
+        let remote = planet(&ledger);
+        ledger.connection.execute("INSERT INTO planet_wallet_credit VALUES ('known-completed',0,'2026-10-01T00:00:00Z')",[]).unwrap();
+        ledger
+            .record_canonical_planet_history(account, &remote)
+            .unwrap();
+        assert_eq!(ledger.planet_ordinal().unwrap().current, None);
     }
 }

@@ -297,6 +297,9 @@ impl Ledger {
              );",
         )?;
 
+        if super::device_reset::recovery_required(&self.connection) {
+            return Ok(());
+        }
         let schema_version: Option<i64> = self
             .connection
             .query_row(
@@ -5902,66 +5905,139 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let mut ledger =
             Ledger::open(&directory.path().join("ledger.sqlite3"), chrono_tz::UTC).unwrap();
-        ledger.connection.execute(
-            "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
-             VALUES ('traffic-funds',100000000,'2026-10-01T00:00:00Z')", [],
-        ).unwrap();
+        ledger
+            .connection
+            .execute(
+                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+             VALUES ('traffic-funds',100000000,'2026-10-01T00:00:00Z')",
+                [],
+            )
+            .unwrap();
         let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
-            .unwrap().with_timezone(&chrono::Utc);
-        let quote = ledger.quote_shop(&QuoteTarget::Purchase { sku: "land_pond".into() }).unwrap();
-        let purchase = ledger.apply_guest_shop_request(
-            &ShopRequest::Purchase { request_id: "traffic-purchase".into(), quote }, now,
-        ).unwrap();
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let quote = ledger
+            .quote_shop(&QuoteTarget::Purchase {
+                sku: "land_pond".into(),
+            })
+            .unwrap();
+        let purchase = ledger
+            .apply_guest_shop_request(
+                &ShopRequest::Purchase {
+                    request_id: "traffic-purchase".into(),
+                    quote,
+                },
+                now,
+            )
+            .unwrap();
         assert_eq!(purchase.status, ShopActionStatus::Purchased);
         let id = purchase.state.landscape_instances[0].instance_id.clone();
         let cycle = purchase.state.current_cycle_id.clone();
-        for (index, (x, y)) in [(160.0, 140.0), (1100.0, 200.0), (50.0, 200.0), (1300.0, 200.0)]
-            .into_iter().enumerate()
+        for (index, (x, y)) in [
+            (160.0, 140.0),
+            (1100.0, 200.0),
+            (50.0, 200.0),
+            (1300.0, 200.0),
+        ]
+        .into_iter()
+        .enumerate()
         {
-            let result = ledger.apply_guest_shop_request(&ShopRequest::Place {
-                request_id: format!("traffic-place-{index}"),
-                cycle_id: cycle.clone(),
-                instance_id: id.clone(),
-                expected_version: index as u64,
-                x, y,
-            }, now).unwrap();
-            assert_eq!(result.status, ShopActionStatus::Placed, "traffic coordinate {x},{y}");
-            let saved = result.state.placements.iter().find(|p| p.instance_id == id).unwrap();
+            let result = ledger
+                .apply_guest_shop_request(
+                    &ShopRequest::Place {
+                        request_id: format!("traffic-place-{index}"),
+                        cycle_id: cycle.clone(),
+                        instance_id: id.clone(),
+                        expected_version: index as u64,
+                        x,
+                        y,
+                    },
+                    now,
+                )
+                .unwrap();
+            assert_eq!(
+                result.status,
+                ShopActionStatus::Placed,
+                "traffic coordinate {x},{y}"
+            );
+            let saved = result
+                .state
+                .placements
+                .iter()
+                .find(|p| p.instance_id == id)
+                .unwrap();
             assert_eq!((saved.x, saved.y, saved.version), (x, y, index as u64 + 1));
             let persisted = ledger.shop_state().unwrap();
-            assert_eq!(persisted.placements.iter().find(|p| p.instance_id == id).unwrap(), saved);
+            assert_eq!(
+                persisted
+                    .placements
+                    .iter()
+                    .find(|p| p.instance_id == id)
+                    .unwrap(),
+                saved
+            );
         }
     }
     #[test]
     fn expanded_terrain_allows_actual_decoration_storage() {
         let (sender, receiver) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
-            let mut ledger = Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
+            let mut ledger =
+                Ledger::open(std::path::Path::new(":memory:"), chrono_tz::UTC).unwrap();
             let cycle = super::active_cycle_id(&ledger.connection).unwrap();
             insert_natural_objects(&ledger, &cycle, 300);
-            ledger.connection.execute(
-                "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
-                 VALUES ('expanded-funds',100000000,'2026-10-01T00:00:00Z')", [],
-            ).unwrap();
+            ledger
+                .connection
+                .execute(
+                    "INSERT INTO planet_wallet_credit(previous_cycle_id,amount,created_at_utc)
+                 VALUES ('expanded-funds',100000000,'2026-10-01T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
             let now = chrono::DateTime::parse_from_rfc3339("2026-10-01T12:00:00Z")
-                .unwrap().with_timezone(&chrono::Utc);
-            let quote = ledger.quote_shop(&QuoteTarget::Purchase { sku: "land_pond".into() }).unwrap();
-            let purchase = ledger.apply_guest_shop_request(
-                &ShopRequest::Purchase { request_id: "expanded-purchase".into(), quote }, now,
-            ).unwrap();
+                .unwrap()
+                .with_timezone(&chrono::Utc);
+            let quote = ledger
+                .quote_shop(&QuoteTarget::Purchase {
+                    sku: "land_pond".into(),
+                })
+                .unwrap();
+            let purchase = ledger
+                .apply_guest_shop_request(
+                    &ShopRequest::Purchase {
+                        request_id: "expanded-purchase".into(),
+                        quote,
+                    },
+                    now,
+                )
+                .unwrap();
             let id = purchase.state.landscape_instances[0].instance_id.clone();
-            let result = ledger.apply_guest_shop_request(&ShopRequest::Place {
-                request_id: "expanded-place".into(), cycle_id: cycle,
-                instance_id: id.clone(), expected_version: 0, x: 160.0, y: 700.0,
-            }, now).unwrap();
-            let saved = ledger.shop_state().unwrap().placements.into_iter().find(|p| p.instance_id == id);
+            let result = ledger
+                .apply_guest_shop_request(
+                    &ShopRequest::Place {
+                        request_id: "expanded-place".into(),
+                        cycle_id: cycle,
+                        instance_id: id.clone(),
+                        expected_version: 0,
+                        x: 160.0,
+                        y: 700.0,
+                    },
+                    now,
+                )
+                .unwrap();
+            let saved = ledger
+                .shop_state()
+                .unwrap()
+                .placements
+                .into_iter()
+                .find(|p| p.instance_id == id);
             sender.send((result.status, saved)).unwrap();
         });
-        let (status, saved) = receiver.recv_timeout(std::time::Duration::from_secs(2))
+        let (status, saved) = receiver
+            .recv_timeout(std::time::Duration::from_secs(2))
             .expect("saving on expanded terrain must terminate");
         assert_eq!(status, ShopActionStatus::Placed);
         let saved = saved.unwrap();
         assert_eq!((saved.x, saved.y, saved.version), (160.0, 700.0, 1));
     }
-
 }

@@ -719,6 +719,9 @@ mod local_api_e2e_probe {
         claude_root: PathBuf,
     ) -> AppState {
         let state = AppState {
+            lifecycle: crate::lifecycle::LocalLifecycle::new(
+                &crate::domain::device_reset::DeviceResetState::default(),
+            ),
             config: Mutex::new(SourceConfig {
                 codex_root,
                 claude_root,
@@ -1440,12 +1443,12 @@ mod local_api_e2e_probe {
         .expect("the imported owner must share through the existing world API");
         std::fs::write(&world_id_path, &world.id)
             .expect("the owned runner needs the world id for targeted cleanup");
-        let invite = tauri::async_runtime::block_on(client.create_world_invite(&user_token, &world.id))
-            .expect("the owner must issue a single-use world invitation");
-        let joined = tauri::async_runtime::block_on(
-            client.accept_world_invite(&viewer_token, &invite.code),
-        )
-        .expect("the distinct viewer must join through the existing world API");
+        let invite =
+            tauri::async_runtime::block_on(client.create_world_invite(&user_token, &world.id))
+                .expect("the owner must issue a single-use world invitation");
+        let joined =
+            tauri::async_runtime::block_on(client.accept_world_invite(&viewer_token, &invite.code))
+                .expect("the distinct viewer must join through the existing world API");
         assert_eq!(joined.world_id.as_deref(), Some(world.id.as_str()));
 
         let hidden = tauri::async_runtime::block_on(client.world_planets(&viewer_token, &world.id))

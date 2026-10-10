@@ -25,8 +25,7 @@ fn cached_journal(state: &AppState) -> Result<GrowthJournal, String> {
         .map_err(|_| "일지를 읽을 수 없습니다".to_string())
 }
 
-#[tauri::command]
-pub async fn get_growth_journal(state: State<'_, AppState>) -> Result<GrowthJournal, String> {
+pub async fn get_growth_journal_inner(state: State<'_, AppState>) -> Result<GrowthJournal, String> {
     let _gate = state.sync_gate.lock().await;
     let Some(config) = AuthConfig::from_env() else {
         return local_journal(&state);
@@ -65,8 +64,9 @@ pub async fn get_growth_journal(state: State<'_, AppState>) -> Result<GrowthJour
     }
 }
 
-#[tauri::command]
-pub async fn delete_growth_journal(state: State<'_, AppState>) -> Result<GrowthJournal, String> {
+pub async fn delete_growth_journal_inner(
+    state: State<'_, AppState>,
+) -> Result<GrowthJournal, String> {
     let _gate = state.sync_gate.lock().await;
     let config = AuthConfig::from_env().ok_or("로그인 상태에서 개인 일지를 삭제할 수 있습니다")?;
     let store = SessionStore::new(&config).map_err(|_| "보안 저장소를 열 수 없습니다")?;
@@ -98,4 +98,44 @@ pub async fn delete_growth_journal(state: State<'_, AppState>) -> Result<GrowthJ
     ledger
         .growth_journal()
         .map_err(|_| "일지를 읽을 수 없습니다".to_string())
+}
+
+#[tauri::command]
+pub async fn get_growth_journal(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<GrowthJournal>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = get_growth_journal_inner(state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
+}
+
+#[tauri::command]
+pub async fn delete_growth_journal(
+    state: State<'_, AppState>,
+    context: crate::domain::device_reset::LocalContext,
+) -> Result<
+    crate::domain::device_reset::LocalEnvelope<GrowthJournal>,
+    crate::domain::device_reset::LocalCommandError,
+> {
+    let permit = state.lifecycle.enter(context.generation).await?;
+    let result = delete_growth_journal_inner(state.clone()).await;
+    result
+        .map(|data| crate::domain::device_reset::LocalEnvelope {
+            generation: permit.generation(),
+            data,
+        })
+        .map_err(|error| {
+            crate::domain::device_reset::LocalCommandError::from_error(permit.generation(), error)
+        })
 }

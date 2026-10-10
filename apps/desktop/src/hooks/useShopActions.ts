@@ -1,10 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { invoke } from "@tauri-apps/api/core";
+import { invokeLocal as invoke } from "../lib/localLifecycle";
 import type { ShopActionResult, ShopQuote, ShopQuoteTarget, ShopRequest, ShopState } from "../types/usage";
 
 export type ShopContext = Readonly<{
   /** Canonical account key returned by ShopState ("local" for the local guest). */
   account_id: string;
+  local_generation: number;
   current_cycle_id: string;
   is_guest: boolean;
   online: boolean;
@@ -64,7 +65,7 @@ const defaultTransport: ShopActionsTransport = {
 };
 
 function contextKey(context: ShopContext): string {
-  return JSON.stringify([context.account_id, context.current_cycle_id]);
+  return JSON.stringify([context.account_id, context.current_cycle_id, context.local_generation]);
 }
 
 function sameToken(left: ContextToken | null | undefined, right: ContextToken): boolean {

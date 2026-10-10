@@ -1,3 +1,4 @@
+import { resetLocalLifecycleForTests } from "../lib/localLifecycle";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
 import App from "../App";
@@ -6,9 +7,16 @@ import type { SharingState } from "../lib/sharing";
 import type { GrowthJournal as GrowthJournalData, ShopActionResult, ShopQuote, ShopRequest, ShopState, WorldSnapshot } from "../types/usage";
 
 const invokeMock = vi.hoisted(() => vi.fn());
+const resetViewMock = vi.hoisted(() => vi.fn());
 const listenMock = vi.hoisted(() => vi.fn());
 const isTauriMock = vi.hoisted(() => vi.fn(() => false));
-vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock, isTauri: isTauriMock }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: async (command: string, args?: unknown) => {
+  const view = resetViewMock();
+  const generation = view.state.generation;
+  if (command === "get_device_reset_state") return {generation,data:view};
+  try { const data = await (args === undefined ? invokeMock(command) : invokeMock(command,args)); return {generation,data}; }
+  catch (details) { throw {generation,code:"command_failed",details}; }
+}, isTauri: isTauriMock }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: listenMock }));
 const listeners = new Map<string, (event: unknown) => void>();
 
@@ -19,6 +27,7 @@ const ownerState: SharingState = {
   planet_members: [],
 };
 const localSnapshot: WorldSnapshot = {
+  generation:0, planet_ordinal:{status:"verified",current:1},
   usage: {
     codex: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: 42, coverage: "complete" },
     claude_code: { input_tokens: null, output_tokens: null, cache_read_tokens: null, cache_write_tokens: null, total_tokens: null, coverage: "unavailable" },
@@ -129,13 +138,21 @@ it("starts anonymous sharing without email sign-in", async () => {
 });
 
 beforeEach(() => {
+  resetLocalLifecycleForTests();
   window.history.replaceState({}, "", "/");
   invokeMock.mockReset();
+  resetViewMock.mockReturnValue({state:{generation:0,phase:"idle",request_id:null},actions_blocked:false,storage_completed:false});
   listenMock.mockReset();
   isTauriMock.mockReturnValue(false);
   listeners.clear();
   listenMock.mockImplementation(async (event: string, handler: (event: unknown) => void) => {
-    listeners.set(event, handler);
+    listeners.set(event, (incoming: unknown) => {
+      const item = incoming as {payload:unknown};
+      if (event === "usage-updated") {
+        const payload = item.payload as WorldSnapshot;
+        handler({payload:{generation:payload.generation,data:payload}});
+      } else handler(incoming);
+    });
     return () => {};
   });
   Object.defineProperty(navigator, "onLine", { configurable: true, value: true });
@@ -556,7 +573,7 @@ it("keeps a canonical shop load error visible when leaving and reopening the sho
   render(<App />);
 
   await screen.findByText("Orbit의 행성");
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_shop_state"));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_shop_state", {context:{generation:0}}));
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   fireEvent.click(await screen.findByRole("button", { name: "행성 상점" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("상점 상태를 불러오지 못했습니다.");
@@ -622,7 +639,7 @@ it("does not offer personal journal deletion in a signed-out local phase", async
 
   expect(journalRegion.querySelector(".growth-journal-total")?.textContent).toContain("123,456");
   expect(within(journalRegion).queryByRole("button", { name: "개인 일지 삭제" })).not.toBeInTheDocument();
-  expect(invokeMock).not.toHaveBeenCalledWith("delete_growth_journal");
+  expect(invokeMock).not.toHaveBeenCalledWith("delete_growth_journal", {context:{generation:0}});
 });
 
 it.each(["shared", "signed_in"] as const)("requires confirmation and then applies journal deletion for %s users", async (phase) => {
@@ -651,7 +668,7 @@ it.each(["shared", "signed_in"] as const)("requires confirmation and then applie
 
   fireEvent.click(deleteButton);
   expect(confirm).toHaveBeenCalled();
-  expect(invokeMock).not.toHaveBeenCalledWith("delete_growth_journal");
+  expect(invokeMock).not.toHaveBeenCalledWith("delete_growth_journal", {context:{generation:0}});
   expect(journalRegion.querySelector(".growth-journal-total")?.textContent).toContain("123,456");
 
   confirm.mockReturnValue(true);
@@ -659,7 +676,7 @@ it.each(["shared", "signed_in"] as const)("requires confirmation and then applie
 
   expect(await within(journalRegion).findByText("확인된 행성 주기가 없습니다.")).toBeInTheDocument();
   expect(journalRegion.querySelector(".growth-journal-total")).toBeNull();
-  expect(invokeMock).toHaveBeenCalledWith("delete_growth_journal");
+  expect(invokeMock).toHaveBeenCalledWith("delete_growth_journal", {context:{generation:0}});
 });
 
 it("shows a retryable journal error after delete fails", async () => {
@@ -1242,9 +1259,9 @@ it("allows reset for a signed account with a matching canonical shop state", asy
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet", expect.objectContaining({context:{generation:0},expected:expect.objectContaining({generation:0,current_cycle_id:"cycle-1"})})));
   await screen.findByText("다시 시작의 행성");
   confirm.mockRestore();
 });
@@ -1277,21 +1294,21 @@ it("reports a confirmed signed reset as complete and offers refresh without anot
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
 
-  const confirmedNotice = await screen.findByText("서버에서 초기화가 완료됐습니다. 화면 갱신만 필요합니다.");
-  expect(confirmedNotice.closest('[role="status"]')).toHaveTextContent("서버에서 초기화가 완료됐습니다");
-  expect(screen.getByRole("button", { name: "초기화 완료" })).toBeDisabled();
+  const confirmedNotice = await screen.findByText("서버에서 행성 이동이 완료됐습니다. 화면 갱신만 필요합니다.");
+  expect(confirmedNotice.closest('[role="status"]')).toHaveTextContent("서버에서 행성 이동이 완료됐습니다");
+  expect(screen.getByRole("button", { name: "이동 완료" })).toBeDisabled();
   expect(screen.queryByText("행성을 초기화하지 못했습니다.")).not.toBeInTheDocument();
-  fireEvent.click(screen.getByRole("button", { name: "초기화 완료" }));
+  fireEvent.click(screen.getByRole("button", { name: "이동 완료" }));
   expect(invokeMock.mock.calls.filter(([command]) => command === "reset_planet")).toHaveLength(1);
 
-  fireEvent.click(screen.getByRole("button", { name: "완료된 초기화 상태 새로고침" }));
+  fireEvent.click(screen.getByRole("button", { name: "완료된 이동 상태 새로고침" }));
   await screen.findByText("새 행성의 행성");
-  expect(invokeMock).toHaveBeenCalledWith("refresh_usage");
+  expect(invokeMock).toHaveBeenCalledWith("refresh_usage", {context:{generation:0}});
   expect(invokeMock.mock.calls.filter(([command]) => command === "reset_planet")).toHaveLength(1);
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
   confirm.mockRestore();
 });
 
@@ -1315,12 +1332,12 @@ it.each(["account", "cycle", "request"] as const)("treats mismatched confirmed-r
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
 
   expect(await screen.findByText("행성을 초기화하지 못했습니다.")).toBeInTheDocument();
-  expect(screen.queryByText("서버에서 초기화가 완료됐습니다. 화면 갱신만 필요합니다.")).not.toBeInTheDocument();
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
+  expect(screen.queryByText("서버에서 행성 이동이 완료됐습니다. 화면 갱신만 필요합니다.")).not.toBeInTheDocument();
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
   expect(invokeMock.mock.calls.filter(([command]) => command === "reset_planet")).toHaveLength(1);
   confirm.mockRestore();
 });
@@ -1345,11 +1362,11 @@ it.each(["cooldown", "account", "cycle", "paused", "guest-import"] as const)("bl
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  if (mismatch !== "paused") await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_shop_state"));
-  const resetButton = screen.getByRole("button", { name: "행성 초기화" });
+  if (mismatch !== "paused") await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("get_shop_state", {context:{generation:0}}));
+  const resetButton = screen.getByRole("button", { name: "다음 행성으로" });
   expect(resetButton).toBeDisabled();
   fireEvent.click(resetButton);
-  expect(invokeMock).not.toHaveBeenCalledWith("reset_planet");
+  expect(invokeMock).not.toHaveBeenCalledWith("reset_planet", expect.objectContaining({context:{generation:0},expected:expect.objectContaining({generation:0,current_cycle_id:"cycle-1"})}));
 });
 
 it("allows a signed retry after an ordinary held or uncertain reset response", async () => {
@@ -1372,15 +1389,15 @@ it("allows a signed retry after an ordinary held or uncertain reset response", a
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
   expect(await screen.findByText("초기화 결과를 확인할 수 없습니다. 같은 요청으로 재시도합니다.")).toBeInTheDocument();
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
   await screen.findByText("Orbit의 행성");
   await waitFor(() => expect(resetCalls).toBe(2));
   expect(invokeMock.mock.calls.filter(([command]) => command === "reset_planet")).toEqual([
-    ["reset_planet"], ["reset_planet"],
+    ["reset_planet", expect.any(Object)], ["reset_planet", expect.any(Object)],
   ]);
   confirm.mockRestore();
 });
@@ -1409,9 +1426,9 @@ it("ignores a late signed reset success after the account changes", async () => 
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet", expect.objectContaining({context:{generation:0},expected:expect.objectContaining({generation:0,current_cycle_id:"cycle-1"})})));
 
   currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null, sync_status: "synced" };
   currentSnapshot = nextSnapshot;
@@ -1446,9 +1463,9 @@ it("ignores a late signed reset rejection after the cycle changes", async () => 
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet", expect.objectContaining({context:{generation:0},expected:expect.objectContaining({generation:0,current_cycle_id:"cycle-1"})})));
 
   currentSnapshot = nextSnapshot;
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
@@ -1471,9 +1488,9 @@ it("keeps the local reset action for an eligible guest", async () => {
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled();
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+  expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled();
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet", expect.objectContaining({context:{generation:0},expected:expect.objectContaining({generation:0,current_cycle_id:"cycle-1"})})));
   confirm.mockRestore();
 });
 
@@ -1491,9 +1508,9 @@ it("drops a guest reset click when account context starts changing during confir
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
   expect(confirm).toHaveBeenCalledTimes(1);
-  expect(invokeMock).not.toHaveBeenCalledWith("reset_planet");
+  expect(invokeMock).not.toHaveBeenCalledWith("reset_planet", expect.objectContaining({context:{generation:0},expected:expect.objectContaining({generation:0,current_cycle_id:"cycle-1"})}));
 });
 
 it("does not replace a new account snapshot with a pending old guest reset result", async () => {
@@ -1520,8 +1537,8 @@ it("does not replace a new account snapshot with a pending old guest reset resul
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet", expect.objectContaining({context:{generation:0},expected:expect.objectContaining({generation:0,current_cycle_id:"cycle-1"})})));
 
   currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null, sync_status: "synced" };
   currentSnapshot = nextSnapshot;
@@ -1555,8 +1572,8 @@ it("does not show a rejected old guest reset on the new account", async () => {
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
-  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet"));
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
+  await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("reset_planet", expect.objectContaining({context:{generation:0},expected:expect.objectContaining({generation:0,current_cycle_id:"cycle-1"})})));
 
   currentAccount = { ...ownerState, user_id: "next-account", phase: "signed_in", world: null, sync_status: "synced" };
   currentSnapshot = nextSnapshot;
@@ -1590,14 +1607,14 @@ it("does not let an old reset completion clear the new cycle reset pending state
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
   await waitFor(() => expect(resetCalls).toBe(1));
 
   currentSnapshot = nextSnapshot;
   await act(async () => { listeners.get("sync-status-updated")?.({ payload: null }); });
   await screen.findByText("새 주기의 행성");
-  await waitFor(() => expect(screen.getByRole("button", { name: "행성 초기화" })).toBeEnabled());
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "다음 행성으로" })).toBeEnabled());
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
   await waitFor(() => expect(resetCalls).toBe(2));
 
   await act(async () => { firstReset.resolve(staleSnapshot); });
@@ -1622,7 +1639,7 @@ it("explains reset effects and group visibility before the user acts", async () 
   await screen.findByText("Orbit의 행성");
   fireEvent.click(screen.getByRole("button", { name: "행성·그룹 자세히 보기" }));
   await screen.findByRole("tab", { name: "내 행성" });
-  fireEvent.click(screen.getByRole("button", { name: "행성 초기화" }));
+  fireEvent.click(screen.getByRole("button", { name: "다음 행성으로" }));
   expect(confirm).toHaveBeenCalledWith(expect.stringContaining("지갑"));
   expect(confirm).toHaveBeenCalledWith(expect.stringContaining("자연 생태계"));
   fireEvent.click(screen.getByRole("tab", { name: "그룹" }));
@@ -1686,6 +1703,7 @@ it("offers removal for a selected generated object in the local guest planet", a
   const dialog = await screen.findByRole("dialog", { name: "바위 제거 확인" });
   expect(dialog).toHaveTextContent("최종 제거 비용 100K 토큰");
   expect(invokeMock).toHaveBeenCalledWith("quote_shop_action", {
+    context:{generation:0},
     target: { kind: "remove_natural", key: naturalKey },
   });
   expect(applied).toHaveLength(0);
@@ -2259,6 +2277,7 @@ it("quotes and removes an authenticated user's natural object using canonical sh
   expect(dialog).toHaveTextContent("현재 잔액 100K 토큰");
   expect(dialog).toHaveTextContent("최종 제거 비용 100K 토큰");
   expect(invokeMock).toHaveBeenCalledWith("quote_shop_action", {
+    context:{generation:0},
     target: { kind: "remove_natural", key },
   });
   fireEvent.click(within(dialog).getByRole("button", { name: "제거 확인" }));
@@ -2526,4 +2545,92 @@ it("shows a join failure and permits the same invitation retry without legacy fa
   await screen.findByRole("button", {name: "초대 발급"});
   expect(attempts).toBe(2);
   expect(invokeMock.mock.calls.some(([name]) => ["get_my_member_code","rotate_my_member_code"].includes(name))).toBe(false);
+});
+
+it("shows recorded current and next planet numbers before moving", async () => {
+  const snapshot = {...structuredClone(localSnapshot), generation:0, planet_ordinal:{status:"verified",current:4}};
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "current_usage") return snapshot;
+    if (command === "get_sharing_state") return {...ownerState,phase:"signed_out",user_id:null,world:null,sync_status:"local"};
+    return null;
+  });
+  const confirm = vi.spyOn(window,"confirm").mockReturnValue(false);
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button",{name:"행성·그룹 자세히 보기"}));
+  fireEvent.click(await screen.findByRole("button",{name:"다음 행성으로"}));
+  expect(confirm).toHaveBeenCalledWith(expect.stringMatching(/4번째.*5번째/));
+  expect(invokeMock.mock.calls.some(([command]) => command === "reset_planet")).toBe(false);
+});
+
+it("rechecks a missed reset on focus and ignores old usage events", async () => {
+  let generation = 0;
+  const fresh = {...structuredClone(localSnapshot),generation:1,planet:{...localSnapshot.planet,profile:{nickname:"Fresh",avatar:"masculine"}}};
+  invokeMock.mockImplementation(async (command: string) => {
+    if (command === "current_usage") return generation === 0 ? localSnapshot : fresh;
+    if (command === "get_sharing_state") return {...ownerState,phase:"signed_out",user_id:null,world:null,sync_status:"local"};
+    return null;
+  });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  generation = 1;
+  resetViewMock.mockReturnValue({state:{generation:1,phase:"completed",request_id:"reset"},actions_blocked:false,storage_completed:true});
+  fireEvent(window,new Event("focus"));
+  await screen.findByText("Fresh의 행성");
+  act(() => listeners.get("usage-updated")?.({payload:localSnapshot}));
+  expect(screen.queryByText("Orbit의 행성")).not.toBeInTheDocument();
+  expect(screen.getByText("Fresh의 행성")).toBeInTheDocument();
+});
+it("offers device reset before profile creation", async () => {
+  const snapshot = {...structuredClone(localSnapshot),planet:{...localSnapshot.planet,profile:null}};
+  invokeMock.mockImplementation(async (command: string) => command === "current_usage" ? snapshot : command === "get_sharing_state" ? {...ownerState,phase:"signed_out",user_id:null,world:null,sync_status:"local"} : null);
+  render(<App />);
+  await screen.findByLabelText("행성에서 사용할 닉네임");
+  fireEvent.click(screen.getByRole("button",{name:"기기 데이터 전체 초기화"}));
+  expect(screen.getByRole("dialog",{name:"기기 데이터 전체 초기화 확인"})).toBeInTheDocument();
+  fireEvent.click(screen.getByRole("button",{name:"취소"}));
+  expect(invokeMock.mock.calls.some(([command]) => command === "reset_device_data")).toBe(false);
+});
+
+it("shows an explicit unknown ordinal instead of guessing from balance", async () => {
+  const snapshot = {...structuredClone(localSnapshot),planet_ordinal:{status:"unknown",current:null}};
+  invokeMock.mockImplementation(async (command: string) => command === "current_usage" ? snapshot : command === "get_sharing_state" ? {...ownerState,phase:"signed_out",user_id:null,world:null,sync_status:"local"} : null);
+  const confirm = vi.spyOn(window,"confirm").mockReturnValue(false);
+  render(<App />);
+  fireEvent.click(await screen.findByRole("button",{name:"행성·그룹 자세히 보기"}));
+  fireEvent.click(await screen.findByRole("button",{name:"다음 행성으로"}));
+  expect(confirm).toHaveBeenCalledWith(expect.stringContaining("현재 행성 순서를 확인할 수 없습니다"));
+});
+
+for (const mode of ["signed-in", "usage-error"] as const) {
+  it(`offers device reset on the ${mode} screen`, async () => {
+    invokeMock.mockImplementation(async (command: string) => {
+      if (command === "current_usage") {
+        if (mode === "usage-error") throw new Error("isolated ledger failure");
+        return structuredClone(localSnapshot);
+      }
+      if (command === "get_sharing_state") return { ...ownerState, phase: "signed_in", world: null };
+      return null;
+    });
+    render(<App />);
+    if (mode === "usage-error") await screen.findByText("기기 안의 사용량 원장을 열지 못했습니다.");
+    else await screen.findByText("Orbit의 행성");
+    fireEvent.click(screen.getByRole("button", { name: "기기 데이터 전체 초기화" }));
+    expect(screen.getByRole("dialog", { name: "기기 데이터 전체 초기화 확인" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "취소" }));
+    expect(invokeMock.mock.calls.some(([command]) => command === "reset_device_data")).toBe(false);
+  });
+}
+
+it("keeps the completed reset screen when older phases arrive late", async () => {
+  const fresh = { ...structuredClone(localSnapshot), generation: 1 };
+  invokeMock.mockImplementation(async (command: string) => command === "current_usage" ? fresh : command === "get_sharing_state" ? { ...ownerState, phase: "signed_out", user_id: null, world: null, sync_status: "local" } : null);
+  resetViewMock.mockReturnValue({ state: { generation: 1, phase: "completed", request_id: "reset" }, actions_blocked: false, storage_completed: true });
+  render(<App />);
+  await screen.findByText("Orbit의 행성");
+  for (const phase of ["pending", "local_committed"]) {
+    await act(async () => listeners.get("device-reset-updated")?.({ payload: { generation: 1, data: { state: { generation: 1, phase, request_id: "reset" }, actions_blocked: true, storage_completed: phase === "local_committed" } } }));
+    expect(screen.getByRole("button", { name: "기기 데이터 전체 초기화" })).not.toBeDisabled();
+    expect(screen.queryByRole("button", { name: "진행 중인 초기화 복구" })).not.toBeInTheDocument();
+    expect(screen.getByText("Orbit의 행성")).toBeInTheDocument();
+  }
 });

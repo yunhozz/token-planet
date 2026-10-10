@@ -80,20 +80,51 @@ fn can_save_refresh(current: &StoredSession, latest: Option<&StoredSession>) -> 
     latest == Some(current)
 }
 
+pub trait LocalSessionRemover: Send + Sync {
+    fn service_id(&self) -> Result<String, AuthError>;
+    fn remove_local_session(&self) -> Result<(), AuthError>;
+}
+
 pub struct SessionStore {
     entry: Entry,
+    service_id: String,
+}
+
+pub fn session_service_id(config: &AuthConfig) -> String {
+    Sha256::digest(config.base_url.as_bytes())
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+impl LocalSessionRemover for SessionStore {
+    fn service_id(&self) -> Result<String, AuthError> {
+        Ok(self.service_id.clone())
+    }
+    fn remove_local_session(&self) -> Result<(), AuthError> {
+        SessionStore::remove_local_session(self)
+    }
 }
 
 impl SessionStore {
     pub fn new(config: &AuthConfig) -> Result<Self, AuthError> {
-        let id = Sha256::digest(config.base_url.as_bytes());
-        let username = id
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
-        let entry =
-            Entry::new("Token Planet session", &username).map_err(|_| AuthError::CredentialStore)?;
-        Ok(Self { entry })
+        Self::from_service_id(&session_service_id(config))
+    }
+
+    pub fn from_service_id(service_id: &str) -> Result<Self, AuthError> {
+        if service_id.len() != 64
+            || !service_id
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return Err(AuthError::CredentialStore);
+        }
+        let entry = Entry::new("Token Planet session", service_id)
+            .map_err(|_| AuthError::CredentialStore)?;
+        Ok(Self {
+            entry,
+            service_id: service_id.to_owned(),
+        })
     }
 
     pub fn load(&self) -> Result<Option<StoredSession>, AuthError> {
@@ -102,6 +133,13 @@ impl SessionStore {
                 .map(Some)
                 .map_err(|_| AuthError::InvalidResponse),
             Err(KeyringError::NoEntry) => Ok(None),
+            Err(_) => Err(AuthError::CredentialStore),
+        }
+    }
+
+    pub fn remove_local_session(&self) -> Result<(), AuthError> {
+        match self.entry.delete_credential() {
+            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
             Err(_) => Err(AuthError::CredentialStore),
         }
     }
@@ -192,7 +230,10 @@ mod tests {
     #[test]
     fn token_planet_environment_configures_auth() {
         let _env_guard = super::AUTH_ENV_LOCK.lock().unwrap();
-        let names = ["TOKEN_PLANET_SUPABASE_URL", "TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY"];
+        let names = [
+            "TOKEN_PLANET_SUPABASE_URL",
+            "TOKEN_PLANET_SUPABASE_PUBLISHABLE_KEY",
+        ];
         let previous = names.map(|name| std::env::var(name).ok());
         std::env::set_var(names[0], "https://planet.example.test/");
         std::env::set_var(names[1], "sb_publishable_example");
@@ -240,5 +281,61 @@ mod tests {
         assert!(can_save_refresh(&original, Some(&original)));
         assert!(!can_save_refresh(&original, None));
         assert!(!can_save_refresh(&original, Some(&replacement)));
+    }
+
+    fn fake_store() -> super::SessionStore {
+        super::SessionStore {
+            entry: keyring::Entry::new_with_credential(Box::new(
+                keyring::mock::MockCredential::default(),
+            )),
+            service_id: "f".repeat(64),
+        }
+    }
+
+    #[test]
+    fn local_reset_session_missing_is_success() {
+        let store = fake_store();
+        assert!(store.remove_local_session().is_ok());
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn local_reset_session_corrupt_json_can_be_removed() {
+        let store = fake_store();
+        store.entry.set_password("{broken-json").unwrap();
+        assert!(store.load().is_err());
+        store.remove_local_session().unwrap();
+        assert!(store.load().unwrap().is_none());
+    }
+
+    #[test]
+    fn local_reset_session_targets_only_current_service() {
+        let store = fake_store();
+        let other = fake_store();
+        store.entry.set_password("private-current").unwrap();
+        other.entry.set_password("private-other").unwrap();
+        store.remove_local_session().unwrap();
+        assert!(matches!(
+            store.entry.get_password(),
+            Err(keyring::Error::NoEntry)
+        ));
+        assert_eq!(other.entry.get_password().unwrap(), "private-other");
+    }
+
+    #[test]
+    fn local_reset_session_delete_failure_is_error() {
+        let store = fake_store();
+        store.entry.set_password("private-current").unwrap();
+        store
+            .entry
+            .get_credential()
+            .downcast_ref::<keyring::mock::MockCredential>()
+            .unwrap()
+            .set_error(keyring::Error::Invalid("entry".into(), "denied".into()));
+        assert!(matches!(
+            store.remove_local_session(),
+            Err(super::AuthError::CredentialStore)
+        ));
+        assert_eq!(store.entry.get_password().unwrap(), "private-current");
     }
 }

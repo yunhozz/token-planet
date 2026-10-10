@@ -1,3 +1,4 @@
+import { acceptResetView, resetLocalLifecycleForTests } from "../../lib/localLifecycle";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { SharingSetup } from "../SharingSetup";
@@ -8,9 +9,14 @@ import { planetGrowth, type SharingState } from "../../lib/sharing";
 import type { WorldPlanet } from "../../types/usage";
 
 const invokeMock = vi.hoisted(() => vi.fn());
-vi.mock("@tauri-apps/api/core", () => ({ invoke: invokeMock }));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: async (command: string, args?: unknown) => {
+  try { const data = await invokeMock(command,args); return {generation:0,data}; }
+  catch (details) { throw {generation:0,code:"command_failed",details}; }
+} }));
 const issued = { invite_id: "invite-one", code: "a".repeat(64), created_at: "2026-10-08T00:00:00Z", expires_at: "2026-10-15T00:00:00Z" };
 beforeEach(() => {
+  resetLocalLifecycleForTests();
+  acceptResetView({state:{generation:0,phase:"idle",request_id:null},actions_blocked:false,storage_completed:false});
   invokeMock.mockReset().mockImplementation(async (command: string) => {
     if (command === "list_world_invites") return [];
     if (command === "create_world_invite") return issued;
@@ -107,7 +113,7 @@ describe("shared world controls", () => {
     fireEvent.click(screen.getByRole("button", { name: "초대 코드 복사" }));
     await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("복사"));
     expect(clipboard).toHaveBeenCalledWith(issued.code);
-    expect(invokeMock).toHaveBeenCalledWith("create_world_invite");
+    expect(invokeMock).toHaveBeenCalledWith("create_world_invite", {context:{generation:0}});
   });
 
   it("prevents duplicate invitation issuance while the request is pending", async () => {
@@ -314,7 +320,7 @@ describe("shared world controls", () => {
     render(<InvitePanel memberCount={2} isOwner contextKey="owner" />);
     expect(await screen.findByText("사용 가능")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "초대 철회" }));
-    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("revoke_world_invite", {inviteId: "invite-one"}));
+    await waitFor(() => expect(invokeMock).toHaveBeenCalledWith("revoke_world_invite", {inviteId: "invite-one",context:{generation:0}}));
     expect(screen.getByText(/정확한 값과 순위/)).toBeInTheDocument();
   });
 

@@ -8,3 +8,5 @@ mod planet_accounts;
 pub mod shop_effects;
 mod shop_import;
 pub use shop_import::PendingGuestShopImport;
+
+pub mod device_reset;

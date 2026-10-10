@@ -830,3 +830,16 @@ button:focus-visible, input:focus-visible, select:focus-visible, :focus-visible 
 
 .planet-landscape-object-detail .planet-landscape-shop-selection { display: block; padding: 0; border: 0; background: transparent; }
 .planet-landscape-object-detail .planet-landscape-shop-selection-actions { margin-top: 16px; }
+
+.device-reset-panel { padding: 8px 12px; font-size: 12px; }
+.device-reset-panel > button { font: inherit; color: var(--text-muted, #564f67); border: 1px solid currentColor; border-radius: 6px; background: transparent; padding: 6px 10px; }
+.device-reset-dialog { position: fixed; z-index: 1000; inset: 0; overflow: auto; background: #f8f6ef; color: #292636; padding: clamp(16px, 5vw, 40px); display: flex; flex-direction: column; justify-content: safe center; gap: 16px; }
+.device-reset-dialog p { max-width: 640px; margin: 0 auto; line-height: 1.6; }
+.device-reset-dialog button { width: min(100%, 640px); margin: 0 auto; padding: 12px; font: inherit; }
+.device-reset-dialog button:first-of-type { background: #73353a; color: #fff; border: 0; }
+
+.local-app-shell { display: flex; flex-direction: column; height: 100vh; overflow: hidden; background: var(--night); }
+.local-app-shell > .app-shell, .local-app-shell > .setup-screen { flex: 1; min-height: 0; height: auto; overflow: auto; }
+.local-app-shell > .app-shell--popover { overflow: hidden; }
+.local-app-shell > .device-reset-panel { flex: none; color: var(--muted); }
+.local-app-shell > .device-reset-panel > button { color: var(--muted); }
